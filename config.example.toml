@@ -1,0 +1,79 @@
+# Copy to config.toml. Values written as "env:NAME" are read from environment variables (.env).
+
+[database]
+# Overridden by the DATABASE_URL env var (docker-compose sets it).
+url = "postgresql+psycopg://netinv:change-me@localhost:5432/netinv"
+
+[server]
+ui_user = "admin"                 # HTTP basic auth for the dashboard; leave empty to disable
+ui_password = "env:UI_PASSWORD"
+ingest_token = "env:INGEST_TOKEN" # only needed for the optional push agent
+
+# [ad], [winrm] and [snmp] are only used until you add scan targets in the Settings tab of the dashboard,
+# where credentials are stored encrypted. Keep them here only for a headless setup.
+[ad]
+server = "dc01.corp.example.com"  # any DC
+base_dn = "DC=corp,DC=example,DC=com"
+user = "CORP\\svc-netinv"         # any domain user can read these attributes
+password = "env:AD_PASSWORD"
+use_ssl = true                    # LDAPS (636). Set false for 389 if LDAPS isn't set up.
+verify_tls = true
+# ca_file = "/app/corp-root-ca.pem"
+
+[winrm]
+user = "CORP\\svc-netinv"         # local admin on PCs (via GPO/Restricted Groups) + Event Log Readers on DCs
+password = "env:WINRM_PASSWORD"
+auth = "negotiate"                # negotiate (NTLM/Kerberos) or kerberos
+use_ssl = false                   # HTTP 5985 is still message-encrypted with negotiate; true = HTTPS 5986
+verify_tls = true
+parallel = 16
+timeout = 120
+active_days = 30                  # only poll PCs that logged on to AD in the last N days
+include_servers = false
+local_logon_days = 14             # read interactive/RDP logons from each PC's Security log
+dc_initial_days = 7               # first DC log pull goes back this far; later pulls are incremental
+dc_max_events = 50000
+# hosts = ["WS-001", "WS-002"]    # optional: poll only these instead of everything in AD
+
+[snmp]
+version = "2c"                    # "2c" or "3"
+community = "env:SNMP_COMMUNITY"
+# v3_user = "netinv"
+# v3_auth_key = "env:SNMP_AUTH"   # SHA
+# v3_priv_key = "env:SNMP_PRIV"   # AES-128
+targets = ["10.0.0.1", "10.0.0.10", "10.0.0.11"]  # switches + core router; CIDRs like "10.0.0.0/27" work too
+uplink_mac_threshold = 6          # ports with more MACs than this are treated as uplinks (unmanaged switch / AP / trunk)
+timeout = 3
+retries = 1
+
+[schedule]                        # minutes; 0 disables
+enabled = true
+ad = 60
+snmp = 15
+pcs = 240
+pcs_updates = 1440                # the pending-updates search is slow, so it runs daily
+dc_logons = 30
+
+[insights]
+low_disk_pct = 10
+low_disk_gb = 10
+patch_age_days = 35
+stale_ad_days = 90
+uptime_days = 30
+# Override or add OS end-of-support dates: "Product|Version|edition" = "YYYY-MM-DD"
+# [insights.os_eol]
+# "Windows 11|26H1|pro" = "2028-03-14"
+
+# Outdated software rules (regex on the Add/Remove Programs name). If none are listed,
+# the built-in defaults in netinv/reports.py are used.
+# [[outdated_software]]
+# match = "^Google Chrome$"
+# min_version = "142.0"
+# [[outdated_software]]
+# match = "Office .*(2013|2016)"
+# eol = true
+# label = "Office 2016 or older"
+
+[update]                          # updates come from github.com/userxx09-afk/prod (release lan-latest)
+check_hours = 24                  # 0 turns the daily check off
+auto_install = false              # true installs a new version as soon as it is found

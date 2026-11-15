@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: App tests (SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt httpx
+      - name: Demo data, every alert and every standard report
+        env:
+          DATABASE_URL: sqlite:///ci.db
+        run: |
+          python -m netinv demo
+          python - <<'PY'
+          import logging; logging.disable(logging.CRITICAL)
+          from fastapi.testclient import TestClient
+          import netinv.main as m
+          with TestClient(m.app) as c:
+              al = c.get("/api/alerts").json()
+              bad = [a["id"] for a in al if a["error"]]
+              assert not bad, f"alert rules failed: {bad}"
+              for r in c.get("/api/library").json():
+                  x = c.get(f"/api/library/{r['id']}")
+                  assert x.status_code == 200, (r["id"], x.text[:300])
+              for u in ("/", "/api/summary", "/api/users/alee", "/api/settings", "/api/update"):
+                  assert c.get(u).status_code == 200, u
+              print(len(al), "alerts and the report library OK")
+          PY
+      - name: JavaScript syntax
+        run: node --check netinv/static/app.js
+
+  windows:
+    name: Windows installer
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installer
+        shell: powershell
+        env:
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
+          $notes = ("$env:NOTES" -split "`n")[0]
+          .\installer\build.ps1 -Version $v -Notes $notes
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1   # only passes the files to the release; Actions storage is small
+          name: NetInventory-Windows-installer
+          path: |
+            installer/output/NetInventory-Setup-*.exe
+            installer/output/latest.json
+
+  # Installable builds live in the public, releases-only prod repo (this source repo is private):
+  # one Release per build (lan-v<version>) plus "lan-latest", whose latest.json every installed
+  # NetInventory server checks for updates.
+  release:
+    name: Publish to prod
+    needs: windows
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NetInventory-Windows-installer
+          path: rel
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
+          NOTES: ${{ github.event.head_commit.message }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::No PROD_REPO_TOKEN secret: can't publish to userxx09-afk/prod."
+            exit 1
+          fi
+          PROD=userxx09-afk/prod
+          V="$(jq -r .version rel/latest.json)"
+          EXE="$(jq -r .file rel/latest.json)"
+          # Point the update at the versioned release, which never changes under a download.
+          jq --arg u "https://github.com/$PROD/releases/download/lan-v$V/$EXE" '.url = $u' rel/latest.json > rel/l.json
+          mv rel/l.json rel/latest.json
+          cp "rel/$EXE" rel/NetInventory-Setup.exe     # fixed name for people downloading by hand
+          gh release delete "lan-v$V" --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "lan-v$V" rel/* --repo "$PROD" --target main --title "NetInventory $V" --notes "${NOTES:-Update}" --latest=false
+          gh release delete lan-latest --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
+          gh release create lan-latest rel/* --repo "$PROD" --target main --title "NetInventory (latest: $V)" \
+            --notes "Always the newest NetInventory. Installer: https://github.com/$PROD/releases/download/lan-latest/NetInventory-Setup.exe" --latest=false

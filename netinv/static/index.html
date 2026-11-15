@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetInventory</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">NetInventory <a id="updbadge" class="pill warn small" hidden>Update available</a></div>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Dashboard</button>
+    <button data-tab="computers">Computers</button>
+    <button data-tab="users">Users</button>
+    <button data-tab="portmap">Port map</button>
+    <button data-tab="network">Network &amp; DCs</button>
+    <button data-tab="reports">Reports</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <form id="search"><input id="q" placeholder="Search PC, user, IP or MAC" autocomplete="off"></form>
+</header>
+
+<main>
+  <div id="scanbanner" class="banner" hidden></div>
+  <section id="overview" class="tab active">
+    <div id="kpis" class="kpis"></div>
+    <div class="alerthead"><h2>Alerts</h2><span class="muted" id="alertnote"></span>
+      <label class="chk muted"><input type="checkbox" id="hidezero" checked> Hide alerts with no results</label></div>
+    <div id="alerts" class="alertgroups"></div>
+    <div class="two">
+      <div><h2>Operating systems</h2><div id="osbreak"></div></div>
+      <div><h2>Collectors <span class="actions">
+        <button data-collect="ad">AD</button><button data-collect="snmp">Switches</button>
+        <button data-collect="pcs">PCs</button><button data-collect="dc_logons">DC logons</button></span></h2>
+        <div id="runs"></div></div>
+    </div>
+  </section>
+
+  <section id="computers" class="tab">
+    <div class="gridbar">
+      <div class="group">
+        <button class="ghost" data-bulk="rescan">Rescan</button>
+        <button class="ghost" data-bulk="wol">Wake on LAN</button>
+        <button class="ghost" data-bulk="add_group">Add to group</button>
+        <button class="ghost" data-bulk="remove_group">Remove from group</button>
+        <button class="ghost" data-bulk="set_state">Set state</button>
+        <span id="selinfo" class="muted"></span> <a class="link small" id="clearsel">clear selection</a>
+      </div>
+      <div class="group">
+        <span class="muted">Export</span>
+        <button class="ghost" data-export="xlsx">Excel</button><button class="ghost" data-export="csv">CSV</button><button class="ghost" data-export="xml">XML</button>
+      </div>
+    </div>
+    <div class="gridbar">
+      <div class="group"><a class="link small" id="clearfilters">Remove filters</a></div>
+      <div class="group">
+        <button class="ghost" id="prev">‹ Previous</button><span id="pageinfo" class="muted"></span><button class="ghost" id="next">Next ›</button>
+        <label class="muted">Show <select id="pagesize"><option>50</option><option selected>100</option><option>250</option><option>1000</option></select></label>
+      </div>
+    </div>
+    <div class="tablewrap grid"><table><thead id="gridhead"></thead><tbody id="gridbody"></tbody></table></div>
+  </section>
+
+  <section id="asset" class="tab">
+    <div class="assetlayout">
+      <aside class="actions-side">
+        <button class="ghost wide" data-act="back">‹ Back to list</button>
+        <h3>Actions</h3>
+        <button class="act" data-act="ping">Ping</button>
+        <button class="act" data-act="dameware">Remote control (DameWare)</button>
+        <button class="act" data-act="rdp">Remote desktop</button>
+        <button class="act" data-act="cshare">Open C$</button>
+        <button class="act" data-act="admin">Open Admin$</button>
+        <button class="act" data-act="wol">Wake on LAN</button>
+        <button class="act" data-act="rescan">Rescan now</button>
+        <h3>Power</h3>
+        <button class="act danger" data-act="reboot">Reboot</button>
+      </aside>
+      <div class="assetmain">
+        <div id="assettitle"></div>
+        <nav id="assettabs" class="subtabs">
+          <button data-atab="summary" class="active">Summary</button>
+          <button data-atab="software">Software<i></i></button>
+          <button data-atab="updates">Updates<i></i></button>
+          <button data-atab="location">Switch location<i></i></button>
+          <button data-atab="logons">Logons<i></i></button>
+          <button data-atab="history">History<i></i></button>
+          <button data-atab="comments">Comments<i></i></button>
+        </nav>
+        <div id="assetbody"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="portmap" class="tab">
+    <div class="toolbar"><input id="pmfilter" placeholder="Filter by switch, port, PC, IP or MAC"></div>
+    <div id="pmtable"></div>
+  </section>
+
+  <section id="users" class="tab">
+    <div class="toolbar"><input id="ufilter" placeholder="Filter by name, department, title, OU or last PC">
+      <label class="muted">Show <select id="ustate"><option value="">All users</option><option value="enabled" selected>Enabled</option>
+      <option value="disabled">Disabled</option><option value="locked">Locked out</option></select></label></div>
+    <div id="utable"></div>
+  </section>
+
+  <section id="userpage" class="tab">
+    <div class="assetlayout">
+      <aside class="actions-side">
+        <button class="ghost wide" data-uact="back">‹ Back to users</button>
+        <h3>Remote</h3>
+        <button class="act" data-uact="remote">Remote control (DameWare)</button>
+        <button class="act" data-uact="rdp">Remote desktop to last PC</button>
+        <h3>Account</h3>
+        <button class="act" data-uact="unlock">Unlock account</button>
+        <button class="act" data-uact="reset_password">Reset password</button>
+        <button class="act" data-uact="must_change">Must change password at next logon</button>
+        <button class="act" data-uact="enable">Enable account</button>
+        <button class="act danger" data-uact="disable">Disable account</button>
+        <h3>Copy</h3>
+        <button class="act" data-uact="copy_email">Copy e-mail address</button>
+        <button class="act" data-uact="copy_dn">Copy distinguished name</button>
+      </aside>
+      <div class="assetmain">
+        <div id="usertitle"></div>
+        <nav id="usertabs" class="subtabs">
+          <button data-utab="general" class="active">General</button>
+          <button data-utab="computers">Computers<i></i></button>
+          <button data-utab="groups">Groups<i></i></button>
+          <button data-utab="logons">Logons<i></i></button>
+          <button data-utab="audit">Audit<i></i></button>
+        </nav>
+        <div id="userbody"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="network" class="tab">
+    <h2>Domain controllers</h2><div id="dctable"></div>
+    <h2>Network devices</h2><div id="ndtable"></div>
+    <h2>Switch ports</h2>
+    <div class="toolbar"><input id="spfilter" placeholder="Filter ports"></div>
+    <div id="sptable"></div>
+  </section>
+
+  <section id="reports" class="tab">
+    <nav class="subtabs" id="reptabs"><button data-rtab="library" class="active">Standard reports</button><button data-rtab="builder">Report builder</button></nav>
+    <div id="replib" class="replib">
+      <aside><input id="libfilter" placeholder="Search reports"><div id="libcats"></div></aside>
+      <div class="libmain"><div id="libtitle" class="muted">Pick a report on the left.</div><div id="libresult"></div></div>
+    </div>
+    <div class="builder" id="repbuilder" hidden>
+      <aside>
+        <h3>Reports</h3>
+        <ul id="reportlist"></ul>
+      </aside>
+      <div class="build">
+        <div class="row">
+          <label>Dataset <select id="dataset"></select></label>
+          <label>Sort by <select id="sort"></select></label>
+          <label class="chk"><input type="checkbox" id="desc"> Descending</label>
+        </div>
+        <details open><summary>Fields</summary><div id="fields" class="fields"></div></details>
+        <div id="filters"></div>
+        <div class="row">
+          <button id="addfilter" class="ghost">+ Add filter</button>
+          <span class="hint">Date filters accept values like <code>30d</code> (30 days ago).</span>
+        </div>
+        <div class="row">
+          <button id="run">Run report</button>
+          <button id="xlsx" class="ghost">Export Excel</button><button id="csv" class="ghost">Export CSV</button>
+          <input id="rname" placeholder="Report name">
+          <button id="save" class="ghost">Save</button>
+        </div>
+        <div id="result"></div>
+      </div>
+    </div>
+  </section>
+  <section id="settings" class="tab">
+    <div class="settings">
+      <div class="panel" id="updpanel">
+        <h3>Software updates</h3>
+        <div id="updinfo" class="muted">Checking…</div>
+        <div class="row"><button class="ghost" id="updcheck">Check now</button><button id="updinstall" hidden>Install update</button></div>
+      </div>
+      <div class="panel">
+        <h3>Credentials</h3>
+        <p class="muted">Windows accounts are used for AD (LDAP) and for WinRM to PCs and DCs. SNMP v2c/v3 credentials are used for switches and routers. Secrets are encrypted on the server and never shown again.</p>
+        <div id="credtable"></div>
+        <button id="addcred">+ Add credential</button>
+      </div>
+      <div class="panel">
+        <h3>What to scan</h3>
+        <p class="muted">Add an AD domain, an OU of computers or users, or an IP range of network gear and PCs. Each target uses the credentials you pick, tried in order.</p>
+        <div id="targettable"></div>
+        <div class="row"><button id="addtarget">+ Add scan target</button><button id="scanall" class="ghost">Scan everything now</button></div>
+      </div>
+      <div class="panel">
+        <h3>Schedule</h3>
+        <p class="muted">Minutes between automatic scans. 0 turns a scan off. Leave blank for the default.</p>
+        <form id="intervals" class="intervals"></form>
+      </div>
+      <div class="panel">
+        <h3>DameWare Mini Remote Control</h3>
+        <p class="muted">The Remote button opens <code>dameware://</code> links. Each technician PC needs the NetInventory DameWare launcher (an installer option, or deploy <code>dameware-handler.reg</code> and <code>Open-DameWare.ps1</code> by GPO). Extra DWRCC switches and a custom DWRCC.exe path are set per PC in the registry, not here, so a link can never pass arbitrary arguments.</p>
+        <form id="dwform" class="lifeform">
+          <label>Sign in with <select name="dameware_mode"><option value="windows">Windows logon of the technician (default)</option><option value="saved">Saved host entry in DameWare</option></select></label>
+          <button>Save</button>
+        </form>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-inner"><button id="close" class="close" aria-label="Close">×</button><div id="detail"></div></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+Windows Registry Editor Version 5.00
+
+; NetInventory: dameware:// link handler for DameWare Mini Remote Control.
+; Deploy with Open-DameWare.ps1 copied to C:\ProgramData\NetInventory\ on each technician PC.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\dameware]
+@="URL:DameWare Remote Control (NetInventory)"
+"URL Protocol"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\dameware\shell\open\command]
+@="\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\ProgramData\\NetInventory\\Open-DameWare.ps1\" \"%1\""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\NetInventory]
+; Optional. Uncomment and edit:
+; "DameWarePath"="C:\\Program Files\\SolarWinds\\DameWare Mini Remote Control x64\\DWRCC.exe"
+; "DameWareAllowedSuffixes"=".corp.example.com"
+; "DameWareExtraArgs"=""

@@ -1,0 +1,5 @@
+config.toml
+.env
+__pycache__/
+*.db
+netinv/_version.py
