@@ -55,45 +55,35 @@ jobs:
           $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
           $notes = ("$env:NOTES" -split "`n")[0]
           .\installer\build.ps1 -Version $v -Notes $notes
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1   # only passes the files to the release; Actions storage is small
-          name: NetInventory-Windows-installer
-          path: |
-            installer/output/NetInventory-Setup-*.exe
-            installer/output/latest.json
-
-  # Installable builds live in the public, releases-only prod repo (this source repo is private):
-  # one Release per build (lan-v<version>) plus "lan-latest", whose latest.json every installed
-  # NetInventory server checks for updates.
-  release:
-    name: Publish to prod
-    needs: windows
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: NetInventory-Windows-installer
-          path: rel
-      - name: Publish
+      # Published straight from this job: no Actions artifact, so the account's artifact storage
+      # quota (shared with the other apps) can't block a release.
+      # Installable builds live in the public, releases-only prod repo (this source repo is private):
+      # one Release per build (lan-v<version>) plus "lan-latest", whose latest.json every installed
+      # NetInventory server checks for updates.
+      - name: Publish to prod
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        shell: powershell
         env:
           GH_TOKEN: ${{ secrets.PROD_REPO_TOKEN }}
           NOTES: ${{ github.event.head_commit.message }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::No PROD_REPO_TOKEN secret: can't publish to userxx09-afk/prod."
-            exit 1
-          fi
-          PROD=userxx09-afk/prod
-          V="$(jq -r .version rel/latest.json)"
-          EXE="$(jq -r .file rel/latest.json)"
+          $ErrorActionPreference = 'Continue'   # gh writes notes to stderr; results are checked by exit code
+          if (-not $env:GH_TOKEN) { Write-Host "::error::No PROD_REPO_TOKEN secret: can't publish to userxx09-afk/prod."; exit 1 }
+          $prod = 'userxx09-afk/prod'
+          $out = 'installer\output'
+          $m = Get-Content "$out\latest.json" -Raw | ConvertFrom-Json
+          $v = $m.version
           # Point the update at the versioned release, which never changes under a download.
-          jq --arg u "https://github.com/$PROD/releases/download/lan-v$V/$EXE" '.url = $u' rel/latest.json > rel/l.json
-          mv rel/l.json rel/latest.json
-          cp "rel/$EXE" rel/NetInventory-Setup.exe     # fixed name for people downloading by hand
-          gh release delete "lan-v$V" --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "lan-v$V" rel/* --repo "$PROD" --target main --title "NetInventory $V" --notes "${NOTES:-Update}" --latest=false
-          gh release delete lan-latest --repo "$PROD" --yes --cleanup-tag 2>/dev/null || true
-          gh release create lan-latest rel/* --repo "$PROD" --target main --title "NetInventory (latest: $V)" \
-            --notes "Always the newest NetInventory. Installer: https://github.com/$PROD/releases/download/lan-latest/NetInventory-Setup.exe" --latest=false
+          $m.url = "https://github.com/$prod/releases/download/lan-v$v/$($m.file)"
+          [IO.File]::WriteAllText("$PWD\$out\latest.json", ($m | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+          Copy-Item "$out\$($m.file)" "$out\NetInventory-Setup.exe"   # fixed name for downloading by hand
+          $files = @("$out\$($m.file)", "$out\NetInventory-Setup.exe", "$out\latest.json")
+          $notes = ("$env:NOTES" -split "`n")[0]; if (-not $notes) { $notes = 'Update' }
+          gh release delete "lan-v$v" --repo $prod --yes --cleanup-tag 2>$null
+          gh release create "lan-v$v" @files --repo $prod --target main --title "NetInventory $v" --notes $notes --latest=false
+          if ($LASTEXITCODE) { throw "Publishing lan-v$v failed" }
+          gh release delete lan-latest --repo $prod --yes --cleanup-tag 2>$null
+          gh release create lan-latest @files --repo $prod --target main --title "NetInventory (latest: $v)" --latest=false `
+            --notes "Always the newest NetInventory. Installer: https://github.com/$prod/releases/download/lan-latest/NetInventory-Setup.exe"
+          if ($LASTEXITCODE) { throw 'Publishing lan-latest failed' }
+          Write-Host "Published NetInventory $v to $prod"
