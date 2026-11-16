@@ -82,7 +82,7 @@ else { Log "Visual C++ runtime $($vc.Version) present" }
 # Python packages: verify imports; reinstall from the bundled offline wheels if anything is missing.
 # No double quotes in Python code passed with -c: PowerShell 5.1 strips them on the way to the program,
 # so print("ok") arrived as print(ok) and failed with a NameError even when every package was fine.
-$check = "import fastapi, uvicorn, sqlalchemy, psycopg, pydantic, ldap3, pysnmp, pypsrp, openpyxl, cryptography; print('ok')"
+$check = "import fastapi, uvicorn, sqlalchemy, psycopg, pydantic, ldap3, pysnmp, pypsrp, openpyxl, cryptography, Crypto.Hash.MD4; print('ok')"
 $ok = Native $Python @('-c', $check)
 if ($ok -ne 'ok') {
     Log "Python packages incomplete ($ok). Installing from bundled wheels..."

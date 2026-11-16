@@ -784,7 +784,8 @@ loaders.settings = async () => {
     labels: { edit: "", last_result: "result" },
     cell: { kind: (v) => esc(TKIND[v] || v), credentials: (ids) => esc(ids.map((i) => creds.find((c) => c.id === i)?.name || `#${i}`).join(", ") || "none"),
       enabled: (v) => yesNo(v), last_run: fmtDate,
-      last_result: (v, r) => (v ? `<span class="pill ${r.last_ok ? "good" : "bad"}" title="${esc(v)}">${esc(v.length > 70 ? v.slice(0, 70) + "…" : v)}</span>` : ""),
+      // Full text, wrapped: errors are only useful whole. A run that worked but reached no Windows hosts is a warning.
+      last_result: (v, r) => (v ? `<span class="pill longtext ${!r.last_ok ? "bad" : /(^|[;:] )0 hosts answer on WinRM/.test(v) ? "warn" : "good"}">${esc(v)}</span>` : ""),
       edit: (id) => `<a class="link" data-tscan="${id}">Scan now</a> · <a class="link" data-tedit="${id}">Edit</a> · <a class="link" data-tdel="${id}">Delete</a>` } });
   $("#credtable").querySelectorAll("[data-cedit]").forEach((a) => a.onclick = () => editCred(c.find((x) => x.id === +a.dataset.cedit)));
   $("#credtable").querySelectorAll("[data-cdel]").forEach((a) => a.onclick = async () => {

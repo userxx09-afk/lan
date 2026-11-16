@@ -73,8 +73,19 @@ def _connect_one(cfg: dict, host: str) -> Connection:
             tls = Tls(validate=ssl.CERT_REQUIRED if cfg.get("verify_tls", False) else ssl.CERT_NONE,
                       ca_certs_file=cfg.get("ca_file") or None)
             server = Server(host, port=636, use_ssl=True, tls=tls, get_info=ALL, connect_timeout=8)
-            return Connection(server, user=user, password=cfg["password"], authentication=auth,
-                              auto_bind=True, receive_timeout=60)
+            try:
+                return Connection(server, user=user, password=cfg["password"], authentication=auth,
+                                  auto_bind=True, receive_timeout=60)
+            except Exception as exc:
+                if auth != NTLM:
+                    raise
+                # NTLM can fail where a simple bind works (NTLM disabled by policy, or no MD4 support).
+                # Over LDAPS the password is encrypted, so a simple bind with DOMAIN\user is safe to try.
+                try:
+                    return Connection(server, user=user, password=cfg["password"], authentication="SIMPLE",
+                                      auto_bind=True, receive_timeout=60)
+                except Exception as exc2:
+                    raise RuntimeError(f"NTLM: {exc}; simple bind: {exc2}") from exc2
         except Exception as exc:
             errors.append(f"LDAPS: {exc}")
     try:

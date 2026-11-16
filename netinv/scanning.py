@@ -165,7 +165,10 @@ def run_ip(db: Session) -> str:
                 parts.append(snmp.collect(db, {**settings.snmp, "targets": ips, "creds": snmp_creds}))
             winrm_ips = asyncio.run(_probe(ips, 5985)) if _creds(db, [t], ("windows",)) else []
             set_setting(db, f"ip_scan:{t.id}", json.dumps(winrm_ips))
-            parts.append(f"{len(winrm_ips)} hosts answer on WinRM")
+            parts.append(f"{len(winrm_ips)} hosts answer on WinRM" + (
+                "" if winrm_ips else " (port 5985 closed or filtered on every address: WinRM is off on those PCs, "
+                "or a firewall blocks it. Turn it on with 'winrm quickconfig' or the WinRM GPO, and allow TCP 5985 "
+                "from this server)"))
             db.commit()
             _finish(db, [t], True, "; ".join(parts))
             msgs.append(f"{t.value}: " + "; ".join(parts))
