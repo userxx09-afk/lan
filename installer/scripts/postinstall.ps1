@@ -126,8 +126,17 @@ if ($P.DbMode -eq 'bundled') {
         Set-Content -LiteralPath $Secrets -Value $pgPass -NoNewline
         $pw = Join-Path $env:TEMP "netinv-pw-$(NewSecret 8).txt"
         Set-Content -LiteralPath $pw -Value $pgPass -NoNewline
+        # initdb refuses to run with admin rights: it restarts itself with the Administrators group
+        # disabled, keeping only this user's own account. The database folder is locked down to SYSTEM,
+        # Administrators and NETWORK SERVICE, so that restricted initdb couldn't even see it and failed with
+        # 'could not create directory ...: File exists'. Let this account into the folder while initdb runs.
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        & icacls $PgData /grant "*${me}:(OI)(CI)F" | Out-Null
         try { Run (Join-Path $PgBin 'initdb.exe') @('-D', $PgData, '-U', 'netinv', "--pwfile=$pw", '-A', 'scram-sha-256', '-E', 'UTF8', '--locale=C') | Out-Null }
-        finally { Remove-Item $pw -Force -ErrorAction SilentlyContinue }
+        finally {
+            Remove-Item $pw -Force -ErrorAction SilentlyContinue
+            & icacls $PgData /remove:g "*$me" /T /C /Q | Out-Null     # NETWORK SERVICE runs the database from here on
+        }
         Add-Content -LiteralPath (Join-Path $PgData 'postgresql.conf') -Value "`nlisten_addresses = 'localhost'`nport = $PgPort`n"
     } else {
         # Existing cluster. Upgrades pass the port it already uses; a fresh install over a leftover
