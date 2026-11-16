@@ -270,6 +270,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   ParamFile, Lines, Cmd: String;
   Code: Integer;
+  Arr: TArrayOfString;
 begin
   if CurStep <> ssPostInstall then Exit;
   if NeedsVcRedist then
@@ -288,7 +289,9 @@ begin
            'Port=' + GetPort('') + #13#10 +
            'UiPassword=' + WebPage.Values[1] + #13#10;
   if IsUpgrade then Lines := Lines + 'Upgrade=1' + #13#10;
-  SaveStringToUTF8File(ParamFile, Lines, False);   { UTF-8, so any character in the password survives }
+  SetArrayLength(Arr, 1);
+  Arr[0] := Lines;
+  SaveStringsToUTF8File(ParamFile, Arr, False);   { UTF-8, so any character in the password survives }
   WizardForm.StatusLabel.Caption := 'Setting up the database and Windows services...';
   Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '" -ParamFile "' + ParamFile + '"';
   if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
