@@ -72,6 +72,20 @@ Name: "{group}\Uninstall NetInventory"; Filename: "{uninstallexe}"
 [Run]
 Filename: "https://localhost:{code:GetPort}/"; Description: "Open the NetInventory dashboard"; Flags: postinstall shellexec nowait skipifsilent
 
+; Everything setup put in the install folder goes, including files created there afterwards (Python caches,
+; service wrapper logs, packages repaired from the bundled wheels). Only setup's own subfolders are deleted,
+; not the whole folder, in case it was installed into a folder that holds other files; the folder itself is
+; removed when nothing else is left. Setup keeps the data folders outside the install folder.
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\python"
+Type: filesandordirs; Name: "{app}\app"
+Type: filesandordirs; Name: "{app}\service"
+Type: filesandordirs; Name: "{app}\pgsql"
+Type: filesandordirs; Name: "{app}\scripts"
+Type: filesandordirs; Name: "{app}\agent"
+Type: filesandordirs; Name: "{app}\tools"
+Type: dirifempty; Name: "{app}"
+
 [UninstallRun]
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall.ps1"" -InstallDir ""{app}"""; \
@@ -598,4 +612,55 @@ begin
     MsgBox('Setup finished copying files, but configuring the services failed (code ' + IntToStr(Code) + ').' + #13#10 +
            'See ' + AddBackslash(GetDataDirValue) + 'logs\install.log for details.', mbError, MB_OK);
   DeleteFile(ParamFile);
+end;
+
+{ ---------------------------------------------------------------- uninstall }
+
+var
+  UninstDataDir, UninstPgData: String;
+  DeleteData: Boolean;
+
+{ Setup's saved values live in the uninstall key as "Inno Setup CodeFile: <name>". }
+function UninstallValue(Name: String): String;
+begin
+  Result := '';
+  RegQueryStringValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6B0E3B53-6A3E-4C55-9C0B-7A1E2D6F4E11}_is1',   { AppId + _is1 }
+    'Inno Setup CodeFile: ' + Name, Result);
+end;
+
+{ Find the data folders before uninstall.ps1 removes NETINV_CONFIG, and ask once whether to delete them.
+  The default is to keep them, so an uninstall by mistake doesn't wipe the inventory. }
+function InitializeUninstall: Boolean;
+var
+  Msg: String;
+begin
+  Result := True;
+  UninstDataDir := UninstallValue('DataDir');
+  if UninstDataDir = '' then UninstDataDir := DataDirFromEnvironment;
+  if UninstDataDir = '' then UninstDataDir := ExpandConstant('{commonappdata}\{#AppName}');
+  UninstPgData := '';
+  if UninstallValue('DbMode') <> 'existing' then
+  begin
+    UninstPgData := UninstallValue('PgData');
+    if UninstPgData = '' then UninstPgData := AddBackslash(UninstDataDir) + 'pgdata';
+  end;
+  DeleteData := False;
+  if not DirExists(UninstDataDir) and ((UninstPgData = '') or not DirExists(UninstPgData)) then Exit;
+  Msg := 'Also delete NetInventory''s data?' + #13#10#13#10 + '  ' + UninstDataDir + #13#10;
+  if (UninstPgData <> '') and DirExists(UninstPgData) and not IsWithin(UninstPgData, UninstDataDir) then
+    Msg := Msg + '  ' + UninstPgData + #13#10;
+  Msg := Msg + #13#10 + 'This is the inventory database, configuration, keys and logs, and it can''t be undone.' + #13#10#13#10 +
+         'Yes deletes it all. No keeps it, so installing NetInventory again picks up where it left off.';
+  DeleteData := SuppressibleMsgBox(Msg, mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  { By now the services are stopped and removed, so nothing holds the database files open. }
+  if (CurUninstallStep = usPostUninstall) and DeleteData then
+  begin
+    { Never a drive root, whatever the registry says. }
+    if (Length(UninstPgData) > 3) and DirExists(UninstPgData) then DelTree(UninstPgData, True, True, True);
+    if (Length(UninstDataDir) > 3) and DirExists(UninstDataDir) then DelTree(UninstDataDir, True, True, True);
+  end;
 end;

@@ -62,8 +62,9 @@ What the installer does on the server:
   opens the web port in the firewall for the Domain and Private profiles, and waits until the dashboard answers.
 - **Start menu:** Open dashboard, Edit configuration, Restart service, Load demo data, Logs folder.
 - **Upgrades** skip the wizard pages and keep the install folder, data folder, database folder,
-  ports and config. **Uninstall** removes the services and firewall rule but leaves the data and
-  database folders, so delete them by hand to wipe everything.
+  ports and config. **Uninstall** stops and removes both services, the scheduled tasks and the firewall
+  rule, and deletes everything setup put in the install folder. It then asks whether to delete the
+  data and database folders too (default: keep them, so a reinstall picks up where it left off).
 
 Setup logs are written to `logs\install.log` in the data folder (`C:\ProgramData\NetInventory` by default).
 
