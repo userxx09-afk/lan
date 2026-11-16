@@ -37,7 +37,11 @@ for op, n in (("add_admin", "CORP\\helpdesk"), ("remove_admin", "CORP\\helpdesk"
     pctools.local_change(None, dev, "t", op, n)
 seen += [pctools.PROCESSES, pctools.SERVICES]
 for name in ("WU_SCRIPT", "WINGET_SCRIPT", "REMOVE_SCRIPT", "LAUNCH", "RESULT", "SCRIPT_RUNNER"):
-    seen.append(getattr(fixes, name))
+    s = getattr(fixes, name)
+    for k, v in {"__TIMEOUT__": "10", "__EXT__": ".ps1", "__NAME__": "x", "__SB64__": "", "__B64__": "", "__PKG__": "Vendor.App",
+                 "__KEY__": "{00000000-0000-0000-0000-000000000000}", "__MODE__": "remove"}.items():
+        s = s.replace(k, v)          # filled in the same way before a script is sent
+    seen.append(s)
 
 for i, s in enumerate(seen):
     (out / f"script{i:02d}.ps1").write_text(s, encoding="utf-8-sig")
