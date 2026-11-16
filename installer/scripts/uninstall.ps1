@@ -1,7 +1,8 @@
 <#
   Called by the uninstaller. Removes the services, firewall rule and environment variable.
-  The data folder (ProgramData\NetInventory: config, database, logs) is kept so a reinstall
-  picks up where it left off. Delete it by hand to remove everything.
+  The data folder chosen during setup (C:\ProgramData\NetInventory by default: config, logs, keys)
+  and the bundled database folder are kept, so a reinstall picks up where it left off. Delete them
+  by hand to remove everything.
 #>
 param([Parameter(Mandatory)][string]$InstallDir)
 $ErrorActionPreference = 'Continue'

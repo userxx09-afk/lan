@@ -17,7 +17,8 @@ Remove-Item -LiteralPath $ParamFile -Force -ErrorAction SilentlyContinue
 $InstallDir = $P.InstallDir; $DataDir = $P.DataDir; $Port = [int]$P.Port
 $Python   = Join-Path $InstallDir 'python\python.exe'
 $PgBin    = Join-Path $InstallDir 'pgsql\bin'
-$PgData   = Join-Path $DataDir 'pgdata'
+# Both folders are chosen in the wizard (0.6+); older installers didn't pass PgData.
+$PgData   = if ($P.PgData) { $P.PgData } else { Join-Path $DataDir 'pgdata' }
 # Chosen in the wizard; 5442 by default (not 5432, so it never clashes with another PostgreSQL on this box).
 # Older installers didn't pass it and always used 5442.
 $PgPort   = if ($P.PgPort) { [int]$P.PgPort } else { 5442 }
@@ -56,7 +57,7 @@ function HashPw([string]$pw) {
 
 try {
 $Upgrade = $P.Upgrade -eq '1'
-Log "=== NetInventory setup: mode=$($P.DbMode) port=$Port dir=$InstallDir upgrade=$Upgrade"
+Log "=== NetInventory setup: mode=$($P.DbMode) port=$Port dir=$InstallDir data=$DataDir upgrade=$Upgrade"
 
 # ---------------------------------------------------------------- 1. dependency checks
 Log 'Checking prerequisites'
@@ -104,7 +105,9 @@ Log 'Securing data folder'
 if ($P.DbMode -eq 'bundled') {
     if (-not (Test-Path (Join-Path $PgBin 'pg_ctl.exe'))) { Fail 'Bundled PostgreSQL binaries are missing.' }
     New-Item -ItemType Directory -Force -Path $PgData | Out-Null
-    & icacls $PgData /grant '*S-1-5-20:(OI)(CI)F' | Out-Null      # NETWORK SERVICE runs PostgreSQL
+    # The database folder may be outside the data folder (another drive), so lock it down the same way.
+    # NETWORK SERVICE runs PostgreSQL.
+    & icacls $PgData /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-20:(OI)(CI)F' | Out-Null
 
     if (Test-Path $Secrets) { $pgPass = (Get-Content -LiteralPath $Secrets -Raw).Trim() }
     if (-not (Test-Path (Join-Path $PgData 'PG_VERSION'))) {
@@ -177,12 +180,15 @@ if (-not (Test-Path $Config)) {
     WriteUtf8 $Config $c
 } else {
     Log 'Keeping existing config.toml'
+    $c = ReadUtf8 $Config
     if ($P.UiPassword) {
-        $c = ReadUtf8 $Config
         $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $P.UiPassword)))
         if ($P.DbMode -eq 'existing') { $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl)) }
-        WriteUtf8 $Config $c
     }
+    # On a new install over a reused data folder the bundled database may be in a different folder or on a
+    # different port, so point config.toml at it. Upgrades keep the url in config.toml as it is.
+    if ($P.DbMode -eq 'bundled' -and $DbUrl -and -not $Upgrade) { $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl)) }
+    WriteUtf8 $Config $c
 }
 # Security settings, for new installs and upgrades alike:
 #  - a dashboard password left in plain text by an older version is replaced with its hash

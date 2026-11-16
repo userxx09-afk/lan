@@ -41,8 +41,13 @@ the app's packages (also kept as offline wheels), PostgreSQL binaries, WinSW, th
 Inno Setup, then runs a smoke test with the bundled Python before compiling.
 
 What the installer does on the server:
-- **Wizard:** install folder, then a choice between a bundled PostgreSQL (with its port, 5442 by
-  default) and an existing server (connection details), then the web port and dashboard password.
+- **Wizard:** install folder, data folder (`C:\ProgramData\NetInventory` by default: config, logs,
+  HTTPS certificate, encryption key), then a choice between a bundled PostgreSQL (with its own
+  folder, `<data folder>\pgdata` by default, and port, 5442 by default) and an existing server
+  (connection details), then the web port and dashboard password. The data and database folders
+  must be new or empty (or hold data from an earlier NetInventory install, which is kept), because
+  setup restricts them to Administrators and SYSTEM. They can be on another drive, but not inside
+  or around the install folder.
 - **Port checks:** when you click Next on a port page, setup checks whether another program is
   already listening on that port. If one is, it names the program, leaves it alone, and offers the
   next free port (or lets you type another). NetInventory's own processes from the same install
@@ -50,16 +55,17 @@ What the installer does on the server:
 - **Dependency checks, with fixes where possible:** Windows version and 64-bit, PowerShell 5.1,
   VC++ 2015-2022 runtime (installed if missing), Python packages (reinstalled from the bundled
   wheels if any fail to import), web and database ports already in use (checked again in case something grabbed them after the wizard), database reachable.
-- **Bundled database:** initialises a PostgreSQL cluster in `C:\ProgramData\NetInventory\pgdata`
+- **Bundled database:** initialises a PostgreSQL cluster in the database folder
   on localhost (port 5442 unless you chose another) with a random password, and registers it as the `NetInventory-PostgreSQL` service.
 - **App service:** registers the `NetInventory` service (automatic, delayed start, restarts on failure),
-  writes `C:\ProgramData\NetInventory\config.toml` (only Administrators and SYSTEM can read it),
+  writes `config.toml` in the data folder (only Administrators and SYSTEM can read it),
   opens the web port in the firewall for the Domain and Private profiles, and waits until the dashboard answers.
 - **Start menu:** Open dashboard, Edit configuration, Restart service, Load demo data, Logs folder.
-- **Upgrades** keep the existing config and database. **Uninstall** removes the services and firewall
-  rule but leaves `C:\ProgramData\NetInventory`, so delete that folder by hand to wipe everything.
+- **Upgrades** skip the wizard pages and keep the install folder, data folder, database folder,
+  ports and config. **Uninstall** removes the services and firewall rule but leaves the data and
+  database folders, so delete them by hand to wipe everything.
 
-Setup logs are written to `C:\ProgramData\NetInventory\logs\install.log`.
+Setup logs are written to `logs\install.log` in the data folder (`C:\ProgramData\NetInventory` by default).
 
 ## Updates
 
@@ -73,7 +79,7 @@ Installed servers read `lan-latest/latest.json` once a day. **Settings > Softwar
 logo) shows when a newer version is out; **Install update** downloads it, checks its SHA-256 against `latest.json`,
 and runs setup silently as SYSTEM. Setup stops the services, replaces the program, keeps `config.toml`, `secret.key`,
 the database and the port, updates the schema, and starts everything again; the dashboard is back in a minute or two.
-The log is in `C:\ProgramData\NetInventory\logs\update-<version>.log`. Running the new installer by hand does the same.
+The log is in `logs\update-<version>.log` in the data folder. Running the new installer by hand does the same.
 
 `config.toml`:
 ```toml
@@ -84,7 +90,7 @@ auto_install = false    # true installs new versions without waiting for a click
 
 ## Sign-in and security
 
-- **HTTPS:** setup creates a self-signed certificate (`tls.crt` / `tls.key` in `C:\ProgramData\NetInventory`) and the
+- **HTTPS:** setup creates a self-signed certificate (`tls.crt` / `tls.key` in the data folder) and the
   dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate once; to avoid that, issue a
   certificate from AD CS for the server name and point `[server] tls_cert` / `tls_key` at its PEM files.
 - **Local admin:** the account chosen during setup. Its password is stored as a PBKDF2 hash (`python -m netinv hashpw`
@@ -92,7 +98,7 @@ auto_install = false    # true installs new versions without waiting for a click
 - **AD sign-in:** in **Settings > Sign-in** enter the domain and an AD group (name or DN). Members of the group, nested
   groups included, sign in with their own AD account (`user`, `DOMAIN\user` or `user@domain`). Every sign-in and action
   is audited under that user. **Test** checks an AD account without signing in.
-- **Break-glass:** after the first successful AD sign-in NetInventory writes `C:\ProgramData\NetInventory\local-login.disabled`,
+- **Break-glass:** after the first successful AD sign-in NetInventory writes `local-login.disabled` in the data folder,
   which turns the local admin off. If AD or the group is unavailable, or the group was set wrong, delete that file on the
   server and sign in as the local admin again. It is written again at the next AD sign-in.
 - **Lockout:** 5 failed sign-ins for one username, or 20 from one address, within 15 minutes block sign-in for 15 minutes.
@@ -103,7 +109,7 @@ auto_install = false    # true installs new versions without waiting for a click
 ## App versions and one-click fixes
 
 **Software tab.** Every program found on the PCs is matched to the public winget catalog. NetInventory downloads that
-catalog from Microsoft once a day (`cdn.winget.microsoft.com`, about 4 MB, into `C:\ProgramData\NetInventory\catalog`).
+catalog from Microsoft once a day (`cdn.winget.microsoft.com`, about 4 MB, into `catalog` in the data folder).
 Programs are matched by their uninstall key / MSI product code first, then by name and publisher. Each install shows as
 *current*, *outdated* (with the latest version), *not in catalog* or *ignored*. Per-user installs (in a user's profile)
 are included. When the matching gets one wrong, add a rule in **Settings > App catalog**:

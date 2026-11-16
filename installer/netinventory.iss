@@ -15,6 +15,8 @@ AppPublisher=NetInventory
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
+; Always offer the install folder on a new install; upgrades skip it in ShouldSkipPage and keep the folder in use.
+DisableDirPage=no
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -49,8 +51,8 @@ Source: "{#Build}\redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Check: NeedsVcRed
 Source: "portcheck.ps1"; Flags: dontcopy
 
 [Dirs]
-Name: "{commonappdata}\{#AppName}"
-Name: "{commonappdata}\{#AppName}\logs"
+Name: "{code:GetDataDir}"
+Name: "{code:GetDataDir}\logs"
 
 [Registry]
 Root: HKLM; Subkey: "SOFTWARE\Classes\dameware"; ValueType: string; ValueName: ""; ValueData: "URL:DameWare Remote Control (NetInventory)"; Flags: uninsdeletekey; Tasks: dameware
@@ -60,11 +62,11 @@ Root: HKLM; Subkey: "SOFTWARE\Classes\dameware\shell\open\command"; ValueType: s
 
 [Icons]
 Name: "{group}\Open NetInventory dashboard"; Filename: "https://localhost:{code:GetPort}/"
-Name: "{group}\Edit configuration"; Filename: "notepad.exe"; Parameters: """{commonappdata}\{#AppName}\config.toml"""
+Name: "{group}\Edit configuration"; Filename: "notepad.exe"; Parameters: """{code:GetDataDir}\config.toml"""
 Name: "{group}\Restart NetInventory service"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Restart-Service NetInventory"""
 Name: "{group}\Load demo data"; Filename: "{app}\python\python.exe"; Parameters: "-m netinv demo"; WorkingDir: "{app}\app"
 Name: "{group}\DameWare launcher for GPO"; Filename: "{app}\tools\dameware"
-Name: "{group}\Logs folder"; Filename: "{commonappdata}\{#AppName}\logs"
+Name: "{group}\Logs folder"; Filename: "{code:GetDataDir}\logs"
 Name: "{group}\Uninstall NetInventory"; Filename: "{uninstallexe}"
 
 [Run]
@@ -77,12 +79,16 @@ Filename: "powershell.exe"; \
 
 [Code]
 var
+  DataPage: TInputDirWizardPage;
   DbPage: TInputOptionWizardPage;
+  PgDirPage: TInputDirWizardPage;
   PgPage: TInputQueryWizardPage;
   ExistingPage: TInputQueryWizardPage;
   WebPage: TInputQueryWizardPage;
   IsUpgrade: Boolean;      { NetInventory is already set up here: keep its database, config and ports }
   PrevMode, PrevPort, PrevPgPort, ConfPgPort: String;
+  PrevDataDir, PrevPgData: String;   { where an existing install keeps its data and its bundled database }
+  AutoPgDir: String;                 { database folder last filled in from the data folder, so a typed one isn't overwritten }
   PortCheckReady: Boolean;
 
 function NeedsVcRedist: Boolean;
@@ -102,14 +108,14 @@ end;
 
 { The port an existing bundled cluster listens on, from its postgresql.conf (the last "port =" line wins,
   as in PostgreSQL itself). Empty when there is no cluster or no port line. }
-function PortFromPgConf: String;
+function PortFromPgConf(PgDir: String): String;
 var
   Lines: TArrayOfString;
   I, J: Integer;
   S: String;
 begin
   Result := '';
-  if not LoadStringsFromFile(ExpandConstant('{commonappdata}\{#AppName}\pgdata\postgresql.conf'), Lines) then Exit;
+  if not LoadStringsFromFile(AddBackslash(PgDir) + 'postgresql.conf', Lines) then Exit;
   for I := 0 to GetArrayLength(Lines) - 1 do
   begin
     S := Trim(Lines[I]);
@@ -127,21 +133,70 @@ begin
   end;
 end;
 
+{ The data folder named by the machine-wide NETINV_CONFIG variable that setup writes (empty if unset). }
+function DataDirFromEnvironment: String;
+var
+  V: String;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'NETINV_CONFIG', V) and (Trim(V) <> '') then
+    Result := ExtractFileDir(Trim(V));
+end;
+
+{ The data folder: the existing one on upgrades, otherwise the one chosen in the wizard. }
+function GetDataDirValue: String;
+begin
+  if IsUpgrade then
+    Result := PrevDataDir
+  else
+    Result := RemoveBackslashUnlessRoot(Trim(DataPage.Values[0]));
+end;
+
+function GetDataDir(Param: String): String;
+begin
+  Result := GetDataDirValue;
+end;
+
+{ The bundled database folder, kept as it is on upgrades. }
+function GetPgData(Param: String): String;
+begin
+  if IsUpgrade then
+    Result := PrevPgData
+  else
+    Result := RemoveBackslashUnlessRoot(Trim(PgDirPage.Values[0]));
+end;
+
 procedure InitializeWizard;
 var
-  DataDir: String;
+  DefaultDataDir: String;
 begin
-  DataDir := ExpandConstant('{commonappdata}\{#AppName}');
-  IsUpgrade := FileExists(DataDir + '\config.toml');
+  { Find an existing install's data: recorded by setup (0.6+), else the NETINV_CONFIG variable, else the
+    folder every version before 0.6 used. }
+  DefaultDataDir := ExpandConstant('{commonappdata}\{#AppName}');
+  PrevDataDir := GetPreviousData('DataDir', '');
+  if (PrevDataDir = '') or not FileExists(AddBackslash(PrevDataDir) + 'config.toml') then PrevDataDir := DataDirFromEnvironment;
+  if (PrevDataDir = '') or not FileExists(AddBackslash(PrevDataDir) + 'config.toml') then PrevDataDir := DefaultDataDir;
+  IsUpgrade := FileExists(AddBackslash(PrevDataDir) + 'config.toml');
+  PrevPgData := GetPreviousData('PgData', '');
+  if PrevPgData = '' then PrevPgData := AddBackslash(PrevDataDir) + 'pgdata';
   PrevMode := GetPreviousData('DbMode', '');
   if PrevMode = '' then
-    if DirExists(DataDir + '\pgdata') then PrevMode := 'bundled' else PrevMode := 'existing';
+    if DirExists(PrevPgData) then PrevMode := 'bundled' else PrevMode := 'existing';
   PrevPort := GetPreviousData('Port', '');
-  ConfPgPort := PortFromPgConf;
+  if IsUpgrade then ConfPgPort := PortFromPgConf(PrevPgData) else ConfPgPort := PortFromPgConf(AddBackslash(DefaultDataDir) + 'pgdata');
   PrevPgPort := GetPreviousData('PgPort', '');
   if PrevPgPort = '' then PrevPgPort := ConfPgPort;
   if PrevPgPort = '' then PrevPgPort := '5442';    { what versions before 0.5 always used }
-  DbPage := CreateInputOptionPage(wpSelectDir, 'Database',
+  DataPage := CreateInputDirPage(wpSelectDir, 'Data folder',
+    'Where should NetInventory keep its data?',
+    'This folder holds the configuration, logs, HTTPS certificate and encryption key (and, by default, the bundled database). ' +
+    'Setup restricts it to Administrators and SYSTEM, so choose a new or empty folder, not one shared with other files. ' +
+    'Uninstalling NetInventory leaves this folder in place.',
+    False, '');
+  DataPage.Add('Data folder:');
+  DataPage.Values[0] := DefaultDataDir;
+
+  DbPage := CreateInputOptionPage(DataPage.ID, 'Database',
     'Where should NetInventory store its data?',
     'NetInventory uses PostgreSQL. Choose a bundled local server or one you already run.',
     True, False);
@@ -149,7 +204,16 @@ begin
   DbPage.Add('Use an existing PostgreSQL server');
   DbPage.SelectedValueIndex := 0;
 
-  PgPage := CreateInputQueryPage(DbPage.ID, 'Bundled PostgreSQL',
+  PgDirPage := CreateInputDirPage(DbPage.ID, 'Bundled PostgreSQL',
+    'Where should the bundled database keep its files?',
+    'Put it on a drive with room to grow and, ideally, regular backups. Choose a new or empty folder: ' +
+    'setup restricts it to Administrators, SYSTEM and the database service.',
+    False, '');
+  PgDirPage.Add('Database folder:');
+  AutoPgDir := AddBackslash(DefaultDataDir) + 'pgdata';
+  PgDirPage.Values[0] := AutoPgDir;
+
+  PgPage := CreateInputQueryPage(PgDirPage.ID, 'Bundled PostgreSQL',
     'Choose the port for the bundled database.',
     'The bundled PostgreSQL only listens on this computer (localhost). The default, 5442, avoids the usual ' +
     'PostgreSQL port 5432 so it never clashes with another PostgreSQL server here. Setup checks that the port is free.');
@@ -182,11 +246,12 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if IsUpgrade then
-    Result := (PageID = DbPage.ID) or (PageID = PgPage.ID) or (PageID = ExistingPage.ID) or (PageID = WebPage.ID)
+    Result := (PageID = wpSelectDir) or (PageID = DataPage.ID) or (PageID = DbPage.ID) or (PageID = PgDirPage.ID) or
+              (PageID = PgPage.ID) or (PageID = ExistingPage.ID) or (PageID = WebPage.ID)
   else if UseBundledPg then
     Result := PageID = ExistingPage.ID
   else
-    Result := PageID = PgPage.ID;
+    Result := (PageID = PgDirPage.ID) or (PageID = PgPage.ID);
 end;
 
 { Upgrades from versions that didn't record the port: read it from the service definition. }
@@ -283,11 +348,97 @@ begin
     Result := False;
 end;
 
+function DirEmpty(Dir: String): Boolean;
+var
+  F: TFindRec;
+begin
+  Result := True;
+  if FindFirst(AddBackslash(Dir) + '*', F) then
+  try
+    repeat
+      if (F.Name <> '.') and (F.Name <> '..') then Result := False;
+    until (not Result) or (not FindNext(F));
+  finally
+    FindClose(F);
+  end;
+end;
+
+{ True when Inner is Outer or a folder inside it. }
+function IsWithin(Inner, Outer: String): Boolean;
+begin
+  Result := Pos(Lowercase(AddBackslash(Outer)), Lowercase(AddBackslash(Inner))) = 1;
+end;
+
+{ Checks a folder typed on the data or database page. Marker is the file that shows the folder already
+  belongs to NetInventory (config.toml, PG_VERSION): such a folder is reused as it is. Any other folder
+  must be new or empty, because setup removes inherited permissions from it. }
+function FolderOk(var Dir: String; Marker, What: String): Boolean;
+begin
+  Result := False;
+  Dir := RemoveBackslashUnlessRoot(Trim(Dir));
+  if (Length(Dir) < 3) or (Dir[2] <> ':') or (Dir[3] <> '\') then
+    MsgBox('Enter a full path on a local drive for the ' + What + ', such as D:\NetInventory.', mbError, MB_OK)
+  else if Length(Dir) = 3 then
+    MsgBox('Choose a folder for the ' + What + ', not the root of a drive.', mbError, MB_OK)
+  else if IsWithin(Dir, WizardDirValue) or IsWithin(WizardDirValue, Dir) then
+    MsgBox('Keep the ' + What + ' separate from the install folder (' + WizardDirValue + '), not inside it or around it.', mbError, MB_OK)
+  else if DirExists(Dir) and not FileExists(AddBackslash(Dir) + Marker) and not DirEmpty(Dir) then
+    MsgBox(Dir + ' already has other files in it.' + #13#10#13#10 +
+           'Setup restricts the ' + What + ' to Administrators and SYSTEM, which would lock other people out of those files. ' +
+           'Choose a new or empty folder.', mbError, MB_OK)
+  else
+    Result := True;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   P, Pg: Integer;
+  Dir: String;
 begin
   Result := True;
+  if CurPageID = DataPage.ID then
+  begin
+    Dir := DataPage.Values[0];
+    Result := FolderOk(Dir, 'config.toml', 'data folder');
+    if Result then
+    begin
+      DataPage.Values[0] := Dir;
+      if FileExists(AddBackslash(Dir) + 'config.toml') then
+        MsgBox('This folder has data from an earlier NetInventory install. Setup will keep its configuration ' +
+               '(the dashboard password you enter later replaces the old one).', mbInformation, MB_OK);
+      { Keep the database with the data unless a different folder was typed for it. }
+      if CompareText(PgDirPage.Values[0], AutoPgDir) = 0 then
+      begin
+        AutoPgDir := AddBackslash(Dir) + 'pgdata';
+        PgDirPage.Values[0] := AutoPgDir;
+      end;
+    end;
+  end;
+  if CurPageID = PgDirPage.ID then
+  begin
+    Dir := PgDirPage.Values[0];
+    Result := FolderOk(Dir, 'PG_VERSION', 'database folder');
+    if Result and IsWithin(GetDataDirValue, Dir) then
+    begin
+      MsgBox('The database folder can''t contain the data folder. Put it inside the data folder or somewhere else.', mbError, MB_OK);
+      Result := False;
+    end;
+    if Result and FileExists(AddBackslash(Dir) + 'PG_VERSION') then
+    begin
+      if not FileExists(AddBackslash(GetDataDirValue) + '.pg-password') then
+      begin
+        MsgBox('This folder holds a database from an earlier install, but its password is kept in that install''s data folder, ' +
+               'which isn''t the one chosen. Go back and choose that data folder too, or pick an empty database folder.', mbError, MB_OK);
+        Result := False;
+      end
+      else
+      begin
+        MsgBox('This folder has a database from an earlier NetInventory install. Setup will keep it.', mbInformation, MB_OK);
+        if PortFromPgConf(Dir) <> '' then PgPage.Values[0] := PortFromPgConf(Dir);
+      end;
+    end;
+    if Result then PgDirPage.Values[0] := Dir;
+  end;
   if CurPageID = PgPage.ID then
   begin
     P := StrToIntDef(Trim(PgPage.Values[0]), 0);
@@ -398,7 +549,12 @@ procedure RegisterPreviousData(PreviousDataKey: Integer);
 begin
   SetPreviousData(PreviousDataKey, 'DbMode', GetDbMode(''));
   SetPreviousData(PreviousDataKey, 'Port', GetPort(''));
-  if UseBundledPg then SetPreviousData(PreviousDataKey, 'PgPort', GetPgPort(''));
+  SetPreviousData(PreviousDataKey, 'DataDir', GetDataDirValue);
+  if UseBundledPg then
+  begin
+    SetPreviousData(PreviousDataKey, 'PgPort', GetPgPort(''));
+    SetPreviousData(PreviousDataKey, 'PgData', GetPgData(''));
+  end;
 end;
 
 { Secrets go to a temp file (deleted by the script) instead of the command line, so they
@@ -420,7 +576,8 @@ begin
   end;
   ParamFile := ExpandConstant('{tmp}\netinv-params.txt');
   Lines := 'InstallDir=' + ExpandConstant('{app}') + #13#10 +
-           'DataDir=' + ExpandConstant('{commonappdata}\{#AppName}') + #13#10 +
+           'DataDir=' + GetDataDirValue + #13#10 +
+           'PgData=' + GetPgData('') + #13#10 +
            'DbMode=' + GetDbMode('') + #13#10 +
            'DbUrl=' + GetDbUrl('') + #13#10 +
            'Port=' + GetPort('') + #13#10 +
@@ -434,6 +591,6 @@ begin
   Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '" -ParamFile "' + ParamFile + '"';
   if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
     MsgBox('Setup finished copying files, but configuring the services failed (code ' + IntToStr(Code) + ').' + #13#10 +
-           'See ' + ExpandConstant('{commonappdata}\{#AppName}\logs\install.log') + ' for details.', mbError, MB_OK);
+           'See ' + AddBackslash(GetDataDirValue) + 'logs\install.log for details.', mbError, MB_OK);
   DeleteFile(ParamFile);
 end;
