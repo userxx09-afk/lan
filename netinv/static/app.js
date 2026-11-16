@@ -334,8 +334,18 @@ function renderAssetTab(d, tab) {
       <span class="muted">${behind ? `${behind} behind the latest version` : "Nothing behind the latest version"}</span></div><div id="swt"></div>`;
     table($("#swt"), d.software, ["name", "version", "latest_version", "status", "publisher", "scope", "fix"], { filterEl: $("#swf"), sort: "name",
       labels: { latest_version: "latest", fix: "" },
-      cell: { status: swPill, fix: (_, r) => swFixCell(r) } });
-    el.querySelectorAll("[data-swupd]").forEach((b) => b.onclick = () => appUpdate([current], b.dataset.swupd, b.dataset.name));
+      cell: { status: swPill, fix: (_, r) => `${swFixCell(r)} ${r.product_code && r.scope !== "user" ? `<span class="swmore">
+        ${/^\{[0-9A-Fa-f-]{36}\}$/.test(r.product_code) ? `<a class="link small" data-swrep="${esc(r.product_code)}" data-name="${esc(r.name)}">Repair</a> · ` : ""}<a class="link small" data-swrm="${esc(r.product_code)}" data-name="${esc(r.name)}">Uninstall</a></span>` : ""}` } });
+    const swact = (action, code, name, q) => async () => {
+      if (!(await confirmBox(q))) return;
+      try { const r = await post(`/api/devices/${encodeURIComponent(current)}/fix`, { action, value: code }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    };
+    el.onclick = (e) => {
+      const a = e.target.closest("[data-swupd],[data-swrm],[data-swrep]"); if (!a) return;
+      if (a.dataset.swupd) return appUpdate([current], a.dataset.swupd, a.dataset.name);
+      if (a.dataset.swrm) return swact("app_uninstall", a.dataset.swrm, a.dataset.name, `Uninstall ${a.dataset.name} from ${current}? It runs silently as SYSTEM; anyone using it loses unsaved work in it. Programs without a silent uninstaller are refused, not half-removed.`)();
+      swact("app_repair", a.dataset.swrep, a.dataset.name, `Repair ${a.dataset.name} on ${current}? Windows Installer reinstalls its files.`)();
+    };
   } else if (tab === "updates") {
     const npend = d.updates.filter((u) => u.status === "pending").length;
     el.innerHTML = `<h2>Pending ${npend ? `<button class="small" id="wuinstall">Install ${npend} pending update${npend === 1 ? "" : "s"}</button>` : ""}</h2>
@@ -351,6 +361,10 @@ function renderAssetTab(d, tab) {
     table($("#lg1"), d.users, ["username", "last_logon", "first_logon", "logon_count"], { cell: { username: userLink } });
     table($("#lg2"), d.logons, ["time", "username", "logon_type", "ip", "source"], { cell: { username: userLink,
       logon_type: (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t)) } });
+  } else if (tab === "processes") {
+    loadProcesses(el);
+  } else if (tab === "services") {
+    loadServices(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -426,6 +440,57 @@ async function runFix(action) {
   } catch (e) { toast(errText(e), true); }
 }
 document.querySelectorAll("[data-fix]").forEach((b) => b.onclick = async () => { b.disabled = true; try { await runFix(b.dataset.fix); } finally { b.disabled = false; } });
+
+// ------------------------------------------------------------ live tools: processes and services (over WinRM)
+async function loadProcesses(el) {
+  el.innerHTML = `<div class="toolbar"><input id="prf" placeholder="Filter by name, user or path"><button class="ghost" id="prref">Refresh</button>
+    <span class="muted small">Live from ${esc(current)} over WinRM, sorted by memory.</span></div><div id="prt"><p class="muted"><span class="spinner tiny"></span> Asking ${esc(current)}…</p></div>`;
+  $("#prref").onclick = () => loadProcesses(el);
+  let rows;
+  try { rows = await api(`/api/devices/${encodeURIComponent(current)}/processes`); } catch (e) { $("#prt").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; return; }
+  table($("#prt"), rows.map((r) => ({ ...r, act: r.pid })), ["name", "pid", "user", "cpu_pct", "mem_mb", "threads", "session", "started", "path", "act"], { filterEl: $("#prf"),
+    labels: { cpu_pct: "CPU %", mem_mb: "memory MB", act: "" },
+    cell: { started: (v) => esc(fmtDate(utcLocal(v))), path: (v, r) => `<span class="small muted" title="${esc(r.cmd || "")}">${esc(v || "")}</span>`,
+      act: (pid, r) => r.protected ? `<span class="muted small" title="Windows system process">system</span>` : `<a class="link" data-kill="${pid}" data-name="${esc(r.name)}">End</a>` } });
+  $("#prt").addEventListener("click", async (e) => {
+    const a = e.target.closest("[data-kill]"); if (!a) return;
+    if (!(await confirmBox(`End ${a.dataset.name} (PID ${a.dataset.kill}) on ${current}? Unsaved work in it is lost.`))) return;
+    try { const r = await post(`/api/devices/${encodeURIComponent(current)}/processes/kill`, { pid: +a.dataset.kill, name: a.dataset.name }); toast(r.output, !r.ok); }
+    catch (er) { toast(errText(er), true); }
+    loadProcesses(el);
+  });
+}
+const SVC_ACT = [["start", "Start"], ["stop", "Stop"], ["restart", "Restart"], ["auto", "Automatic"], ["delayed", "Automatic (delayed)"], ["manual", "Manual"], ["disabled", "Disabled"]];
+async function loadServices(el) {
+  el.innerHTML = `<div class="toolbar"><input id="svf" placeholder="Filter services"><label class="muted">Show <select id="svshow"><option value="">All</option>
+    <option value="Running">Running</option><option value="Stopped">Stopped</option><option value="autostop">Automatic but stopped</option></select></label>
+    <button class="ghost" id="svref">Refresh</button></div><div id="svt"><p class="muted"><span class="spinner tiny"></span> Asking ${esc(current)}…</p></div>`;
+  $("#svref").onclick = () => loadServices(el);
+  let rows;
+  try { rows = await api(`/api/devices/${encodeURIComponent(current)}/services`); } catch (e) { $("#svt").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; return; }
+  const draw = () => {
+    const sh = $("#svshow").value;
+    const list = rows.filter((r) => !sh || (sh === "autostop" ? r.start === "Auto" && r.state !== "Running" : r.state === sh));
+    table($("#svt"), list.map((r) => ({ ...r, act: r.name })), ["display", "name", "state", "start", "account", "act"], { filterEl: $("#svf"),
+      labels: { display: "service", start: "start type", account: "runs as", act: "" },
+      cell: { display: (v, r) => `<span title="${esc(r.description || "")}">${esc(v)}</span>`,
+        state: (v) => `<span class="pill ${v === "Running" ? "good" : v === "Stopped" ? "mute" : "warn"}">${esc(v)}</span>`,
+        start: (v, r) => esc(v) + (r.delayed ? " (delayed)" : ""),
+        act: (n, r) => `<select class="small" data-svc="${esc(n)}"><option value="">Action…</option>${SVC_ACT.filter(([k]) => !(r.protected && ["stop", "restart", "manual", "disabled"].includes(k)))
+          .map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select>` } });
+  };
+  draw();
+  $("#svshow").onchange = draw;
+  $("#svt").addEventListener("change", async (e) => {
+    const sel = e.target.closest("[data-svc]"); if (!sel || !sel.value) return;
+    const act = sel.value, label = SVC_ACT.find((x) => x[0] === act)[1];
+    if (!(await confirmBox(`${["auto", "delayed", "manual", "disabled"].includes(act) ? `Set the start type of ${sel.dataset.svc} to ${label}` : `${label} the service ${sel.dataset.svc}`} on ${current}?`))) { sel.value = ""; return; }
+    sel.disabled = true;
+    try { const r = await post(`/api/devices/${encodeURIComponent(current)}/services/action`, { name: sel.dataset.svc, action: act }); toast(r.output, !r.ok); }
+    catch (er) { toast(errText(er), true); }
+    loadServices(el);
+  });
+}
 
 // ------------------------------------------------------------ deployment queue and log
 const DEP_PILL = { queued: "warn", sending: "warn", running: "warn", success: "good", failed: "bad", expired: "bad", cancelled: "mute" };

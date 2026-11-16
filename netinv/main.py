@@ -374,6 +374,58 @@ def device_action(hostname: str, action: str, user=Depends(ui_auth), db=Depends(
     raise HTTPException(404)
 
 
+# ----------------------------------------------------------------- live PC tools (see pctools.py)
+def _tool(fn):
+    from .collectors.winrm import classify_error
+    try:
+        return fn()
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        kind = classify_error(exc)
+        msg = str(exc).split("\n")[0][:300]
+        raise HTTPException(502, ("The PC isn't reachable over WinRM right now: " if kind == "unreachable" else
+                                  "Access denied by the PC: " if kind == "access_denied" else "") + msg)
+
+
+@app.get("/api/devices/{hostname}/processes", dependencies=UI)
+def device_processes(hostname: str, db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.processes(db, dev))
+
+
+@app.get("/api/devices/{hostname}/services", dependencies=UI)
+def device_services(hostname: str, db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.services(db, dev))
+
+
+class KillIn(BaseModel):
+    pid: int
+    name: str = ""
+
+
+@app.post("/api/devices/{hostname}/processes/kill")
+def device_kill(hostname: str, body: KillIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.kill(db, dev, body.pid, body.name, user))
+
+
+class ServiceIn(BaseModel):
+    name: str
+    action: str
+
+
+@app.post("/api/devices/{hostname}/services/action")
+def device_service(hostname: str, body: ServiceIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.service(db, dev, body.name, body.action, user))
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None

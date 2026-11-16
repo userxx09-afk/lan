@@ -151,6 +151,19 @@ row in the deployment log, also shown on the PC's **Deployments** tab: what, who
 10 minutes and as soon as its dot turns green, until the deadline (default 7 days), then it is marked *expired*.
 Waiting pushes can be cancelled; failed ones retried.
 
+## Live PC tools (a PC's page)
+
+Over WinRM, live, on demand:
+- **Processes**: name, PID, user, CPU %, memory, threads, session, start time, path (hover for the command line);
+  **End** a process. Windows system processes (lsass, csrss, svchost, …) can't be ended from here.
+- **Services**: state, start type, account; start, stop, restart, or set Automatic / Automatic (delayed) / Manual /
+  Disabled. Services Windows or NetInventory itself depend on (WinRM, RPC, LSA, …) can't be stopped or disabled.
+- **Software**: besides *Update*, **Uninstall** (MSI with `msiexec /x`, others only if they have a silent
+  uninstaller; anything else is refused rather than left half-removed) and **Repair** (MSI). These go through the
+  deployment queue, so they wait for an offline PC and their result lands in the deployment log.
+
+Every change is confirmed first and written to the audit log and the PC's History.
+
 ## Dashboard drill-down
 
 Every number on the Dashboard opens the matching list: the KPI tiles (computers, inventoried, not inventoried,

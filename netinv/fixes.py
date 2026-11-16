@@ -30,7 +30,8 @@ from .ingest import log_change
 
 log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
-ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot"}
+ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair"}
+KEY_RE = re.compile(r"^[A-Za-z0-9{}\-_. ]{1,128}$")      # an Uninstall registry key name (MSI product code or app id)
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fix")
 _plock = threading.Lock()
 
@@ -81,6 +82,42 @@ try {
 $res
 '''
 
+# Uninstall or repair one program by its Uninstall registry key: MSI products with msiexec, others with their
+# QuietUninstallString (or a known silent switch). Refuses rather than pop up an uninstaller nobody can click.
+REMOVE_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$res = @{ ok = $false; key = '__KEY__'; mode = '__MODE__' }
+try {
+  $k = $null
+  foreach ($root in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
+    if (Test-Path "$root\__KEY__") { $k = Get-ItemProperty "$root\__KEY__"; break } }
+  if (-not $k) { throw 'not installed on this PC any more (or installed for one user only)' }
+  $res.name = $k.DisplayName
+  $isMsi = ('__KEY__' -match '^\{[0-9A-Fa-f\-]{36}\}$') -and ($k.WindowsInstaller -eq 1 -or "$($k.UninstallString)" -match 'msiexec')
+  if ($isMsi) {
+    $margs = if ('__MODE__' -eq 'repair') { "/fa __KEY__ /qn /norestart" } else { "/x __KEY__ /qn /norestart" }
+    $p = Start-Process msiexec.exe -ArgumentList $margs -Wait -PassThru
+    $code = $p.ExitCode
+  } elseif ('__MODE__' -eq 'repair') {
+    throw 'repair only works for Windows Installer (MSI) programs'
+  } else {
+    $cmd = "$($k.QuietUninstallString)"
+    if (-not $cmd) {
+      $u = "$($k.UninstallString)"
+      if ($u -match 'unins\d+\.exe') { $cmd = "$u /VERYSILENT /SUPPRESSMSGBOXES /NORESTART" }     # Inno Setup
+      elseif ($u -match 'uninst(all)?\.exe' -and $u -notmatch ' /') { $cmd = "$u /S" }       # NSIS
+      else { throw 'this program has no silent uninstall; remove it by hand or with winget' }
+    }
+    $p = Start-Process cmd.exe -ArgumentList "/c $cmd" -Wait -PassThru -WindowStyle Hidden
+    $code = $p.ExitCode
+  }
+  $res.exit = $code
+  $res.ok = ($code -in 0, 1641, 3010)
+  $res.message = switch ($code) { 0 { 'Done' } 1641 { 'Done, the PC is restarting' } 3010 { 'Done, needs a restart' } 1605 { 'Not installed' } 1618 { 'Another installation is running; try again later' } default { "Exit code $code" } }
+} catch { $res.message = "$_" }
+$res
+"""
+
 # Writes the script to the PC, runs it as SYSTEM from a one-off task, and returns at once.
 LAUNCH = r'''
 $ErrorActionPreference = 'Stop'
@@ -113,7 +150,10 @@ if (Test-Path $f) {
 
 
 def _task_name(action: str, pkg: str | None = None) -> str:
-    return "windows-updates" if action == "windows_updates" else "app-" + re.sub(r"[^A-Za-z0-9.\-]", "_", pkg or "")[:80]
+    if action == "windows_updates":
+        return "windows-updates"
+    prefix = {"app_uninstall": "remove-", "app_repair": "repair-"}.get(action, "app-")
+    return prefix + re.sub(r"[^A-Za-z0-9.\-]", "_", pkg or "")[:80]
 
 
 def _cfg(db):
@@ -129,7 +169,7 @@ def _audit(db, who: str, action: str, host: str, result: str) -> None:
 # Every push is a Deployment row: queued -> sending -> running (long jobs on the PC) -> success | failed.
 # A PC that can't be reached stays queued and is retried when it's back online, until the deadline
 # (Settings, default 7 days): then it's "expired". At most `fix:parallel` pushes are sent at once.
-LONG = {"windows_updates": 4, "app_update": 1}       # hours to wait for the result on the PC
+LONG = {"windows_updates": 4, "app_update": 1, "app_uninstall": 1, "app_repair": 1}       # hours to wait for the result on the PC
 OFFLINE_RETRY_MIN = 10
 
 
@@ -152,6 +192,10 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
         if not catalog.package_exists(pkg):
             raise ValueError("That package isn't in the app catalog.")
         return f"Update {pkg}", pkg
+    if action in ("app_uninstall", "app_repair"):
+        if not KEY_RE.match(value or ""):
+            raise ValueError("That program can't be identified on the PC.")
+        return f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {value}", value
     if action == "start_service":
         if value not in SERVICES:
             raise ValueError("That service can't be started from here.")
@@ -161,10 +205,20 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
     return "Cancel scheduled reboot", None
 
 
+def _sw_name(db, hostname: str, code: str) -> str | None:
+    from .db import Software
+    return db.scalar(select(Software.name).join(Device).where(Device.hostname == hostname, Software.product_code == code))
+
+
 def enqueue(db, hostname: str, action: str, who: str, value: str | None = None):
     from .db import Deployment, utcnow
     from datetime import timedelta
     label, value = _validate(action, value)
+    if action in ("app_uninstall", "app_repair"):
+        name = _sw_name(db, hostname, value)
+        if not name:
+            raise ValueError("That program isn't in this PC's inventory.")
+        label = f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {name}"
     now = utcnow()
     dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued",
                      created=now, next_try=now, expires=now + timedelta(days=queue_days(db)))
@@ -189,6 +243,9 @@ def _execute(db, dev: Device, dep) -> str:
     if action == "app_update":
         _launch(addr, cfg, _task_name(action, value), WINGET_SCRIPT.replace("__PKG__", value))
         return f"Started winget upgrade of {value}."
+    if action in ("app_uninstall", "app_repair"):
+        _launch(addr, cfg, _task_name(action, value), REMOVE_SCRIPT.replace("__KEY__", value).replace("__MODE__", "repair" if action == "app_repair" else "remove"))
+        return f"Started {'uninstall' if action == 'app_uninstall' else 'repair'}."
     if action == "start_service":
         r = run_ps(addr, cfg, f"""
 $s = Get-Service -Name '{value}' -ErrorAction SilentlyContinue
@@ -279,9 +336,15 @@ def run_many(hostnames: list[str], action: str, who: str, value: str | None = No
     with SessionLocal() as db:
         _validate(action, value)
         known = {h for (h,) in db.execute(select(Device.hostname).where(Device.hostname.in_(hosts)))}
+        queued = 0
         for h in hosts:
             if h in known:
-                enqueue(db, h, action, who, value)
+                try:
+                    enqueue(db, h, action, who, value)
+                    queued += 1
+                except ValueError:
+                    db.rollback()      # e.g. that program isn't on this PC
+        known = range(queued)
     _wake.set()
     return len(known)
 
