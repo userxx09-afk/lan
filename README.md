@@ -221,6 +221,13 @@ mapped to a port, users, DCs, network devices), each row of *Operating systems* 
 whose list can be opened in the Computers list to select those PCs and act on them. A chip above the list says what
 it's narrowed to; × shows all computers again.
 
+Reports work the same way. In a summary report (Computers by OS and version, by build, by manufacturer and model,
+by group, enabled/disabled, duplicate serials, software titles and versions, outdated or unknown apps, installs by
+catalog status, devices per switch) click a row or its count to open the Computers list narrowed to exactly those PCs.
+A report that lists computers (and the report builder's results) has **Show in Computers list** to open all of them.
+PCs that were only read from AD (no WinRM or agent inventory yet) get their version (23H2, 24H2...) from the build
+number in AD's `operatingSystemVersion`; a PC whose AD account has no OS shows as *(not reported)*.
+
 ## What runs, and how often
 
 These are the collectors. **Scan jobs** (Settings > Scan schedule) decide when they run and on which targets;

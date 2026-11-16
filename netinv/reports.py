@@ -79,9 +79,18 @@ def run_query(db: Session, dataset: str, fields: list[str] | None = None, filter
         if op in ("contains", "not_contains"):
             where.append(f'LOWER(CAST("{col}" AS TEXT)) {OPS[op]} :p{i}')
             params[f"p{i}"] = f"%{str(val).lower()}%"
+        elif op in ("eq", "ne") and types.get(col, "NULL") in ("", "NULL") and val is not None:
+            # SQLite reports no type for computed view columns: compare as text so "1809" (a version) and 3 (a
+            # count) both match what is shown.
+            where.append(f'CAST("{col}" AS TEXT) {OPS[op]} :p{i}')
+            params[f"p{i}"] = str(val)
         else:
             where.append(f'"{col}" {OPS[op]} :p{i}')
-            params[f"p{i}"] = _as_bool(val) if "BOOL" in types.get(col, "") else _coerce(val)
+            t = types.get(col, "")
+            # Text columns keep the value as typed: "1809" is a Windows version, not a number (Postgres
+            # refuses to compare varchar with integer).
+            params[f"p{i}"] = (_as_bool(val) if "BOOL" in t else
+                               val if any(k in t for k in ("CHAR", "TEXT", "STRING")) else _coerce(val))
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = "SELECT " + ", ".join(f'"{c}"' for c in fields) + f" FROM {dataset}" + where_sql
     if sort in cols:

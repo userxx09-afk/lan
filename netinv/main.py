@@ -1249,6 +1249,18 @@ def library_run(rid: str, db=Depends(db_session)):
         raise HTTPException(404)
 
 
+class DrillRow(BaseModel):
+    row: dict
+
+
+@app.post("/api/library/{rid}/drill", dependencies=UI)
+def library_drill(rid: str, body: DrillRow, db=Depends(db_session)):
+    try:
+        return library.drill(db, rid, body.row)
+    except KeyError:
+        raise HTTPException(404)
+
+
 @app.get("/api/library/{rid}/export/{fmt}", dependencies=UI)
 def library_export(rid: str, fmt: str, db=Depends(db_session)):
     res = library.run(db, rid)
