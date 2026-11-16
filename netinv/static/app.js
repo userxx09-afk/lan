@@ -126,6 +126,7 @@ const GRID_COLS = [
   ["manufacturer", "Manufacturer"], ["ip", "IP address"], ["mac", "MAC address"], ["switch_name", "Switch"],
   ["switch_port", "Port"], ["ou", "OU"], ["groups", "Groups"], ["state", "State"], ["min_disk_pct_free", "Disk free"],
   ["pending_updates", "Updates"], ["first_seen", "First seen"], ["last_seen", "Last seen"], ["inventory_last_collected", "Last scan"],
+  ["agent_status", "Agent"],
 ];
 const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, preset: [], selected: new Set(), total: 0, rows: [] };
 // Drill-down from the dashboard: open the Computers list narrowed to what was clicked. Each preset is a filter
@@ -143,7 +144,7 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via"],
+  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version"],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
   sort: grid.sort, desc: grid.desc, ...extra,
@@ -178,9 +179,26 @@ function gridCell(c, v, row) {
   if (c === "min_disk_pct_free") return diskPill(v);
   if (c === "pending_updates") return v ? `<span class="pill warn">${v}</span>` : v === 0 ? `<span class="pill good">0</span>` : "";
   if (c === "os") return esc((v || "").replace("Microsoft ", ""));
+  if (c === "agent_status") return agentPill(row);
   if (c === "ou") return `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>`;
   if (/seen|scan|collected/.test(c)) return esc(fmtDate(v));
   return esc(v);
+}
+// Agent column: active (and still reporting), silent (active but no heartbeat for an hour), installing, pending, failed.
+function agentPill(row) {
+  const st = row.agent_status;
+  if (!st) return "";
+  const seen = row.agent_last_seen ? `last report ${agoUtc(row.agent_last_seen)}` : "";
+  if (st === "active") {
+    const quiet = row.agent_last_seen && Date.now() - utc(row.agent_last_seen) > 3600e3;
+    return `<span class="pill ${quiet ? "warn" : "good"}" title="${esc(`Agent ${row.agent_version || ""}, ${seen}`)}">${quiet ? "silent" : "active"}</span>`;
+  }
+  const map = { installing: ["", "installing", "Push in progress or waiting for the PC: see Software > Deployments"],
+    pending: ["warn", "pending", "Enrolled, waiting for approval in Settings > Agent"],
+    failed: ["bad", "push failed", "The last push failed: see the PC's deployments for why"],
+    revoked: ["", "removed", "Revoked or removed"] };
+  const [cls, label, tip] = map[st] || ["", st, ""];
+  return `<span class="pill ${cls}" title="${esc(tip)}">${label}</span>`;
 }
 // Live status: green = answered the last reachability check (or a scan/agent report), red = didn't, orange = not checked yet.
 const utc = (v) => v ? new Date(String(v).replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? "" : "Z")) : null;
@@ -304,6 +322,7 @@ function renderAssetTab(d, tab) {
         ${kvRow("AD enabled", v.ad_enabled === null ? "" : v.ad_enabled ? "Yes" : "No")}${kvRow("AD last logon", fmtDate(v.ad_last_logon))}
         ${kvRow("OU", esc(v.ou))}
         <h3>Lifecycle</h3>
+        ${kvRow("Agent", v.agent_status ? `${agentPill(v)} <span class="muted small">${v.agent_version ? `v${esc(v.agent_version)} · ` : ""}${v.agent_last_seen ? `last report ${agoUtc(v.agent_last_seen)}` : ""}</span>` : `<span class="muted">not installed</span>`)}
         ${kvRow("First seen", fmtDate(v.first_seen))}${kvRow("Last seen", fmtDate(v.last_seen))}${kvRow("Last scan", `${fmtDate(v.inventory_last_collected)} <span class="muted">${ago(v.inventory_last_collected)}</span>`)}
         <form id="lifeform" class="lifeform">
           <label>State <select name="state">${["Active", "Stock", "In repair", "Retired"].map((s) => `<option ${v.state === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>
@@ -538,6 +557,35 @@ async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {
   } catch (e) { toast(errText(e), true); }
 }
 $("#runscript").onclick = () => runScriptDialog({ hosts: [current] });
+// ------------------------------------------------------------ push the NetInventory Agent over WinRM (agentpush.py)
+async function pushAgentDialog(hosts) {
+  let d;
+  try { d = await api("/api/agents/push"); } catch (e) { return toast(errText(e), true); }
+  if (!d.https) return toast("This server isn't on HTTPS yet. Agents only talk HTTPS: set up the certificate in Settings first.", true);
+  const one = hosts.length === 1 ? hosts[0] : null;
+  const f = await formModal(`<h3>Push the agent to ${one ? esc(one) : `${hosts.length} computers`}</h3>
+    <p class="muted small">Installs (or updates) the NetInventory Agent over WinRM with the scan credential, the same way as other
+      deployments: no download on the PC and no enrollment token needed. Each PC gets a one-time ticket, is approved
+      automatically, and only counts as done once its agent has reported to this server.</p>
+    ${d.credential ? "" : `<p class="pill bad longtext">No Windows credential is set up (Settings > Credentials): pushes will fail.</p>`}
+    <label>Server address the PCs use <input name="server_url" value="${esc(d.server)}" required></label>
+    ${d.saved ? "" : `<p class="muted small">Check this: it's the name and port PCs reach this server on (not localhost). It's saved for later pushes.</p>`}
+    <label>Agent runs as <select name="run_as"><option value="LOCALSERVICE">Local Service (least rights, recommended)</option>
+      <option value="SYSTEM">SYSTEM (also collects pending updates, per-user apps, local logons)</option></select></label>
+    <label><input type="checkbox" name="remove"> Remove the agent instead</label>
+    <p class="muted small">Package: ${d.package === "msi" ? "the agent MSI that came with this server" : "the agent scripts (this server has no MSI)"}.
+      Offline PCs get it when they come back online. Follow it in Software &gt; Deployments or the Agent column.</p>`, true);
+  if (!f) return;
+  const what = f.remove ? "Remove the agent from" : "Install the agent on";
+  if (!(await confirmBox(`${what} ${one || `${hosts.length} computers`}?`))) return;
+  try {
+    const r = await post("/api/agents/push", { hostnames: hosts, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
+    toast(r.output, !r.ok);
+    if (one && current === one) openDevice(one); else loaders.computers();
+  } catch (e) { toast(errText(e), true); }
+}
+$("#pushagent").onclick = () => pushAgentDialog([current]);
+$("#bulkagent").onclick = () => grid.selected.size ? pushAgentDialog([...grid.selected]) : toast("Select one or more computers first.", true);
 $("#bulkscript").onclick = () => grid.selected.size ? runScriptDialog({ hosts: [...grid.selected] }) : toast("Select one or more computers first.", true);
 async function viewDeployment(id) {
   const r = await api(`/api/deployments/${id}`);
@@ -1460,7 +1508,8 @@ async function loadAgents(newToken = null) {
   const cmd = (tok) => `msiexec /i NetInventory-Agent.msi /qn SERVER=${d.server} TOKEN=${tok}${d.pin ? ` PIN=${d.pin}` : ""}`;
   $("#agentinfo").innerHTML = `
     ${!d.https ? `<p class="pill bad longtext">This server isn't on HTTPS. Agents only talk HTTPS: set up the certificate below first.</p>` : ""}
-    <div class="kvr"><span>Download</span><div><a class="link" href="${esc(d.msi_url)}">NetInventory-Agent.msi</a> <span class="muted small">(for GPO software installation, Intune or a script)</span></div></div>
+    <div class="kvr"><span>Push</span><div>Select PCs in Computers and click <b>Push agent</b>: installs it over WinRM, no download needed.</div></div>
+    <div class="kvr"><span>Download</span><div><a class="link" href="${esc(d.msi_url)}" download="NetInventory-Agent.msi">NetInventory-Agent.msi</a> <span class="muted small">(for GPO software installation, Intune or a script${d.msi_local ? `; served by this server, and also on it in <code>${esc(d.msi_folder)}</code>` : ""})</span></div></div>
     <div class="kvr"><span>Server</span><div><code>${esc(d.server)}</code></div></div>
     <div class="kvr"><span>Certificate pin</span><div>${d.pin ? `<code class="small">${esc(d.pin)}</code> <span class="muted small">SHA-256 of this server's certificate. Agents refuse any other server. After changing the certificate, update the pin (GPO) and reinstall or re-enroll.</span>` : `<span class="muted">none (no certificate)</span>`}</div></div>
     <div class="kvr"><span>Enrollment token</span><div>${newToken ? `<code>${esc(newToken)}</code> <span class="pill warn">shown once: copy it now</span>`

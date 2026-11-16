@@ -97,6 +97,16 @@ VIEWS: dict[str, str] = {
                d.av_name, d.av_enabled, d.av_up_to_date, d.scan_error_kind, d.scan_error, d.scan_error_time,
                d.ad_description, d.ad_location,
                d.online, d.online_checked, d.online_changed, d.online_via, d.last_boot AS uptime,
+               CASE WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname AND a.status = 'active') THEN 'active'
+                    WHEN EXISTS (SELECT 1 FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
+                                 AND x.status IN ('queued', 'sending', 'running')) THEN 'installing'
+                    WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname AND a.status = 'pending') THEN 'pending'
+                    WHEN (SELECT x.status FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
+                          ORDER BY x.created DESC, x.id DESC LIMIT 1) IN ('failed', 'expired') THEN 'failed'
+                    WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname) THEN 'revoked'
+                    ELSE NULL END AS agent_status,
+               (SELECT MAX(a.last_seen) FROM agents a WHERE a.hostname = d.hostname AND a.status <> 'revoked') AS agent_last_seen,
+               (SELECT MAX(a.version) FROM agents a WHERE a.hostname = d.hostname AND a.status = 'active') AS agent_version,
                (SELECT MIN(k.free_gb) FROM disks k WHERE k.device_id = d.id) AS min_disk_free_gb,
                (SELECT COUNT(*) FROM physical_disks p WHERE p.device_id = d.id
                   AND (p.health NOT IN ('Healthy', 'OK', '0', '') OR p.predict_failure = TRUE)) AS disks_unhealthy

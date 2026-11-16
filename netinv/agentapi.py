@@ -1,6 +1,7 @@
 """Server side of the optional NetInventory Agent (agent/NetInventoryAgent.ps1).
 
-Enrollment: the agent sends the site enrollment token (Settings > Agent) once and gets its own random secret.
+Enrollment: the agent sends the site enrollment token (Settings > Agent), or a one-time ticket from a push from the
+dashboard (agentpush.py), once and gets its own random secret.
 The token is stored only as a SHA-256 hash; each agent's secret is stored encrypted (secrets.py).
 Who gets in on their own (Settings): PCs already known from Active Directory (default), every PC, or nobody
 (an admin approves each). A second agent for a hostname that already has one, or a PC whose agent was revoked,
@@ -87,13 +88,16 @@ class EnrollIn(BaseModel):
 def enroll(body: EnrollIn, request: Request, db=Depends(_db)):
     ip = request.client.host if request.client else "?"
     _throttle(ip)
-    want = get_setting(db, "agent:token_hash", None)
-    if not want or not hmac.compare_digest(token_hash(body.token), want):
-        _fails.setdefault(ip, []).append(time.time())
-        raise HTTPException(403, "enrollment token not accepted (wrong, rotated or turned off)")
     host = norm_host(body.hostname)
     if not host or len(host) > 64:
         raise HTTPException(400, "bad hostname")
+    from . import agentpush
+    pushed = agentpush.use_ticket(db, host, body.token)      # one-time ticket from a push from the dashboard
+    want = get_setting(db, "agent:token_hash", None)
+    if not pushed and (not want or not hmac.compare_digest(token_hash(body.token), want)):
+        _fails.setdefault(ip, []).append(time.time())
+        db.rollback()
+        raise HTTPException(403, "enrollment token not accepted (wrong, rotated, already used or turned off)")
     guid = (body.machine_guid or "")[:64] or None
     others = list(db.scalars(select(Agent).where(Agent.hostname == host, Agent.status != "revoked")))
     revoked = db.scalar(select(Agent).where(Agent.hostname == host, Agent.status == "revoked"))
@@ -106,6 +110,8 @@ def enroll(body: EnrollIn, request: Request, db=Depends(_db)):
         status = "active" if all(a.status == "active" for a in same) else "pending"
     if others:
         status, note = "pending", "another agent already reports as this computer"
+    elif pushed:
+        status, note = "active", None        # an admin pushed it to this PC: approved, even if it was revoked before
     elif revoked and not same:
         status, note = "pending", "this computer's agent was revoked before"
     elif status == "active":
@@ -120,7 +126,7 @@ def enroll(body: EnrollIn, request: Request, db=Depends(_db)):
               last_seen=utcnow(), last_ip=ip, version=(body.version or "")[:16] or None, run_as=(body.run_as or "")[:64] or None,
               want_inventory=True)
     db.add(a)
-    db.add(AuditLog(actor=f"agent:{host}", action="agent.enroll", target=f"computer:{host}", result=f"{status} from {ip}"))
+    db.add(AuditLog(actor=f"agent:{host}", action="agent.enroll", target=f"computer:{host}", result=f"{status} from {ip}" + (" (pushed)" if pushed else "")))
     db.commit()
     return {"agent_id": a.agent_id, "secret": base64.b64encode(secret).decode(), "status": status, "note": note}
 
