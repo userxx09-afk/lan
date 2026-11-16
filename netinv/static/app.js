@@ -883,15 +883,44 @@ async function loadUpdate(force = false) {
     ${u.message ? `<p class="pill warn longtext">${esc(u.message)}</p>` : ""}
     ${u.available && !u.can_install ? `<p class="muted">Install updates with the installer on the Windows server. For Docker, pull the new image.</p>` : ""}`;
   $("#updinstall").hidden = !(u.available && u.can_install) || u.installing;
-  $("#updinstall").textContent = `Install ${u.latest || "update"}`;
+  $("#updinstall").textContent = `Install ${u.latest || "update"} now`;
+  $("#updreinstall").hidden = !u.can_install || u.installing;
+  if (force) toast(u.error ? `Check failed: ${u.error}` : u.available ? `Version ${u.latest} is available.` : `Up to date (${u.current}).`, !!u.error);
 }
-$("#updcheck").onclick = () => loadUpdate(true);
+$("#updcheck").onclick = async () => { $("#updcheck").disabled = true; $("#updcheck").textContent = "Checking…"; await loadUpdate(true); $("#updcheck").disabled = false; $("#updcheck").textContent = "Check for updates now"; };
+// After an install starts: show progress, ride out the restart, and say when the new version answers.
+async function watchUpdate(from) {
+  const started = Date.now();
+  let down = false;
+  const tick = async () => {
+    try {
+      const u = await api("/api/update");
+      if (down || (from && u.current !== from)) { toast(`NetInventory ${u.current} is running.`); loadUpdate(); return; }
+      $("#updinfo").querySelector(".updprog")?.remove();
+      $("#updinfo").insertAdjacentHTML("beforeend", `<p class="pill warn longtext updprog">${esc(u.message || "Waiting for setup to start…")}</p>`);
+    } catch {
+      down = true;
+      $("#updinfo").querySelector(".updprog")?.remove();
+      $("#updinfo").insertAdjacentHTML("beforeend", `<p class="pill warn longtext updprog">Setup is running; NetInventory is restarting…</p>`);
+    }
+    if (Date.now() - started < 15 * 60000) setTimeout(tick, 5000);
+    else toast("The update is taking longer than expected. Check the update log in the data folder's logs.", true);
+  };
+  setTimeout(tick, 3000);
+}
 $("#updbadge").onclick = () => showTab("settings");
-$("#updinstall").onclick = async () => {
-  if (!(await confirmBox("Install the update now? NetInventory stops for a minute or two while it upgrades. Running scans are interrupted. Your data, settings and credentials are kept."))) return;
-  try { const r = await post("/api/update/install", {}); toast(r.output); } catch (e) { toast(errText(e), true); }
+async function startInstall(force) {
+  const q = force
+    ? "Reinstall the newest published version now? Use this to repair a broken install. NetInventory stops for a minute or two; running scans are interrupted. Your data, settings and credentials are kept."
+    : "Install the update now? NetInventory stops for a minute or two while it upgrades. Running scans are interrupted. Your data, settings and credentials are kept.";
+  if (!(await confirmBox(q))) return;
+  const from = (await api("/api/update")).current;
+  try { const r = await post("/api/update/install", { force }); toast(r.output); watchUpdate(force ? null : from); }
+  catch (e) { toast(errText(e), true); }
   loadUpdate();
-};
+}
+$("#updinstall").onclick = () => startInstall(false);
+$("#updreinstall").onclick = () => startInstall(true);
 
 // ------------------------------------------------------------ signed-in user, sign-in settings
 api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});

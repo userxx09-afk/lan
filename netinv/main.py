@@ -914,15 +914,21 @@ def update_check(db=Depends(db_session)):
     return updater.check(db)
 
 
+class UpdateIn(BaseModel):
+    force: bool = False       # reinstall the newest version even if already up to date (repair)
+
+
 @app.post("/api/update/install")
-def update_install(actor=Depends(ui_auth), db=Depends(db_session)):
-    target = updater.status(db).get("latest")
+def update_install(body: UpdateIn | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+    force = bool(body and body.force)
     try:
-        msg = updater.install(db)
+        msg = updater.install(db, force=force)
         ok = True
     except Exception as exc:
         ok, msg = False, str(exc)
-    db.add(AuditLog(actor=actor, action="update.install", target=f"version:{target}", result=msg[:500]))
+    target = updater.status(db).get("latest")
+    db.add(AuditLog(actor=actor, action="update.reinstall" if force else "update.install",
+                    target=f"version:{target}", result=msg[:500]))
     db.commit()
     if not ok:
         raise HTTPException(400, msg)

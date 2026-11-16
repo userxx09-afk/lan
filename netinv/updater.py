@@ -110,14 +110,17 @@ def status(db) -> dict:
             "installing": STATE["installing"], "message": STATE["message"] or get_setting(db, "update:message", None)}
 
 
-def install(db) -> str:
-    """Download, verify and launch the latest installer. Returns a message for the UI."""
+def install(db, force: bool = False) -> str:
+    """Download, verify and launch the latest installer. Returns a message for the UI.
+    force=True reinstalls the newest published version even when this one is already up to date (a repair)."""
     app = install_dir()
     if app is None:
         raise RuntimeError("Updates install only on a Windows server set up with the NetInventory installer. "
                            "For Docker, pull the new image instead.")
-    st = status(db)
-    if not st["available"]:
+    st = check(db) if force else status(db)      # a repair always installs what is published right now
+    if force and not st["latest"]:
+        raise RuntimeError(f"Couldn't read the newest version: {st['error'] or 'no answer'}")
+    if not force and not st["available"]:
         raise RuntimeError(f"Already on the newest version ({__version__}).")
     if not _lock.acquire(blocking=False):
         raise RuntimeError("An update is already being installed.")
@@ -145,7 +148,8 @@ def install(db) -> str:
         subprocess.run(["schtasks", "/Create", "/TN", task, "/TR", cmd, "/SC", "ONCE", "/ST", start,
                         "/RU", "SYSTEM", "/RL", "HIGHEST", "/F", "/Z", "/V1"], check=True, capture_output=True)
         subprocess.run(["schtasks", "/Run", "/TN", task], check=True, capture_output=True)
-        msg = (f"Installing {m['version']}. NetInventory restarts in a minute or two; refresh this page then. "
+        verb = "Reinstalling" if parse_version(m["version"]) <= parse_version(__version__) else "Installing"
+        msg = (f"{verb} {m['version']}. NetInventory restarts in a minute or two; this page reconnects by itself. "
                f"Log: {logf}")
         STATE["message"] = msg
         set_setting(db, "update:message", msg)
