@@ -45,7 +45,8 @@ c.commit(); c.close()
 
 from fastapi.testclient import TestClient
 import netinv.main as m
-from netinv.db import SessionLocal, Software
+from netinv.db import Device, SessionLocal, Software
+from sqlalchemy import select
 with TestClient(m.app) as cl:
     with SessionLocal() as s:
         print("reconcile:", catalog.reconcile(s))
@@ -85,4 +86,43 @@ with TestClient(m.app) as cl:
         assert cl.get(f"/api/library/{lid}").status_code == 200, lid
     d = cl.get(f"/api/devices/{host}").json()
     assert "status" in d["software"][0] and "fixes_running" in d
+    # ---- deployments: success only once the new version is confirmed on the PC, then a rescan
+    from datetime import timedelta
+    from netinv import fixes
+    from netinv.db import Deployment, utcnow
+    chrome = lambda v: {"name": "Google Chrome", "version": v, "publisher": "Google LLC", "product_code": "Google Chrome"}
+    other = {"name": "VLC media player", "version": "3.0.21", "publisher": "VideoLAN", "product_code": "VLC"}
+    with SessionLocal() as s:
+        V = lambda res: fixes.verify_update(s, "Google.Chrome", res)
+        ok, msg = V({"exit": 0, "before": [chrome("131.0.6778.86"), other], "after": [chrome("142.0.7444.60"), other]})
+        assert ok and "131.0.6778.86 -> 142.0.7444.60" in msg, msg
+        ok, msg = V({"exit": 0, "before": [chrome("131.0.6778.86")], "after": [chrome("131.0.6778.86")]})
+        assert not ok and "still 131.0.6778.86" in msg and "reported success" in msg, msg
+        ok, msg = V({"exit": -1978335189, "before": [chrome("138.0.7204.101")], "after": [chrome("138.0.7204.101")]})
+        assert not ok and "no applicable upgrade" in msg, msg          # 0x8A15002B used to count as success
+        ok, msg = V({"exit": 0, "before": [chrome("131.0.6778.86")], "after": [other]})
+        assert not ok and "isn't in the PC's installed programs" in msg, msg
+        ok, msg = V({"message": "winget (App Installer) is not installed on this PC", "ok": False})
+        assert not ok and "not installed" in msg, msg
+        # MSI major upgrades change the product code: still recognised by name and publisher
+        ok, msg = V({"exit": 0, "before": [chrome("131.0.6778.86") | {"product_code": "{OLD}"}],
+                     "after": [chrome("142.0.7444.60") | {"product_code": "{NEW}"}]})
+        assert ok, msg
+
+        # The queue: a finished update that didn't change the version is "failed", and the PC gets rescanned
+        host = s.scalar(select(Device.hostname))
+        rescans = []
+        fixes._rescan_later = lambda h, check_pending=False: rescans.append(h)
+        for after, want in (("131.0.6778.86", "failed"), ("142.0.7444.60", "success")):
+            fixes.check = lambda db, dev, name, a=after: {"done": True, "result": {
+                "ok": True, "exit": 0, "message": "winget finished", "before": [chrome("131.0.6778.86")], "after": [chrome(a)]}}
+            dep = Deployment(hostname=host, action="app_update", value="Google.Chrome", label="Update Google.Chrome", who="t",
+                             status="running", task="app-Google.Chrome", created=utcnow(), next_try=utcnow(),
+                             check_until=utcnow() + timedelta(hours=1))
+            s.add(dep); s.commit()
+            fixes._check_running(s, dep); s.commit()
+            assert dep.status == want, (dep.status, dep.message)
+        assert rescans == [host, host], rescans
+print("deployment confirmation OK")
+
 print("app catalog OK")

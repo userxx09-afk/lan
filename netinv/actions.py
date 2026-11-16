@@ -77,8 +77,9 @@ def wake_on_lan(dev: Device) -> dict:
     return {"ok": True, "output": "Magic packet sent: " + ", ".join(sent)}
 
 
-def rescan(hostname: str) -> dict:
-    """Re-run the WinRM inventory for one PC in the background (and ask its agent, if it has one)."""
+def rescan(hostname: str, wait: bool = False, check_pending: bool = True) -> dict:
+    """Re-run the WinRM inventory for one PC in the background (and ask its agent, if it has one).
+    wait=True runs it in the calling thread instead (used by the deployment queue's own small pool)."""
     from . import jobs
     from .collectors import winrm
     from .agentapi import request_inventory
@@ -94,7 +95,7 @@ def rescan(hostname: str) -> dict:
                 from .scanning import winrm_cfg
                 base = winrm_cfg(db) or dict(settings.winrm)
                 cfg = {**base, "hosts": [_addr(dev)], "include_ad": False}
-                msg = winrm.collect_endpoints(db, cfg, check_pending=True)
+                msg = winrm.collect_endpoints(db, cfg, check_pending=check_pending)
                 from .scanning import _reconcile
                 _reconcile(db)
                 dev = db.scalar(select(Device).where(Device.hostname == hostname))
@@ -102,7 +103,10 @@ def rescan(hostname: str) -> dict:
                 db.commit()
         finally:
             jobs.RUNNING.pop(key, None)
-    threading.Thread(target=work, daemon=True).start()
+    if wait:
+        work()
+    else:
+        threading.Thread(target=work, daemon=True).start()
     return {"ok": True, "output": "Rescan started. This takes up to a few minutes including the Windows Update check."}
 
 
