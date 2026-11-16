@@ -387,6 +387,29 @@ class ScanJob(Base):
     last_seconds: Mapped[int | None] = mapped_column(Integer)
 
 
+class Deployment(Base):
+    """One push to one PC (app update, Windows updates, service start, reboot): the queue and the log (fixes.py).
+    status: queued (waiting for its turn, or for the PC to come online) | sending | running | success | failed |
+    expired (the PC stayed offline past the deadline) | cancelled"""
+    __tablename__ = "deployments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(32))
+    value: Mapped[str | None] = mapped_column(String(255))          # winget package id, service, reboot timing
+    label: Mapped[str] = mapped_column(String(255))
+    who: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    message: Mapped[str | None] = mapped_column(Text)
+    created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started: Mapped[datetime | None] = mapped_column(DateTime)
+    finished: Mapped[datetime | None] = mapped_column(DateTime)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_try: Mapped[datetime | None] = mapped_column(DateTime)
+    expires: Mapped[datetime | None] = mapped_column(DateTime)
+    task: Mapped[str | None] = mapped_column(String(128))            # scheduled task name on the PC while running
+    check_until: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class ScanExclusion(Base):
     """Something every scan skips (IP, host name, AD OU, MAC), or a Windows event that isn't stored."""
     __tablename__ = "scan_exclusions"

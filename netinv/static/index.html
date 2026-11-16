@@ -54,6 +54,7 @@
   </section>
 
   <section id="computers" class="tab">
+    <div id="presets" class="presets" hidden></div>
     <div class="gridbar">
       <div class="group">
         <button class="ghost" data-bulk="rescan">Rescan</button>
@@ -106,6 +107,7 @@
           <button data-atab="updates">Updates<i></i></button>
           <button data-atab="location">Switch location<i></i></button>
           <button data-atab="logons">Logons<i></i></button>
+          <button data-atab="deployments">Deployments<i></i></button>
           <button data-atab="history">History<i></i></button>
           <button data-atab="comments">Comments<i></i></button>
         </nav>
@@ -115,6 +117,20 @@
   </section>
 
   <section id="apps" class="tab">
+    <nav class="subtabs" id="apptabs"><button data-ptab="programs" class="active">Programs</button><button data-ptab="deploy">Deployments <i id="depbadge"></i></button></nav>
+    <div id="deploypane" hidden>
+      <div class="gridbar">
+        <div class="group"><input id="depf" placeholder="Filter by PC, package or user">
+          <label class="muted">Show <select id="depshow"><option value="">Everything (last 30 days)</option><option value="queued,sending,running">Queue: waiting and running</option>
+            <option value="success">Succeeded</option><option value="failed,expired">Failed or expired</option><option value="cancelled">Cancelled</option></select></label></div>
+        <div class="group" id="depcounts"></div>
+      </div>
+      <p class="muted small">Every push (app updates, Windows updates, service starts, reboots) is logged here and on the PC's Deployments tab. A PC that's offline keeps its push in the queue and gets it when it comes back online, until the deadline below.</p>
+      <div id="deptable"></div>
+      <form id="depset" class="inline row"><label>Wait for offline PCs up to <input name="queue_days" type="number" min="1" max="60" style="width:4em"> days</label>
+        <label>Send to <input name="parallel" type="number" min="1" max="32" style="width:4em"> PCs at once</label><button class="ghost">Save</button></form>
+    </div>
+    <div id="programspane">
     <div class="gridbar">
       <div class="group"><input id="appf" placeholder="Filter programs">
         <label class="muted">Show <select id="appshow"><option value="outdated">Behind the latest version</option><option value="all">All programs</option>
@@ -122,6 +138,7 @@
       <div class="group"><span id="appcat" class="muted"></span></div>
     </div>
     <div id="apptable"></div>
+    </div>
   </section>
 
   <section id="portmap" class="tab">

@@ -142,6 +142,22 @@ Windows doesn't allow installs straight from a remote session, so updates run fr
 ("NetInventory fix ...") as SYSTEM, which writes its result to `C:\ProgramData\NetInventory\fix` on the PC.
 NetInventory picks the result up and adds it to the PC's History. Nothing installs automatically.
 
+## Deployment log and queue (Software > Deployments)
+
+Every push from NetInventory (app updates with winget, installing Windows updates, starting a service, reboots) is a
+row in the deployment log, also shown on the PC's **Deployments** tab: what, who, when, how many tries and the result
+(*succeeded*, *failed* with the reason, *expired*, *cancelled*). Pushes to many PCs are queued and sent a few at a time
+(default 8). A PC that can't be reached keeps its push **waiting** and gets it when it is back online, retried every
+10 minutes and as soon as its dot turns green, until the deadline (default 7 days), then it is marked *expired*.
+Waiting pushes can be cancelled; failed ones retried.
+
+## Dashboard drill-down
+
+Every number on the Dashboard opens the matching list: the KPI tiles (computers, inventoried, not inventoried,
+mapped to a port, users, DCs, network devices), each row of *Operating systems* (exact OS and version), and each alert,
+whose list can be opened in the Computers list to select those PCs and act on them. A chip above the list says what
+it's narrowed to; × shows all computers again.
+
 ## What runs, and how often
 
 These are the collectors. **Scan jobs** (Settings > Scan schedule) decide when they run and on which targets;

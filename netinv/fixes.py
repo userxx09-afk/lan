@@ -32,7 +32,6 @@ log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
 ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot"}
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fix")
-_pending: dict[tuple[str, str], dict] = {}     # (hostname, task) -> {"until": ts, "label": ...}
 _plock = threading.Lock()
 
 # ------------------------------------------------------------------ scripts that run on the PC
@@ -123,88 +122,168 @@ def _cfg(db):
 
 
 def _audit(db, who: str, action: str, host: str, result: str) -> None:
-    db.add(AuditLog(actor=who[:64], action=f"fix.{action}", target=f"computer:{host}", result=result[:500]))
+    db.add(AuditLog(actor=(who or "")[:64], action=f"fix.{action}", target=f"computer:{host}", result=result[:500]))
 
 
-# ------------------------------------------------------------------ actions
-def run(db, dev: Device, action: str, who: str, value: str | None = None) -> dict:
-    from .actions import _addr
-    from .collectors.winrm import run_ps
+# ------------------------------------------------------------------ the deployment queue and log
+# Every push is a Deployment row: queued -> sending -> running (long jobs on the PC) -> success | failed.
+# A PC that can't be reached stays queued and is retried when it's back online, until the deadline
+# (Settings, default 7 days): then it's "expired". At most `fix:parallel` pushes are sent at once.
+LONG = {"windows_updates": 4, "app_update": 1}       # hours to wait for the result on the PC
+OFFLINE_RETRY_MIN = 10
+
+
+def queue_days(db) -> int:
+    try:
+        return max(1, min(60, int(get_setting(db, "fix:queue_days") or 7)))
+    except ValueError:
+        return 7
+
+
+def _validate(action: str, value: str | None) -> tuple[str, str | None]:
+    """(label, value) or ValueError."""
     from . import catalog
     if action not in ACTIONS:
-        return {"ok": False, "output": "Unknown fix."}
+        raise ValueError("Unknown fix.")
+    if action == "windows_updates":
+        return "Install pending Windows updates", None
+    if action == "app_update":
+        pkg = (value or "").strip()
+        if not catalog.package_exists(pkg):
+            raise ValueError("That package isn't in the app catalog.")
+        return f"Update {pkg}", pkg
+    if action == "start_service":
+        if value not in SERVICES:
+            raise ValueError("That service can't be started from here.")
+        return f"Start {SERVICES[value]}", value
+    if action == "reboot":
+        return ("Reboot tonight" if value == "tonight" else "Reboot in 5 minutes"), ("tonight" if value == "tonight" else "soon")
+    return "Cancel scheduled reboot", None
+
+
+def enqueue(db, hostname: str, action: str, who: str, value: str | None = None):
+    from .db import Deployment, utcnow
+    from datetime import timedelta
+    label, value = _validate(action, value)
+    now = utcnow()
+    dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued",
+                     created=now, next_try=now, expires=now + timedelta(days=queue_days(db)))
+    db.add(dep)
+    _audit(db, who, action, hostname, f"queued: {label}")
+    db.commit()
+    return dep
+
+
+def _execute(db, dev: Device, dep) -> str:
+    """Send the push to the PC. Returns the immediate result; raises on failure."""
+    from .actions import _addr
+    from .collectors.winrm import run_ps
     cfg = _cfg(db)
     if not cfg:
-        return {"ok": False, "output": "No Windows credential is configured (Settings > Credentials)."}
+        raise PermissionError("No Windows credential is configured (Settings > Credentials).")
     addr = _addr(dev)
-    try:
-        if action == "windows_updates":
-            label = "Install pending Windows updates"
-            _launch(addr, cfg, _task_name(action), WU_SCRIPT)
-            _track(dev.hostname, _task_name(action), label, hours=4)
-            out = "Started. Windows is downloading and installing the updates; the result appears in History."
-        elif action == "app_update":
-            pkg = (value or "").strip()
-            if not catalog.package_exists(pkg):
-                return {"ok": False, "output": "That package isn't in the app catalog."}
-            label = f"Update {pkg}"
-            _launch(addr, cfg, _task_name(action, pkg), WINGET_SCRIPT.replace("__PKG__", pkg))
-            _track(dev.hostname, _task_name(action, pkg), label, hours=1)
-            out = f"Started winget upgrade of {pkg}; the result appears in History."
-        elif action == "start_service":
-            if value not in SERVICES:
-                return {"ok": False, "output": "That service can't be started from here."}
-            label = f"Start {SERVICES[value]}"
-            r = run_ps(addr, cfg, f"""
+    action, value = dep.action, dep.value
+    if action == "windows_updates":
+        _launch(addr, cfg, _task_name(action), WU_SCRIPT)
+        return "Started. Windows is downloading and installing the updates."
+    if action == "app_update":
+        _launch(addr, cfg, _task_name(action, value), WINGET_SCRIPT.replace("__PKG__", value))
+        return f"Started winget upgrade of {value}."
+    if action == "start_service":
+        r = run_ps(addr, cfg, f"""
 $s = Get-Service -Name '{value}' -ErrorAction SilentlyContinue
 if (-not $s) {{ '{{"ok": false, "message": "service not found"}}'; return }}
 $mode = (Get-CimInstance Win32_Service -Filter "Name='{value}'").StartMode
 if ($mode -eq 'Disabled') {{ '{{"ok": false, "message": "disabled (by policy or by hand), not changed"}}'; return }}
 if ($s.Status -ne 'Running') {{ Start-Service -Name '{value}'; Start-Sleep 3; $s.Refresh() }}
 @{{ ok = ($s.Status -eq 'Running'); message = "$($s.Status)" }} | ConvertTo-Json -Compress""")
-            out = f"{SERVICES[value]}: {r.get('message')}"
-            if not r.get("ok"):
-                raise RuntimeError(out)
-        elif action == "reboot":
-            hour = int(get_setting(db, "fix:reboot_hour") or 2)
-            if value == "tonight":
-                label = f"Reboot scheduled for {hour:02d}:00"
-                secs = (f"$n = Get-Date; $t = $n.Date.AddHours({hour}); if ($t -le $n) {{ $t = $t.AddDays(1) }}; "
-                        "$s = [int]($t - $n).TotalSeconds")
-            else:
-                label, secs = "Reboot in 5 minutes", "$s = 300"
-            run_ps(addr, cfg, secs + "; & shutdown.exe /r /t $s /d p:0:0 /c 'Your IT team scheduled a restart of this PC. "
-                   "Save your work.' 2>&1 | Out-Null; @{ ok = ($LASTEXITCODE -eq 0); seconds = $s } | ConvertTo-Json -Compress")
-            out = label + ". The signed-in user sees a notice."
-        else:  # cancel_reboot
-            label = "Cancel scheduled reboot"
-            r = run_ps(addr, cfg, "& shutdown.exe /a 2>&1 | Out-Null; @{ ok = ($LASTEXITCODE -eq 0); code = $LASTEXITCODE } | ConvertTo-Json -Compress")
-            out = "Scheduled reboot cancelled." if r.get("ok") else "No reboot was scheduled."
+        out = f"{SERVICES[value]}: {r.get('message')}"
+        if not r.get("ok"):
+            raise RuntimeError(out)
+        return out
+    if action == "reboot":
+        hour = int(get_setting(db, "fix:reboot_hour") or 2)
+        if value == "tonight":
+            secs = (f"$n = Get-Date; $t = $n.Date.AddHours({hour}); if ($t -le $n) {{ $t = $t.AddDays(1) }}; "
+                    "$s = [int]($t - $n).TotalSeconds")
+            label = f"Reboot scheduled for {hour:02d}:00"
+        else:
+            secs, label = "$s = 300", "Reboot in 5 minutes"
+        run_ps(addr, cfg, secs + "; & shutdown.exe /r /t $s /d p:0:0 /c 'Your IT team scheduled a restart of this PC. "
+               "Save your work.' 2>&1 | Out-Null; @{ ok = ($LASTEXITCODE -eq 0); seconds = $s } | ConvertTo-Json -Compress")
+        return label + ". The signed-in user sees a notice."
+    r = run_ps(addr, cfg, "& shutdown.exe /a 2>&1 | Out-Null; @{ ok = ($LASTEXITCODE -eq 0); code = $LASTEXITCODE } | ConvertTo-Json -Compress")
+    return "Scheduled reboot cancelled." if r.get("ok") else "No reboot was scheduled."
+
+
+def attempt(db, dep) -> dict:
+    """Try to send one queued deployment now."""
+    from .collectors.winrm import classify_error
+    from .db import utcnow
+    from datetime import timedelta
+    from .db import norm_host
+    dev = db.scalar(select(Device).where(Device.hostname == norm_host(dep.hostname)))
+    now = utcnow()
+    if dev is None:
+        dep.status, dep.finished, dep.message = "failed", now, "Computer not found"
+        db.commit()
+        return {"ok": False, "output": dep.message}
+    dep.status, dep.attempts = "sending", (dep.attempts or 0) + 1
+    dep.started = dep.started or now
+    db.commit()
+    try:
+        out = _execute(db, dev, dep)
     except Exception as exc:
         msg = str(exc).split("\n")[0][:300]
-        _audit(db, who, action, dev.hostname, f"failed: {msg}")
-        log_change(db, dev, "fix", f"{action} by {who} failed: {msg}")
+        if classify_error(exc) == "unreachable" and dep.expires and now < dep.expires:
+            dep.status, dep.next_try = "queued", now + timedelta(minutes=OFFLINE_RETRY_MIN)
+            dep.message = f"PC not reachable ({msg}). Waiting for it to come online; tried {dep.attempts}x."
+            db.commit()
+            return {"ok": True, "output": f"{dev.hostname} isn't reachable right now. Queued: it runs when the PC is back "
+                                          f"online (until {dep.expires:%Y-%m-%d %H:%M} UTC). See Software > Deployments."}
+        dep.status, dep.finished, dep.message = "failed", utcnow(), msg
+        _audit(db, dep.who, dep.action, dev.hostname, f"failed: {msg}")
+        log_change(db, dev, "fix", f"{dep.label} (by {dep.who}) failed: {msg}")
         db.commit()
         return {"ok": False, "output": f"Failed: {msg}"}
-    _audit(db, who, action, dev.hostname, out)
-    log_change(db, dev, "fix", f"{label} (by {who}): {out}")
+    if dep.action in LONG:
+        dep.status, dep.message = "running", out
+        dep.task = _task_name(dep.action, dep.value)
+        dep.check_until, dep.next_try = now + timedelta(hours=LONG[dep.action]), now + timedelta(seconds=60)
+        out += " The result appears in the deployment log and the PC's History."
+    else:
+        dep.status, dep.finished, dep.message = "success", utcnow(), out
+    _audit(db, dep.who, dep.action, dev.hostname, out)
+    log_change(db, dev, "fix", f"{dep.label} (by {dep.who}): {out}")
     db.commit()
     return {"ok": True, "output": out}
 
 
-def run_many(hostnames: list[str], action: str, who: str, value: str | None = None) -> int:
-    """Start a fix on many PCs in the background. Returns how many were queued."""
-    from .db import norm_host
+def run(db, dev: Device, action: str, who: str, value: str | None = None) -> dict:
+    """One PC, from its page: queue it and send it right away, so the answer is immediate."""
+    try:
+        dep = enqueue(db, dev.hostname, action, who, value)
+    except ValueError as exc:
+        return {"ok": False, "output": str(exc)}
+    if not _cfg(db):
+        dep.status, dep.message = "failed", "No Windows credential is configured (Settings > Credentials)."
+        db.commit()
+        return {"ok": False, "output": dep.message}
+    return attempt(db, dep)
 
-    def one(h):
-        with SessionLocal() as db:
-            dev = db.scalar(select(Device).where(Device.hostname == norm_host(h)))
-            if dev:
-                run(db, dev, action, who, value)
-    hosts = list(dict.fromkeys(hostnames))
-    for h in hosts:
-        _pool.submit(one, h)
-    return len(hosts)
+
+def run_many(hostnames: list[str], action: str, who: str, value: str | None = None) -> int:
+    """Queue a push to many PCs; the dispatcher sends them a few at a time. Returns how many were queued."""
+    from .db import norm_host
+    hosts = list(dict.fromkeys(norm_host(h) for h in hostnames))
+    with SessionLocal() as db:
+        _validate(action, value)
+        known = {h for (h,) in db.execute(select(Device.hostname).where(Device.hostname.in_(hosts)))}
+        for h in hosts:
+            if h in known:
+                enqueue(db, h, action, who, value)
+    _wake.set()
+    return len(known)
 
 
 def _launch(addr: str, cfg: dict, name: str, body: str) -> None:
@@ -213,61 +292,121 @@ def _launch(addr: str, cfg: dict, name: str, body: str) -> None:
     run_ps(addr, cfg, LAUNCH.replace("__NAME__", name).replace("__B64__", b64))
 
 
-def _track(host: str, name: str, label: str, hours: float) -> None:
-    with _plock:
-        _pending[(host, name)] = {"until": time.time() + hours * 3600, "label": label, "next": time.time() + 60}
-
-
 def check(db, dev: Device, name: str) -> dict:
     from .actions import _addr
     from .collectors.winrm import run_ps
     return run_ps(_addr(dev), _cfg(db), RESULT.replace("__NAME__", name))
 
 
-def poll_once() -> None:
-    now = time.time()
-    with _plock:
-        due = [(k, v) for k, v in _pending.items() if v["next"] <= now]
-    for (host, name), info in due:
-        try:
-            with SessionLocal() as db:
-                dev = db.scalar(select(Device).where(Device.hostname == host))
-                if dev is None:
-                    raise LookupError
-                r = check(db, dev, name)
-                if r.get("done") or now > info["until"]:
-                    res = r.get("result") or {}
-                    msg = res.get("message") or ("no result after the time limit" if not r.get("done") else "done")
-                    ok = "ok" if res.get("ok") else "problem"
-                    log_change(db, dev, "fix", f"{info['label']}: {msg} ({ok})")
-                    db.commit()
-                    with _plock:
-                        _pending.pop((host, name), None)
-                    continue
-        except LookupError:
-            with _plock:
-                _pending.pop((host, name), None)
-            continue
-        except Exception as exc:
-            log.info("fix result check %s/%s: %s", host, name, exc)
-            if now > info["until"]:     # PC stayed unreachable past the time limit: stop asking
-                with _plock:
-                    _pending.pop((host, name), None)
-                continue
+def parallel(db) -> int:
+    try:
+        return max(1, min(32, int(get_setting(db, "fix:parallel") or 8)))
+    except ValueError:
+        return 8
+
+
+_wake = threading.Event()
+_inflight: set[int] = set()
+
+
+def _send(dep_id: int) -> None:
+    from .db import Deployment
+    try:
+        with SessionLocal() as db:
+            dep = db.get(Deployment, dep_id)
+            if dep and dep.status == "queued":
+                attempt(db, dep)
+    except Exception:
+        log.exception("deployment %s", dep_id)
+    finally:
         with _plock:
-            if (host, name) in _pending:
-                _pending[(host, name)]["next"] = now + 120
+            _inflight.discard(dep_id)
+
+
+def _check_running(db, dep) -> None:
+    from .db import utcnow, norm_host
+    from datetime import timedelta
+    now = utcnow()
+    dev = db.scalar(select(Device).where(Device.hostname == norm_host(dep.hostname)))
+    if dev is None:
+        dep.status, dep.finished, dep.message = "failed", now, "Computer no longer exists"
+        return
+    try:
+        r = check(db, dev, dep.task)
+    except Exception as exc:
+        if dep.check_until and now > dep.check_until:
+            dep.status, dep.finished = "failed", now
+            dep.message = f"No result: the PC stayed unreachable past the time limit ({str(exc)[:200]})"
+            log_change(db, dev, "fix", f"{dep.label}: {dep.message}")
+        else:
+            dep.next_try = now + timedelta(minutes=2)
+        return
+    if r.get("done") or (dep.check_until and now > dep.check_until):
+        res = r.get("result") or {}
+        ok = bool(res.get("ok"))
+        msg = res.get("message") or ("no result after the time limit" if not r.get("done") else "done")
+        if res.get("output") and not ok:
+            msg += f": {str(res['output'])[-500:]}"
+        dep.status, dep.finished, dep.message = ("success" if ok else "failed"), now, msg[:2000]
+        log_change(db, dev, "fix", f"{dep.label}: {msg} ({'ok' if ok else 'problem'})")
+    else:
+        dep.next_try = now + timedelta(minutes=2)
+
+
+def poll_once() -> None:
+    from .db import Deployment, utcnow
+    now = utcnow()
+    with SessionLocal() as db:
+        # finished on the PC yet?
+        for dep in db.scalars(select(Deployment).where(Deployment.status == "running", Deployment.next_try <= now).limit(50)):
+            try:
+                _check_running(db, dep)
+            except Exception:
+                log.exception("deployment check %s", dep.id)
+            db.commit()
+        # past the deadline while waiting
+        for dep in db.scalars(select(Deployment).where(Deployment.status == "queued", Deployment.expires < now)):
+            dep.status, dep.finished = "expired", now
+            dep.message = (dep.message or "") + " Gave up: the PC wasn't reachable before the deadline."
+        db.commit()
+        # send what's due, a few at a time; skip PCs known to be offline (they're retried when the dot turns green)
+        free = parallel(db) - len(_inflight)
+        if free <= 0:
+            return
+        q = (select(Deployment).where(Deployment.status == "queued", Deployment.next_try <= now)
+             .order_by(Deployment.created, Deployment.id).limit(500))
+        offline = {h for (h,) in db.execute(select(Device.hostname).where(Device.online.is_(False)))}
+        for dep in db.scalars(q):
+            if free <= 0:
+                break
+            if dep.id in _inflight or (dep.hostname in offline and dep.attempts):
+                continue
+            with _plock:
+                _inflight.add(dep.id)
+            free -= 1
+            _pool.submit(_send, dep.id)
 
 
 def loop(stop: threading.Event) -> None:
+    from .db import Deployment
+    try:   # a restart in the middle of sending: send again
+        with SessionLocal() as db:
+            for dep in db.scalars(select(Deployment).where(Deployment.status == "sending")):
+                dep.status = "queued"
+            db.commit()
+    except Exception:
+        log.exception("deployment queue")
     while not stop.is_set():
         try:
             poll_once()
         except Exception:
-            log.exception("fix poller")
-        stop.wait(30)
+            log.exception("deployment queue")
+        _wake.wait(20)
+        _wake.clear()
 
 
 def running(host: str) -> list[str]:
-    with _plock:
-        return [v["label"] for (h, _), v in _pending.items() if h == host]
+    from .db import Deployment, norm_host
+    with SessionLocal() as db:
+        return [d.label for d in db.scalars(select(Deployment).where(
+            Deployment.hostname == norm_host(host), Deployment.status.in_(("sending", "running"))))]

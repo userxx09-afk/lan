@@ -21,9 +21,9 @@ from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
-from .db import (AdUser, AuditLog, Credential, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
+from .db import (AdUser, AuditLog, Credential, Deployment, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
-                 init_db, norm_host, norm_mac)
+                 init_db, norm_host, norm_mac, utcnow)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -219,6 +219,7 @@ def summary(db=Depends(db_session)):
         "counts": {
             "pcs": q("SELECT COUNT(*) FROM devices WHERE ad_enabled IS NOT FALSE"),
             "inventoried": q("SELECT COUNT(*) FROM devices WHERE agent_last_report IS NOT NULL"),
+            "not_inventoried": q("SELECT COUNT(*) FROM devices WHERE agent_last_report IS NULL"),
             "domain_controllers": q("SELECT COUNT(*) FROM domain_controllers"),
             "network_devices": q("SELECT COUNT(*) FROM network_devices"),
             "mapped_to_port": q("SELECT COUNT(DISTINCT hostname) FROM v_port_map WHERE hostname IS NOT NULL"),
@@ -263,6 +264,8 @@ def device(hostname: str, db=Depends(db_session)):
             "logons": reports.run_query(db, "v_logons", filters=[{"field": "hostname", "op": "eq", "value": h}],
                                         sort="time", desc=True, limit=300)["rows"],
             "fixes_running": fixes.running(h),
+            "deployments": [_dep_out(x) for x in db.scalars(select(Deployment).where(Deployment.hostname == h)
+                                                               .order_by(Deployment.created.desc()).limit(200))],
             "location": location, "nics": [{"mac": n.mac, "ip": n.ip, "description": n.description} for n in dev.nics],
             "groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id))),
             "custom_fields": {c.name: c.value for c in db.scalars(select(CustomField).where(CustomField.device_id == dev.id))},
@@ -391,8 +394,72 @@ def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
         raise HTTPException(400, "unknown fix")
     if len(body.hostnames) > 500:
         raise HTTPException(400, "at most 500 computers at a time")
-    n = fixes.run_many(body.hostnames, body.action, user, body.value)
-    return {"ok": True, "count": n, "output": f"Started on {n} computer{'s' if n != 1 else ''}. Results appear in each PC's History."}
+    try:
+        n = fixes.run_many(body.hostnames, body.action, user, body.value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "count": n, "output": f"Queued for {n} computer{'s' if n != 1 else ''}. Track it in Software > Deployments; "
+                                               "PCs that are offline get it when they come back online."}
+
+
+def _dep_out(x) -> dict:
+    t = lambda v: jobs._local(v).isoformat(sep=" ", timespec="minutes") if v else None  # noqa: E731
+    return {"id": x.id, "hostname": x.hostname, "action": x.action, "value": x.value, "label": x.label, "who": x.who,
+            "status": x.status, "message": x.message, "created": t(x.created), "started": t(x.started),
+            "finished": t(x.finished), "attempts": x.attempts, "next_try": t(x.next_try), "expires": t(x.expires),
+            "waiting_offline": x.status == "queued" and (x.attempts or 0) > 0}
+
+
+@app.get("/api/deployments", dependencies=UI)
+def deployments(status: str | None = None, host: str | None = None, days: int = 30, db=Depends(db_session)):
+    from datetime import timedelta
+    from sqlalchemy import func
+    since = utcnow() - timedelta(days=max(1, min(days, 365)))
+    q = select(Deployment).where((Deployment.created >= since) | Deployment.status.in_(("queued", "sending", "running")))
+    if status:
+        q = q.where(Deployment.status.in_(status.split(",")))
+    if host:
+        q = q.where(Deployment.hostname.ilike(f"%{host}%"))
+    rows = [_dep_out(x) for x in db.scalars(q.order_by(Deployment.created.desc(), Deployment.id.desc()).limit(5000))]
+    counts = dict(db.execute(select(Deployment.status, func.count()).where(
+        (Deployment.created >= since) | Deployment.status.in_(("queued", "sending", "running"))).group_by(Deployment.status)).all())
+    return {"rows": rows, "counts": counts, "queue_days": fixes.queue_days(db), "parallel": fixes.parallel(db)}
+
+
+@app.post("/api/deployments/{did}/cancel")
+def deployment_cancel(did: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    d = db.get(Deployment, did)
+    if not d or d.status != "queued":
+        raise HTTPException(400, "only a deployment still waiting in the queue can be cancelled")
+    d.status, d.finished, d.message = "cancelled", utcnow(), f"Cancelled by {actor}"
+    db.add(AuditLog(actor=actor, action="fix.cancel", target=f"computer:{d.hostname}", result=d.label))
+    db.commit()
+    return {"ok": True, "output": f"{d.label} on {d.hostname} cancelled."}
+
+
+@app.post("/api/deployments/{did}/retry")
+def deployment_retry(did: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    d = db.get(Deployment, did)
+    if not d or d.status not in ("failed", "expired", "cancelled"):
+        raise HTTPException(400, "only a failed, expired or cancelled deployment can be retried")
+    n = fixes.run_many([d.hostname], d.action, actor, d.value)
+    return {"ok": True, "output": f"{d.label} on {d.hostname} queued again." if n else "That computer no longer exists."}
+
+
+class DeploySettingsIn(BaseModel):
+    queue_days: int
+    parallel: int
+
+
+@app.put("/api/deployments/settings")
+def deployment_settings(body: DeploySettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    if not 1 <= body.queue_days <= 60 or not 1 <= body.parallel <= 32:
+        raise HTTPException(400, "keep waiting 1-60 days, and send to 1-32 PCs at once")
+    set_setting(db, "fix:queue_days", str(body.queue_days))
+    set_setting(db, "fix:parallel", str(body.parallel))
+    db.add(AuditLog(actor=actor, action="fix.settings", target="deployments", result=f"days={body.queue_days} parallel={body.parallel}"))
+    db.commit()
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ app catalog

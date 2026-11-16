@@ -59,14 +59,29 @@ let alertCache = [];
 loaders.overview = async () => {
   const [s, al] = await Promise.all([api("/api/summary"), api("/api/alerts")]);
   const c = s.counts;
-  $("#kpis").innerHTML = [["Computers", c.pcs], ["Inventoried", c.inventoried], ["Mapped to a switch port", c.mapped_to_port],
-    ["Users seen", c.users], ["Domain controllers", c.domain_controllers], ["Network devices", c.network_devices]]
-    .map(([l, v]) => `<div class="kpi"><div class="v">${v ?? 0}</div><div class="l">${l}</div></div>`).join("");
+  const KPI = [["Computers", c.pcs, "pcs"], ["Inventoried", c.inventoried, "inv"], ["Not inventoried yet", c.not_inventoried, "noinv"],
+    ["Mapped to a switch port", c.mapped_to_port, "port"], ["Users seen", c.users, "users"], ["Domain controllers", c.domain_controllers, "dcs"],
+    ["Network devices", c.network_devices, "net"]];
+  $("#kpis").innerHTML = KPI.map(([l, v, k]) => `<div class="kpi" data-go="${k}" title="Show them"><div class="v">${v ?? 0}</div><div class="l">${l}</div><div class="go">View list ›</div></div>`).join("");
+  $("#kpis").querySelectorAll("[data-go]").forEach((el) => el.onclick = () => ({
+    pcs: () => showComputers([]),
+    inv: () => showComputers([{ field: "inventory_last_collected", op: "not_empty" }], "Inventoried computers"),
+    noinv: () => showComputers([{ field: "inventory_last_collected", op: "empty" }], "Not inventoried yet"),
+    port: () => showComputers([{ field: "switch_name", op: "not_empty" }], "Mapped to a switch port"),
+    users: () => { $("#ustate").value = ""; showTab("users"); },
+    dcs: () => showTab("network"), net: () => showTab("network"),
+  })[el.dataset.go]());
   alertCache = al;
   renderAlerts();
   const max = Math.max(1, ...s.os_breakdown.map((r) => r.n));
-  $("#osbreak").innerHTML = s.os_breakdown.map((r) => `<div class="bar"><div class="name" title="${esc(r.os)} ${esc(r.version)}">${esc(r.os.replace("Microsoft ", ""))} ${esc(r.version)}</div>
+  $("#osbreak").innerHTML = s.os_breakdown.map((r, i) => `<div class="bar" data-os="${i}" title="Show the ${r.n} computer${r.n === 1 ? "" : "s"} with ${esc(r.os)} ${esc(r.version)}"><div class="name">${esc(r.os.replace("Microsoft ", ""))} ${esc(r.version)}</div>
     <div class="track"><div class="fill" style="width:${(r.n / max) * 100}%"></div></div><div class="c">${r.n}</div></div>`).join("");
+  $("#osbreak").querySelectorAll("[data-os]").forEach((el) => el.onclick = () => {
+    const r = s.os_breakdown[+el.dataset.os];
+    showComputers([r.os === "Unknown" ? { field: "os", op: "empty" } : { field: "os", op: "eq", value: r.os },
+      r.version ? { field: "os_display_version", op: "eq", value: r.version } : { field: "os_display_version", op: "empty" }],
+      `${r.os.replace("Microsoft ", "")} ${r.version}`.trim());
+  });
   table($("#runs"), s.runs, ["collector", "started", "ok", "message"], {
     cell: { ok: (v) => `<span class="pill ${v ? "good" : v === false ? "bad" : "mute"}">${v ? "ok" : v === false ? "failed" : "running"}</span>`, started: fmtDate } });
 };
@@ -92,6 +107,13 @@ async function openAlert(id) {
   drawer(`<h2>${esc(a.title)}</h2><div class="libbar"><span class="pill ${a.severity === "high" ? "bad" : a.severity === "important" ? "warn" : "mute"}">${esc(SEV.find((s) => s[0] === a.severity)[1])}</span>
     <span class="muted">${a.rows.length} result${a.rows.length === 1 ? "" : "s"}</span><span style="margin-left:auto"></span>${exportLinks(`/api/alerts/${id}/export`)}</div><div id="altable"></div>`);
   table($("#altable"), a.rows, a.columns, { cell: LINKS });
+  const hosts = [...new Set(a.rows.map((r) => r.hostname).filter(Boolean))];
+  if (hosts.length) {
+    $("#altable").insertAdjacentHTML("beforebegin", `<p><button class="ghost" id="alhosts">Open these ${hosts.length} computer${hosts.length === 1 ? "" : "s"} in the Computers list</button>
+      <span class="muted small">to select them all and rescan, wake, update or export them</span></p>`);
+    $("#alhosts").onclick = () => { $("#drawer").hidden = true; showComputers([{ field: "hostname", op: "in", value: hosts }], a.title); };
+  }
+  $("#altable").querySelectorAll("[data-host]").forEach((x) => x.onclick = () => { $("#drawer").hidden = true; openDevice(x.dataset.host); });
 }
 const exportLinks = (base) => ["xlsx", "csv", "xml"].map((f) => `<a class="link small" href="${base}/${f}" download>${{ xlsx: "Excel", csv: "CSV", xml: "XML" }[f]}</a>`).join(" · ");
 document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = async () => {
@@ -105,15 +127,31 @@ const GRID_COLS = [
   ["switch_port", "Port"], ["ou", "OU"], ["groups", "Groups"], ["state", "State"], ["min_disk_pct_free", "Disk free"],
   ["pending_updates", "Updates"], ["first_seen", "First seen"], ["last_seen", "Last seen"], ["inventory_last_collected", "Last scan"],
 ];
-const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, selected: new Set(), total: 0, rows: [] };
+const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, preset: [], selected: new Set(), total: 0, rows: [] };
+// Drill-down from the dashboard: open the Computers list narrowed to what was clicked. Each preset is a filter
+// ({field, op, value}) with a label shown as a removable chip.
+function showComputers(preset = [], title = "") {
+  grid.preset = preset.map((p) => ({ ...p, title })); grid.filters = {}; grid.page = 0;
+  document.querySelectorAll("#gridhead [data-f]").forEach((i) => (i.value = ""));
+  showTab("computers");
+}
+function renderPresets() {
+  const el = $("#presets");
+  const titles = [...new Set(grid.preset.map((p) => p.title || p.label))];
+  el.hidden = !grid.preset.length;
+  el.innerHTML = grid.preset.length ? `<span class="muted">Showing</span><span class="chip">${esc(titles.join(", "))} <a title="Show all computers" id="clearpreset">×</a></span>` : "";
+  if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
+}
 const gridSpec = (extra = {}) => ({
   dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via"],
-  filters: Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
+  filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
+    ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
   sort: grid.sort, desc: grid.desc, ...extra,
 });
 let gridTimer;
 loaders.computers = async () => {
   if (!$("#gridhead").innerHTML) buildGridHead();
+  renderPresets();
   const r = await post("/api/query", gridSpec({ limit: grid.size, offset: grid.page * grid.size, count: true }));
   grid.rows = r.rows; grid.total = r.total;
   const from = r.total ? grid.page * grid.size + 1 : 0, to = Math.min(r.total, (grid.page + 1) * grid.size);
@@ -184,7 +222,7 @@ function markSort() { $("#gridhead").querySelectorAll("th[data-k]").forEach((th)
 $("#prev").onclick = () => { grid.page--; loaders.computers(); };
 $("#next").onclick = () => { grid.page++; loaders.computers(); };
 $("#pagesize").onchange = (e) => { grid.size = +e.target.value; grid.page = 0; loaders.computers(); };
-$("#clearfilters").onclick = () => { grid.filters = {}; $("#gridhead").querySelectorAll("[data-f]").forEach((i) => (i.value = "")); grid.page = 0; loaders.computers(); };
+$("#clearfilters").onclick = () => { grid.filters = {}; grid.preset = []; $("#gridhead").querySelectorAll("[data-f]").forEach((i) => (i.value = "")); grid.page = 0; loaders.computers(); };
 $("#clearsel").onclick = () => { grid.selected.clear(); loaders.computers(); };
 
 async function download(path, spec) {
@@ -238,7 +276,8 @@ function renderAssetTab(d, tab) {
   $("#assettabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.atab === tab));
   const v = d.device, el = $("#assetbody");
   const counts = { software: d.software.length, updates: d.updates.filter((u) => u.status === "pending").length, logons: d.logons.length,
-    history: d.history.length, comments: d.comments.length, location: d.location.length };
+    history: d.history.length, comments: d.comments.length, location: d.location.length,
+    deployments: (d.deployments || []).filter((x) => ["queued", "sending", "running"].includes(x.status)).length || (d.deployments || []).length };
   $("#assettabs").querySelectorAll("button").forEach((b) => { const n = counts[b.dataset.atab]; b.querySelector("i") && (b.querySelector("i").textContent = n ? ` ${n}` : ""); });
   if (tab === "summary") {
     const running = d.fixes_running?.length ? `<div class="banner">Running on this PC: ${d.fixes_running.map(esc).join(", ")}. The result appears in History.</div>` : "";
@@ -312,6 +351,9 @@ function renderAssetTab(d, tab) {
     table($("#lg1"), d.users, ["username", "last_logon", "first_logon", "logon_count"], { cell: { username: userLink } });
     table($("#lg2"), d.logons, ["time", "username", "logon_type", "ip", "source"], { cell: { username: userLink,
       logon_type: (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t)) } });
+  } else if (tab === "deployments") {
+    el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
+    depTable($("#pcdep"), d.deployments || [], false);
   } else if (tab === "history") {
     el.innerHTML = `<div id="hist"></div>`;
     table($("#hist"), d.history, ["time", "kind", "detail"], { cell: { kind: (k) => `<span class="pill mute">${esc(k.replaceAll("_", " "))}</span>` } });
@@ -385,8 +427,50 @@ async function runFix(action) {
 }
 document.querySelectorAll("[data-fix]").forEach((b) => b.onclick = async () => { b.disabled = true; try { await runFix(b.dataset.fix); } finally { b.disabled = false; } });
 
+// ------------------------------------------------------------ deployment queue and log
+const DEP_PILL = { queued: "warn", sending: "warn", running: "warn", success: "good", failed: "bad", expired: "bad", cancelled: "mute" };
+const depStatus = (v, r) => `<span class="pill ${DEP_PILL[v] || "mute"}">${r.waiting_offline ? "waiting (PC offline)" : v === "sending" ? "sending" : esc(v)}</span>`;
+function depTable(el, rows, withHost = true) {
+  const cols = [...(withHost ? ["hostname"] : []), "label", "status", "message", "who", "created", "finished", "attempts", "act"];
+  table(el, rows.map((r) => ({ ...r, act: r.id })), cols, {
+    labels: { label: "what", message: "result", who: "by", created: "queued", attempts: "tries", act: "" },
+    cell: { hostname: hostLink, status: depStatus, message: (v, r) => `<span class="longtext small">${esc(v || "")}</span>${r.status === "queued" && r.expires ? `<div class="muted small">gives up ${esc(r.expires)}</div>` : ""}`,
+      act: (id, r) => r.status === "queued" ? `<a class="link" data-dcancel="${id}">Cancel</a>` : ["failed", "expired", "cancelled"].includes(r.status) ? `<a class="link" data-dretry="${id}">Retry</a>` : "" } });
+  el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
+  el.querySelectorAll("[data-dcancel]").forEach((a) => a.onclick = async () => { try { toast((await post(`/api/deployments/${a.dataset.dcancel}/cancel`, {})).output); } catch (e) { toast(errText(e), true); } refreshDeploy(); });
+  el.querySelectorAll("[data-dretry]").forEach((a) => a.onclick = async () => { try { toast((await post(`/api/deployments/${a.dataset.dretry}/retry`, {})).output); } catch (e) { toast(errText(e), true); } refreshDeploy(); });
+}
+const refreshDeploy = () => (document.querySelector(".tab.active")?.id === "asset" ? openDevice(current) : loadDeploy());
+let depTimer;
+async function loadDeploy() {
+  clearTimeout(depTimer);
+  const d = await api(`/api/deployments?status=${encodeURIComponent($("#depshow").value)}`);
+  const c = d.counts, waiting = (c.queued || 0) + (c.sending || 0) + (c.running || 0);
+  $("#depbadge").textContent = waiting ? ` ${waiting}` : "";
+  $("#depcounts").innerHTML = [["queued", "waiting"], ["running", "running"], ["success", "succeeded"], ["failed", "failed"], ["expired", "expired"]]
+    .map(([k, l]) => `<span class="pill ${DEP_PILL[k]}">${c[k] || 0} ${l}</span>`).join(" ");
+  depTable($("#deptable"), d.rows);
+  $("#depf").oninput = () => { const f = $("#depf").value.toLowerCase(); depTable($("#deptable"), d.rows.filter((r) => [r.hostname, r.label, r.who, r.message].some((x) => String(x || "").toLowerCase().includes(f)))); };
+  $("#depset").queue_days.value = d.queue_days; $("#depset").parallel.value = d.parallel;
+  if (!$("#deploypane").hidden && $("#apps").classList.contains("active")) depTimer = setTimeout(loadDeploy, waiting ? 10000 : 60000);
+}
+$("#depshow").onchange = loadDeploy;
+$("#depset").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api("/api/deployments/settings", { method: "PUT", body: JSON.stringify({ queue_days: +e.target.queue_days.value, parallel: +e.target.parallel.value }) }); toast("Saved."); }
+  catch (er) { toast(errText(er), true); }
+};
+function appTab(t) {
+  $("#apptabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.ptab === t));
+  $("#deploypane").hidden = t !== "deploy"; $("#programspane").hidden = t === "deploy";
+  if (t === "deploy") loadDeploy();
+}
+$("#apptabs").querySelectorAll("button").forEach((b) => b.onclick = () => appTab(b.dataset.ptab));
+
 let appRows = [];
 loaders.apps = async () => {
+  if (!$("#deploypane").hidden) return loadDeploy();
+  api("/api/deployments?status=queued,sending,running").then((d) => { $("#depbadge").textContent = d.rows.length ? ` ${d.rows.length}` : ""; }).catch(() => {});
   const r = await api("/api/apps");
   appRows = r.apps;
   const c = r.catalog || {};
@@ -541,7 +625,7 @@ loaders.scanning = async () => {
         <span class="muted">${r.who ? `started by ${esc(r.who)}` : r.job_id ? "scheduled" : "scan now"} · running ${dur(r.elapsed)}${r.eta != null ? ` · about ${dur(r.eta)} left` : ""}</span>
         ${r.cancelling ? `<span class="pill warn">stopping…</span>` : ""}
         <span class="actions">${r.job_id && !r.cancelling ? `<button class="ghost" data-scancel="${r.job_id}">Cancel</button>` : ""}</span></div>
-      ${steps}<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}</div>`;
+      ${steps}<div class="pbar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}</div>`;
   }).join("") : `<p class="muted">Nothing is scanning right now.</p>`;
   table($("#scanqueue"), d.queued.map((q) => ({ ...q, act: q.job_id })), ["position", "name", "waiting", "starts_in", "expected", "act"], {
     labels: { position: "#", waiting: "waiting for", starts_in: "should start", expected: "takes about", act: "" },
