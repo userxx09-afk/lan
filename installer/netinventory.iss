@@ -194,7 +194,8 @@ begin
     'Uninstalling NetInventory leaves this folder in place.',
     False, '');
   DataPage.Add('Data folder:');
-  DataPage.Values[0] := DefaultDataDir;
+  { A rerun after a setup that didn't finish offers the folders chosen last time. }
+  DataPage.Values[0] := GetPreviousData('DataDir', DefaultDataDir);
 
   DbPage := CreateInputOptionPage(DataPage.ID, 'Database',
     'Where should NetInventory store its data?',
@@ -210,8 +211,8 @@ begin
     'setup restricts it to Administrators, SYSTEM and the database service.',
     False, '');
   PgDirPage.Add('Database folder:');
-  AutoPgDir := AddBackslash(DefaultDataDir) + 'pgdata';
-  PgDirPage.Values[0] := AutoPgDir;
+  AutoPgDir := AddBackslash(DataPage.Values[0]) + 'pgdata';
+  PgDirPage.Values[0] := GetPreviousData('PgData', AutoPgDir);
 
   PgPage := CreateInputQueryPage(PgDirPage.ID, 'Bundled PostgreSQL',
     'Choose the port for the bundled database.',
