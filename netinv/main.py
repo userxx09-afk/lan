@@ -199,6 +199,8 @@ def test_auth(body: LoginIn, request: Request, actor=Depends(ui_auth), db=Depend
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+from . import agentapi  # noqa: E402
+app.include_router(agentapi.router)
 
 
 # ----------------------------------------------------------------- overview
@@ -1211,6 +1213,85 @@ def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_sess
     db.add(AuditLog(actor=actor, action="job.settings", target="schedule", result=f"max_concurrent={body.max_concurrent} reach_interval={body.reach_interval}"))
     db.commit()
     return {"ok": True}
+
+
+# ----------------------------------------------------------------- NetInventory Agent (see agentapi.py)
+AGENT_MSI = "https://github.com/userxx09-afk/Prod/releases/download/lan-latest/NetInventory-Agent.msi"
+
+
+def _agent_out(a) -> dict:
+    t = lambda v: jobs._local(v).isoformat(sep=" ", timespec="minutes") if v else None  # noqa: E731
+    return {"id": a.id, "hostname": a.hostname, "status": a.status, "note": a.note, "enrolled": t(a.enrolled),
+            "last_seen": t(a.last_seen), "last_inventory": t(a.last_inventory), "last_ip": a.last_ip, "version": a.version,
+            "run_as": a.run_as, "inventory_requested": a.want_inventory}
+
+
+@app.get("/api/agents", dependencies=UI)
+def agents_list(request: Request, db=Depends(db_session)):
+    from . import tlscert
+    from .db import Agent
+    tls = tlscert.info(settings.tls_cert)
+    return {"token": {"set": bool(get_setting(db, "agent:token_hash", None)), "created": get_setting(db, "agent:token_created", None),
+                      "hint": get_setting(db, "agent:token_hint", None)},
+            "approve": agentapi.approve_mode(db), "inventory_hours": agentapi.inventory_hours(db),
+            "pin": tls.get("sha256"), "https": tls.get("https", False), "server": str(request.base_url).rstrip("/"),
+            "msi_url": AGENT_MSI,
+            "agents": [_agent_out(a) for a in db.scalars(select(Agent).order_by(Agent.status != "pending", Agent.hostname))]}
+
+
+@app.post("/api/agents/token")
+def agents_token(actor=Depends(ui_auth), db=Depends(db_session)):
+    tok = agentapi.new_token(db)
+    db.add(AuditLog(actor=actor, action="agent.token", target="enrollment", result="new token"))
+    db.commit()
+    return {"token": tok}
+
+
+@app.delete("/api/agents/token")
+def agents_token_off(actor=Depends(ui_auth), db=Depends(db_session)):
+    for k in ("agent:token_hash", "agent:token_hint", "agent:token_created"):
+        set_setting(db, k, "")
+    db.add(AuditLog(actor=actor, action="agent.token", target="enrollment", result="turned off"))
+    db.commit()
+    return {"ok": True}
+
+
+class AgentSettingsIn(BaseModel):
+    approve: str
+    inventory_hours: int
+
+
+@app.put("/api/agents/settings")
+def agents_settings(body: AgentSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    if body.approve not in agentapi.APPROVE or not 1 <= body.inventory_hours <= 336:
+        raise HTTPException(400, "bad settings")
+    set_setting(db, "agent:approve", body.approve)
+    set_setting(db, "agent:inventory_hours", str(body.inventory_hours))
+    db.add(AuditLog(actor=actor, action="agent.settings", target="agent", result=f"approve={body.approve} hours={body.inventory_hours}"))
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/agents/{aid}/{what}")
+def agents_action(aid: int, what: str, actor=Depends(ui_auth), db=Depends(db_session)):
+    from .db import Agent
+    a = db.get(Agent, aid)
+    if not a or what not in ("approve", "revoke", "inventory", "delete"):
+        raise HTTPException(404)
+    if what == "approve":
+        for other in db.scalars(select(Agent).where(Agent.hostname == a.hostname, Agent.status == "active", Agent.id != a.id)):
+            other.status, other.note = "revoked", f"replaced by agent {a.agent_id[:8]} (approved by {actor})"
+        a.status, a.note, a.want_inventory = "active", None, True
+    elif what == "revoke":
+        a.status, a.note = "revoked", f"revoked by {actor}"
+    elif what == "inventory":
+        a.want_inventory = True
+    else:
+        db.delete(a)
+    db.add(AuditLog(actor=actor, action=f"agent.{what}", target=f"computer:{a.hostname}", result="ok"))
+    db.commit()
+    return {"ok": True, "output": {"approve": f"{a.hostname} approved.", "revoke": f"{a.hostname}'s agent revoked: it can't report any more.",
+                                   "inventory": f"{a.hostname} sends its inventory within 5 minutes.", "delete": "Removed."}[what]}
 
 
 # ----------------------------------------------------------------- software updates (see updater.py)

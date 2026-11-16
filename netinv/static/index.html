@@ -253,6 +253,13 @@
         </form>
         <div id="authstate" class="muted"></div>
       </div>
+      <div class="panel" id="agentpanel">
+        <h3>NetInventory Agent (optional)</h3>
+        <p class="muted">For laptops and PCs that WinRM can't reach. A tiny scheduled task (as LOCAL SERVICE) sends a signed heartbeat every 5 minutes and the inventory once a day or when you click Rescan.
+          It only connects out to this server over HTTPS, never listens, checks this server's certificate fingerprint, and never runs anything the server sends.</p>
+        <div id="agentinfo"></div>
+        <div id="agenttable"></div>
+      </div>
       <div class="panel">
         <h3>HTTPS certificate</h3>
         <div id="tlsinfo" class="muted">Loading…</div>

@@ -144,8 +144,13 @@ def check_all(db: Session) -> str:
         nics.setdefault(n.device_id, []).append(n)
     now = utcnow()
     fresh_agent = now - timedelta(minutes=max(10, 3 * interval(db)))
+    from .agentapi import recent_hosts
+    agents = recent_hosts(db, max(10, 3 * interval(db)))
     todo = {}
     for d in devs:
+        if d.hostname in agents:
+            mark(d, True, "agent", now)
+            continue
         if d.agent_last_report and d.agent_last_report >= fresh_agent:
             mark(d, True, "scan", now)
             continue

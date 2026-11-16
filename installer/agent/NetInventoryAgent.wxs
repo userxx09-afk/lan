@@ -1,0 +1,49 @@
+<!--
+  NetInventory Agent MSI (WiX v4). Built by installer/agent/build-agent.ps1 in CI.
+  Silent install, for GPO software installation, Intune (line-of-business app) or a script:
+    msiexec /i NetInventory-Agent.msi /qn SERVER=https://netinv.corp.local:8080 TOKEN=nia_... PIN=<sha256> [RUNAS=SYSTEM]
+  With GPO software installation (no command line), leave the properties out and set Server, EnrollToken and Pin
+  under HKLM\SOFTWARE\Policies\NetInventory\Agent with Group Policy Preferences > Registry instead.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="NetInventory Agent" Manufacturer="NetInventory" Version="$(var.Version)"
+           UpgradeCode="4353b51a-eb45-4422-984b-82c822c8fc6f" Scope="perMachine" Compressed="yes" InstallerVersion="500">
+    <MajorUpgrade DowngradeErrorMessage="A newer NetInventory Agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="TOKEN" Secure="yes" Hidden="yes" />
+    <Property Id="PIN" Secure="yes" />
+    <Property Id="RUNAS" Secure="yes" Value="LOCALSERVICE" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPCOMMENTS" Value="Sends this PC's inventory and an online heartbeat to NetInventory over HTTPS. Outbound only." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NetInventory Agent">
+        <Component Id="AgentScripts" Guid="*">
+          <File Id="AgentPs1" Source="$(var.Src)\NetInventoryAgent.ps1" KeyPath="yes" />
+          <File Id="InstallPs1" Source="$(var.Src)\Install-Agent.ps1" />
+          <File Id="UninstallPs1" Source="$(var.Src)\Uninstall-Agent.ps1" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="NetInventory Agent">
+      <ComponentRef Id="AgentScripts" />
+    </Feature>
+
+    <!-- Register the scheduled task (and write the config) after the files are in place; remove them on uninstall
+         (not on upgrade, so the PC keeps its enrollment). Runs as SYSTEM, hidden, via WixQuietExec. -->
+    <SetProperty Id="AgentSetup" Sequence="execute" Before="AgentSetup"
+      Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Install-Agent.ps1&quot; -Server &quot;[SERVER]&quot; -Token &quot;[TOKEN]&quot; -Pin &quot;[PIN]&quot; -RunAs &quot;[RUNAS]&quot;" />
+    <CustomAction Id="AgentSetup" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+
+    <SetProperty Id="AgentRemove" Sequence="execute" Before="AgentRemove"
+      Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]Uninstall-Agent.ps1&quot;" />
+    <CustomAction Id="AgentRemove" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="AgentSetup" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="AgentRemove" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

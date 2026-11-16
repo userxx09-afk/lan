@@ -946,7 +946,7 @@ const THELP = {
 };
 let creds = [];
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents();
   const [c, t, s] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings")]);
   creds = c; appSettings = s; loadCatalog();
   table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
@@ -1174,6 +1174,49 @@ $("#updreinstall").onclick = () => startInstall(true);
 api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});
 $("#logout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
 // ------------------------------------------------------------ HTTPS certificate
+// ------------------------------------------------------------ NetInventory Agent: enrollment, approvals, revoke
+async function loadAgents(newToken = null) {
+  const d = await api("/api/agents");
+  const cmd = (tok) => `msiexec /i NetInventory-Agent.msi /qn SERVER=${d.server} TOKEN=${tok}${d.pin ? ` PIN=${d.pin}` : ""}`;
+  $("#agentinfo").innerHTML = `
+    ${!d.https ? `<p class="pill bad longtext">This server isn't on HTTPS. Agents only talk HTTPS: set up the certificate below first.</p>` : ""}
+    <div class="kvr"><span>Download</span><div><a class="link" href="${esc(d.msi_url)}">NetInventory-Agent.msi</a> <span class="muted small">(for GPO software installation, Intune or a script)</span></div></div>
+    <div class="kvr"><span>Server</span><div><code>${esc(d.server)}</code></div></div>
+    <div class="kvr"><span>Certificate pin</span><div>${d.pin ? `<code class="small">${esc(d.pin)}</code> <span class="muted small">SHA-256 of this server's certificate. Agents refuse any other server. After changing the certificate, update the pin (GPO) and reinstall or re-enroll.</span>` : `<span class="muted">none (no certificate)</span>`}</div></div>
+    <div class="kvr"><span>Enrollment token</span><div>${newToken ? `<code>${esc(newToken)}</code> <span class="pill warn">shown once: copy it now</span>`
+      : d.token.set ? `set ${esc(fmtDate(d.token.created))}, ends in <code>…${esc(d.token.hint)}</code>` : `<span class="muted">none: agents can't enroll</span>`}
+      <button class="ghost small" id="agtok">${d.token.set ? "New token" : "Create token"}</button>${d.token.set ? ` <button class="ghost small" id="agtokoff">Turn off enrollment</button>` : ""}
+      <div class="muted small">Only used once per PC, to get that PC's own secret. A new token doesn't affect enrolled PCs.</div></div></div>
+    ${newToken ? `<div class="kvr"><span>Install command</span><div><code class="small">${esc(cmd(newToken))}</code></div></div>` : ""}
+    <form id="agset" class="inline row"><label>New PCs <select name="approve">
+        <option value="ad" ${d.approve === "ad" ? "selected" : ""}>are approved if they're in Active Directory</option>
+        <option value="all" ${d.approve === "all" ? "selected" : ""}>are always approved</option>
+        <option value="manual" ${d.approve === "manual" ? "selected" : ""}>wait for my approval</option></select></label>
+      <label>Inventory every <input name="inventory_hours" type="number" min="1" max="336" value="${d.inventory_hours}" style="width:4.5em"> hours</label><button class="ghost">Save</button></form>
+    <p class="muted small">GPO without command line: deploy the MSI, then set <code>Server</code>, <code>EnrollToken</code> and <code>Pin</code> (strings) in
+      <code>HKLM\\SOFTWARE\\Policies\\NetInventory\\Agent</code> with Group Policy Preferences > Registry. A PC that's already enrolled, or a revoked one, always waits for approval.</p>`;
+  $("#agtok").onclick = async () => {
+    if (d.token.set && !(await confirmBox("Make a new enrollment token? The old one stops working for new PCs (enrolled PCs are not affected); update it in your GPO or install command."))) return;
+    const r = await post("/api/agents/token", {}); loadAgents(r.token);
+  };
+  if ($("#agtokoff")) $("#agtokoff").onclick = async () => { if (await confirmBox("Turn off enrollment? New PCs can't enroll until you create a token. Enrolled PCs keep reporting.")) { await api("/api/agents/token", { method: "DELETE" }); loadAgents(); } };
+  $("#agset").onsubmit = async (e) => { e.preventDefault(); try { await api("/api/agents/settings", { method: "PUT", body: JSON.stringify({ approve: e.target.approve.value, inventory_hours: +e.target.inventory_hours.value }) }); toast("Saved."); } catch (er) { toast(errText(er), true); } };
+  const AST = { active: "good", pending: "warn", revoked: "bad" };
+  table($("#agenttable"), d.agents.map((a) => ({ ...a, act: a.id })), ["hostname", "status", "last_seen", "last_inventory", "version", "run_as", "last_ip", "enrolled", "act"], {
+    labels: { last_seen: "heartbeat", last_inventory: "inventory", run_as: "runs as", last_ip: "from", act: "" },
+    cell: { hostname: hostLink, status: (v, r) => `<span class="pill ${AST[v] || "mute"}">${esc(v)}</span>${r.note ? `<div class="muted small">${esc(r.note)}</div>` : ""}`,
+      last_seen: (v) => v ? `${esc(fmtDate(v))}` : "", last_inventory: (v, r) => `${esc(fmtDate(v) || "not yet")}${r.inventory_requested ? ` <span class="muted small">(due)</span>` : ""}`,
+      act: (id, r) => [r.status === "pending" ? `<a class="link" data-ag="approve" data-id="${id}">Approve</a>` : "",
+        r.status === "active" ? `<a class="link" data-ag="inventory" data-id="${id}">Inventory now</a>` : "",
+        r.status !== "revoked" ? `<a class="link" data-ag="revoke" data-id="${id}">Revoke</a>` : `<a class="link" data-ag="delete" data-id="${id}">Remove</a>`].filter(Boolean).join(" · ") } });
+  if (!d.agents.length) $("#agenttable").innerHTML = `<p class="muted">No agents enrolled yet.</p>`;
+  $("#agenttable").querySelectorAll("[data-ag]").forEach((a) => a.onclick = async () => {
+    if (a.dataset.ag === "revoke" && !(await confirmBox("Revoke this agent? It can't report any more; if it tries to enroll again it waits for your approval."))) return;
+    try { toast((await post(`/api/agents/${a.dataset.id}/${a.dataset.ag}`, {})).output); } catch (e) { toast(errText(e), true); }
+    loadAgents();
+  });
+}
+
 async function loadTls() {
   const t = await api("/api/tls");
   if (!t.https) { $("#tlsinfo").textContent = "HTTPS is off (no certificate in config.toml)."; return; }

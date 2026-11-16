@@ -387,6 +387,26 @@ class ScanJob(Base):
     last_seconds: Mapped[int | None] = mapped_column(Integer)
 
 
+class Agent(Base):
+    """An enrolled NetInventory Agent (agentapi.py). The secret signs every request; it's stored encrypted."""
+    __tablename__ = "agents"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    hostname: Mapped[str] = mapped_column(String(64), index=True)
+    fqdn: Mapped[str | None] = mapped_column(String(255))
+    machine_guid: Mapped[str | None] = mapped_column(String(64))
+    secret_enc: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active")    # active | pending | revoked
+    note: Mapped[str | None] = mapped_column(String(255))                 # why it's pending
+    enrolled: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    last_ip: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[str | None] = mapped_column(String(16))
+    run_as: Mapped[str | None] = mapped_column(String(64))
+    last_inventory: Mapped[datetime | None] = mapped_column(DateTime)
+    want_inventory: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Deployment(Base):
     """One push to one PC (app update, Windows updates, service start, reboot): the queue and the log (fixes.py).
     status: queued (waiting for its turn, or for the PC to come online) | sending | running | success | failed |

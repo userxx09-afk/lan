@@ -325,11 +325,45 @@ Give BI tools a read-only Postgres role: `GRANT SELECT ON ALL TABLES IN SCHEMA p
 - Installed software comes from the machine-wide Add/Remove Programs keys. Per-user installs (some Teams, Zoom
   and Chrome installs) aren't included in agentless mode.
 
-## Optional agent (later)
+## NetInventory Agent (optional)
 
-`agent/Send-Inventory.ps1` collects exactly the same data and POSTs it to `/api/ingest/endpoint` using the
-`ingest_token`. Run it as a scheduled task on laptops that are rarely on the network. Nothing else changes,
-because both paths go through `netinv/ingest.py`.
+For laptops and PCs that WinRM can't reach. Settings > **NetInventory Agent** has the download, the enrollment token,
+the certificate pin and the list of enrolled PCs (approve, revoke, *Inventory now*).
+
+What it is: three PowerShell scripts in `C:\Program Files\NetInventory Agent` and one scheduled task,
+*NetInventory Agent*, that runs every 5 minutes and at startup as **LOCAL SERVICE** (no admin rights). Each run sends a
+small heartbeat (boot time, signed-in user, IPv4 addresses), which turns the PC's dot green and keeps uptime current.
+When the server answers that an inventory is due (every 24 hours by default, or after *Rescan*/*Inventory now*), the same
+run sends the inventory: the same data as the WinRM scan (generated from it by `tools/gen_agent.py`). As LOCAL SERVICE it
+skips what needs admin rights (pending Windows updates, per-user apps, the Security log); install with `RUNAS=SYSTEM`
+to collect those too.
+
+Security:
+- **Outbound only**: HTTPS to the NetInventory server. Nothing listens on the PC; no firewall rule is added.
+- **Pinned server**: with `PIN` (the SHA-256 shown in Settings) the agent talks only to a server presenting that
+  certificate, even a self-signed one; without it, the certificate must be trusted by Windows.
+- **Per-PC secret**: the enrollment token is used once, to get the PC's own random secret, stored DPAPI-encrypted in
+  `%ProgramData%\NetInventory Agent` (readable only by SYSTEM, Administrators and the task account). The server keeps the
+  token only as a hash and each secret encrypted. Rotating the token doesn't affect enrolled PCs.
+- **Signed requests**: HMAC-SHA256 over the time, a one-time nonce, the path and the body; 5-minute window, no replays.
+  An agent can only report for the computer it enrolled as.
+- **Approval**: by default PCs that are in AD are approved automatically; others, a second agent claiming an enrolled
+  PC's name, or a PC whose agent was revoked wait for approval. *Revoke* stops a PC at once.
+- The server never sends code: its only answer is "inventory due" or not.
+
+Deploy:
+- Script or Intune: `msiexec /i NetInventory-Agent.msi /qn SERVER=https://netinv.corp.local:8080 TOKEN=nia_... PIN=<sha256> [RUNAS=SYSTEM]`
+  (Settings shows the exact command when you create a token).
+- GPO: assign the MSI under *Computer Configuration > Policies > Software Settings > Software installation*, and set
+  the strings `Server`, `EnrollToken` and `Pin` in `HKLM\SOFTWARE\Policies\NetInventory\Agent` with *Preferences >
+  Windows Settings > Registry* (policy values override the MSI's).
+- A PowerShell execution policy of *AllSigned* enforced by GPO blocks the (unsigned) scripts; *RemoteSigned* is fine.
+- Check a PC: `powershell -File "C:\Program Files\NetInventory Agent\NetInventoryAgent.ps1" -Mode Test` as admin;
+  the log is `%ProgramData%\NetInventory Agent\agent.log`.
+- Uninstall the MSI to remove the task, the secret and the log; then *Revoke* or *Remove* the PC in Settings.
+
+`agent/Send-Inventory.ps1` (the older one-shot script using the shared `ingest_token`) still works but has no pinning
+or per-PC secret; prefer the agent.
 
 ## Layout
 
@@ -353,7 +387,8 @@ netinv/
   collectors/snmp.py   switches and routers
   demo.py            sample data
   static/            dashboard (plain HTML/JS, no build step)
-agent/Send-Inventory.ps1   optional push agent
+agent/Send-Inventory.ps1   older one-shot push script (prefer netinv/agent)
+  netinv/agent/              the NetInventory Agent scripts (MSI: installer/agent)
 tools/dameware/            dameware:// launcher, installer script and GPO .reg for technician PCs
 installer/                 Windows installer (Inno Setup) and its build script
 ```

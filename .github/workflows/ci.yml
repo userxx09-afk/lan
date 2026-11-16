@@ -41,6 +41,8 @@ jobs:
           python tests/test_catalog.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
+      - name: Agent inventory script matches the WinRM one
+        run: python tools/gen_agent.py --check
 
   windows:
     name: Windows installer
@@ -56,6 +58,21 @@ jobs:
           $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
           $notes = ("$env:NOTES" -split "`n")[0]
           .\installer\build.ps1 -Version $v -Notes $notes
+      - name: Agent scripts parse
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($f in Get-ChildItem netinv\agent\*.ps1) {
+            $err = $null; [void][Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
+            if ($err) { $bad++; $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
+          }
+          if ($bad) { exit 1 }
+      - name: Build agent MSI
+        continue-on-error: true      # never let the optional agent block the server release
+        shell: powershell
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
+          .\installer\agent\build-agent.ps1 -Version $v
       # Published straight from this job: no Actions artifact, so the account's artifact storage
       # quota (shared with the other apps) can't block a release.
       # Installable builds live in the public, releases-only prod repo (this source repo is private):
@@ -79,6 +96,7 @@ jobs:
           [IO.File]::WriteAllText("$PWD\$out\latest.json", ($m | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
           Copy-Item "$out\$($m.file)" "$out\NetInventory-Setup.exe"   # fixed name for downloading by hand
           $files = @("$out\$($m.file)", "$out\NetInventory-Setup.exe", "$out\latest.json")
+          if (Test-Path "$out\NetInventory-Agent.msi") { $files += "$out\NetInventory-Agent.msi" } else { Write-Host "::warning::Agent MSI wasn't built; publishing without it." }
           $notes = ("$env:NOTES" -split "`n")[0]; if (-not $notes) { $notes = 'Update' }
           gh release delete "lan-v$v" --repo $prod --yes --cleanup-tag 2>$null
           gh release create "lan-v$v" @files --repo $prod --target main --title "NetInventory $v" --notes $notes --latest=false

@@ -78,9 +78,12 @@ def wake_on_lan(dev: Device) -> dict:
 
 
 def rescan(hostname: str) -> dict:
-    """Re-run the WinRM inventory for one PC in the background."""
+    """Re-run the WinRM inventory for one PC in the background (and ask its agent, if it has one)."""
     from . import jobs
     from .collectors import winrm
+    from .agentapi import request_inventory
+    with SessionLocal() as db:
+        request_inventory(db, hostname)
 
     def work():
         key = f"rescan:{hostname}"

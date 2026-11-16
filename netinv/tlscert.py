@@ -67,7 +67,8 @@ def info(crt_path: str) -> dict:
     pending = p.with_name("tls.pending.key").exists()
     return {"https": True, "subject": cert.subject.rfc4514_string(), "issuer": cert.issuer.rfc4514_string(),
             "self_signed": cert.issuer == cert.subject, "not_after": cert.not_valid_after_utc.isoformat(),
-            "names": names, "pending_request": pending}
+            "names": names, "pending_request": pending,
+            "sha256": cert.fingerprint(hashes.SHA256()).hex().upper()}
 
 
 def make_csr(folder: str) -> str:
