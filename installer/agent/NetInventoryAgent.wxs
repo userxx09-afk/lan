@@ -20,15 +20,16 @@
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="NetInventory Agent">
-        <Component Id="AgentScripts" Guid="*">
-          <File Id="AgentPs1" Source="$(var.Src)\NetInventoryAgent.ps1" KeyPath="yes" />
-          <File Id="InstallPs1" Source="$(var.Src)\Install-Agent.ps1" />
-          <File Id="UninstallPs1" Source="$(var.Src)\Uninstall-Agent.ps1" />
-        </Component>
+        <!-- One file per component: unversioned files can only get an automatic GUID as their component's key path -->
+        <Component Id="AgentPs1C"><File Id="AgentPs1" Source="$(var.Src)\NetInventoryAgent.ps1" KeyPath="yes" /></Component>
+        <Component Id="InstallPs1C"><File Id="InstallPs1" Source="$(var.Src)\Install-Agent.ps1" KeyPath="yes" /></Component>
+        <Component Id="UninstallPs1C"><File Id="UninstallPs1" Source="$(var.Src)\Uninstall-Agent.ps1" KeyPath="yes" /></Component>
       </Directory>
     </StandardDirectory>
     <Feature Id="Main" Title="NetInventory Agent">
-      <ComponentRef Id="AgentScripts" />
+      <ComponentRef Id="AgentPs1C" />
+      <ComponentRef Id="InstallPs1C" />
+      <ComponentRef Id="UninstallPs1C" />
     </Feature>
 
     <!-- Register the scheduled task (and write the config) after the files are in place; remove them on uninstall
