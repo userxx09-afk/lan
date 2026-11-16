@@ -276,16 +276,27 @@ New-NetFirewallRule -DisplayName 'NetInventory dashboard' -Direction Inbound -Pr
 Log "Firewall opened for TCP $Port (Domain and Private profiles)"
 
 # ---------------------------------------------------------------- 7. health check
-$up = $false
+# uvicorn only opens the port once the app has finished starting, so an accepted TCP connection means the
+# dashboard is up. (No HTTPS request: the certificate is self-signed and Windows PowerShell's TLS handling
+# varies by server.) The first start can be slow, since Python compiles the app and antivirus scans every
+# file, so wait up to 3 minutes. A slow start is a warning, not a failure; a service that stopped is a failure.
 $scheme = if ((ReadUtf8 $Config) -match '(?m)^tls_cert\s*=\s*"[^"]+"') { 'https' } else { 'http' }
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }   # localhost check of our own self-signed cert
-for ($i = 0; $i -lt 40; $i++) {
-    try { Invoke-WebRequest "${scheme}://localhost:$Port/login" -UseBasicParsing -TimeoutSec 3 | Out-Null; $up = $true; break }
-    catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $up = $true; break } }
-    Start-Sleep 1
+$up = $false
+$deadline = (Get-Date).AddMinutes(3)
+while ((Get-Date) -lt $deadline) {
+    $tcp = New-Object Net.Sockets.TcpClient
+    try { $tcp.Connect('127.0.0.1', $Port); $up = $true } catch { } finally { $tcp.Close() }
+    if ($up) { break }
+    if ((Get-Service NetInventory -ErrorAction SilentlyContinue).Status -ne 'Running') {
+        Start-Sleep 5   # WinSW restarts a crashed app; give it a moment before deciding
+        if ((Get-Service NetInventory -ErrorAction SilentlyContinue).Status -ne 'Running') {
+            Fail "The NetInventory service stopped while starting. See $DataDir\logs\NetInventory.err.log"
+        }
+    }
+    Start-Sleep 2
 }
-if (-not $up) { Fail "The service started but ${scheme}://localhost:$Port/ is not answering. See $DataDir\logs\NetInventory.err.log" }
+if ($up) { Log "Dashboard is answering on port $Port" }
+else { Log "WARNING: the service is running but not answering on port $Port after 3 minutes. It may still be starting; if ${scheme}://localhost:$Port/ doesn't open in a few minutes, see $DataDir\logs\NetInventory.err.log" }
 # Downloaded update installers are no longer needed (the one running now can't be deleted; it goes next time).
 Get-ChildItem -LiteralPath (Join-Path $DataDir 'updates') -Filter *.exe -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue

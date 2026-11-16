@@ -24,7 +24,18 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.cmd == "serve":
+        import logging
+
         import uvicorn
+
+        class _QuietResets(logging.Filter):
+            """On Windows, asyncio logs a full traceback whenever a browser or probe drops a connection
+            ([WinError 10054] in _ProactorBasePipeTransport._call_connection_lost). It's harmless noise."""
+            def filter(self, record: logging.LogRecord) -> bool:
+                exc = record.exc_info[1] if record.exc_info else None
+                return not isinstance(exc, (ConnectionResetError, ConnectionAbortedError))
+
+        logging.getLogger("asyncio").addFilter(_QuietResets())
         tls = {}
         if settings.tls_cert and settings.tls_key:
             tls = {"ssl_certfile": settings.tls_cert, "ssl_keyfile": settings.tls_key}
