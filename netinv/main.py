@@ -1732,8 +1732,7 @@ def agents_push(body: AgentPushIn, user=Depends(ui_auth)):
             db.commit()
         hosts = list(body.hostnames)
         if body.group:
-            hosts += list(db.scalars(select(Device.hostname).join(DeviceGroup, DeviceGroup.device_id == Device.id)
-                                     .where(DeviceGroup.name == body.group)))
+            hosts += groups.hosts(db, body.group)
     if not hosts:
         raise HTTPException(400, "pick at least one computer")
     if len(set(hosts)) > 2000:

@@ -558,12 +558,13 @@ async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {
 }
 $("#runscript").onclick = () => runScriptDialog({ hosts: [current] });
 // ------------------------------------------------------------ push the NetInventory Agent over WinRM (agentpush.py)
-async function pushAgentDialog(hosts) {
+async function pushAgentDialog(hosts, group = null) {
   let d;
   try { d = await api("/api/agents/push"); } catch (e) { return toast(errText(e), true); }
   if (!d.https) return toast("This server isn't on HTTPS yet. Agents only talk HTTPS: set up the certificate in Settings first.", true);
-  const one = hosts.length === 1 ? hosts[0] : null;
-  const f = await formModal(`<h3>Push the agent to ${one ? esc(one) : `${hosts.length} computers`}</h3>
+  const one = !group && hosts.length === 1 ? hosts[0] : null;
+  const who = group ? `every computer in the group ${group}` : one || `${hosts.length} computers`;
+  const f = await formModal(`<h3>Push the agent to ${esc(who)}</h3>
     <p class="muted small">Installs (or updates) the NetInventory Agent over WinRM with the scan credential, the same way as other
       deployments: no download on the PC and no enrollment token needed. Each PC gets a one-time ticket, is approved
       automatically, and only counts as done once its agent has reported to this server.</p>
@@ -577,11 +578,11 @@ async function pushAgentDialog(hosts) {
       Offline PCs get it when they come back online. Follow it in Software &gt; Deployments or the Agent column.</p>`, true);
   if (!f) return;
   const what = f.remove ? "Remove the agent from" : "Install the agent on";
-  if (!(await confirmBox(`${what} ${one || `${hosts.length} computers`}?`))) return;
+  if (!(await confirmBox(`${what} ${who}?`))) return;
   try {
-    const r = await post("/api/agents/push", { hostnames: hosts, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
+    const r = await post("/api/agents/push", { hostnames: hosts, group, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
     toast(r.output, !r.ok);
-    if (one && current === one) openDevice(one); else loaders.computers();
+    if (one && current === one) openDevice(one); else if (!group) loaders.computers();
   } catch (e) { toast(errText(e), true); }
 }
 $("#pushagent").onclick = () => pushAgentDialog([current]);
@@ -1665,7 +1666,7 @@ loaders.groups = async () => {
       kind: (v, r) => v === "rules" ? `<span class="pill good">rules</span>${r.manual ? ` <span class="muted small">+${r.manual} by hand</span>` : ""}` : `<span class="pill mute">by hand</span>`,
       rule: (v) => `<span class="longtext">${esc(v)}</span>`,
       scan_jobs: (v) => esc((v || []).join(", ")),
-      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a>${AGENT_PUSH_GROUP ? ` · <a class="link" data-gpush="${esc(n)}">Push agent</a>` : ""} · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
+      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
     } });
   const el = $("#grptable"), byName = (n) => grpData.groups.find((g) => g.name === n);
   el.querySelectorAll("[data-gmem]").forEach((a) => a.onclick = () => groupMembers(a.dataset.gmem));
@@ -1675,7 +1676,7 @@ loaders.groups = async () => {
     showComputers([{ field: "hostname", op: "in", value: m }], `Group ${a.dataset.gshow}`);
   });
   el.querySelectorAll("[data-gscript]").forEach((a) => a.onclick = () => runScriptDialog({ group: a.dataset.gscript }));
-  el.querySelectorAll("[data-gpush]").forEach((a) => a.onclick = () => AGENT_PUSH_GROUP(a.dataset.gpush));
+  el.querySelectorAll("[data-gpush]").forEach((a) => a.onclick = () => pushAgentDialog([], a.dataset.gpush));
   el.querySelectorAll("[data-gedit]").forEach((a) => a.onclick = () => editGroup(byName(a.dataset.gedit)));
   el.querySelectorAll("[data-gdel]").forEach((a) => a.onclick = async () => {
     const g = byName(a.dataset.gdel);
@@ -1683,8 +1684,6 @@ loaders.groups = async () => {
     try { await api(`/api/groups/${encodeURIComponent(g.name)}`, { method: "DELETE" }); toast("Group deleted."); loaders.groups(); } catch (e) { toast(errText(e), true); }
   });
 };
-// Set by the agent push feature when it can target a group: (groupName) => opens its dialog.
-var AGENT_PUSH_GROUP = window.AGENT_PUSH_GROUP || null;
 async function groupMembers(name) {
   const r = await api(`/api/groups/${encodeURIComponent(name)}/members`), g = grpData.groups.find((x) => x.name === name) || {};
   drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Computers where ${esc(g.rule)}` : "Computers added by hand"}</p><div id="gmemtab"></div>`);
