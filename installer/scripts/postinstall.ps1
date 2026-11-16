@@ -39,6 +39,14 @@ function NewSecret([int]$n = 24) {
     -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
 }
 function TomlStr([string]$s) { '"' + ($s -replace '\\', '\\' -replace '"', '\"') + '"' }
+function HashPw([string]$pw) {
+    # UTF-8 both ways, so passwords with accents hash the same as what the browser sends
+    $OutputEncoding = New-Object Text.UTF8Encoding $false
+    $env:PYTHONIOENCODING = 'utf-8'
+    $h = ($pw | & $Python -m netinv hashpw 2>&1 | Out-String).Trim()
+    if ($h -notlike 'pbkdf2_sha256$*') { throw "Hashing the dashboard password failed: $h" }
+    return $h
+}
 
 try {
 $Upgrade = $P.Upgrade -eq '1'
@@ -129,7 +137,7 @@ if (-not (Test-Path $Config)) {
     Log 'Writing config.toml'
     $c = Get-Content -LiteralPath (Join-Path $InstallDir 'config.example.toml') -Raw
     $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl))
-    $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr $P.UiPassword))
+    $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $P.UiPassword)))
     $c = $c -replace '(?m)^ingest_token = .*$', ('ingest_token = ' + (TomlStr (NewSecret 32)))
     # Collectors stay disabled until the admin fills in real servers and credentials.
     $c = $c -replace '(?m)^server = "dc01\.corp\.example\.com".*$', 'server = ""                       # e.g. "dc01.corp.example.com"'
@@ -142,11 +150,30 @@ if (-not (Test-Path $Config)) {
     Log 'Keeping existing config.toml'
     if ($P.UiPassword) {
         $c = Get-Content -LiteralPath $Config -Raw
-        $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr $P.UiPassword))
+        $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $P.UiPassword)))
         if ($P.DbMode -eq 'existing') { $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl)) }
         Set-Content -LiteralPath $Config -Value $c -Encoding UTF8
     }
 }
+# Security settings, for new installs and upgrades alike:
+#  - a dashboard password left in plain text by an older version is replaced with its hash
+#  - HTTPS with a self-signed certificate unless one is configured already
+$c = Get-Content -LiteralPath $Config -Raw
+if ($c -match '(?m)^ui_password = "(?!pbkdf2_sha256\$)(?!env:)([^"]+)"') {
+    $plainPw = $Matches[1] -replace '\\"', '"' -replace '\\\\', '\'
+    $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $plainPw)))
+    Log 'Dashboard password in config.toml replaced with its hash'
+}
+if ($c -notmatch '(?m)^tls_cert\s*=') {
+    $env:NETINV_CONFIG = $Config
+    Push-Location (Join-Path $InstallDir 'app')
+    try { Log (Run $Python @('-m', 'netinv', 'cert', '--out', $DataDir)).Trim() } finally { Pop-Location }
+    $crt = (Join-Path $DataDir 'tls.crt') -replace '\\', '/'; $key = (Join-Path $DataDir 'tls.key') -replace '\\', '/'
+    $c = $c -replace '(?m)^\[server\]\s*$', "[server]`r`ntls_cert = $(TomlStr $crt)`r`ntls_key = $(TomlStr $key)"
+    Log 'HTTPS turned on with a self-signed certificate'
+}
+Set-Content -LiteralPath $Config -Value $c -Encoding UTF8
+
 [Environment]::SetEnvironmentVariable('NETINV_CONFIG', $Config, 'Machine')
 $env:NETINV_CONFIG = $Config
 
@@ -196,16 +223,19 @@ Log "Firewall opened for TCP $Port (Domain and Private profiles)"
 
 # ---------------------------------------------------------------- 7. health check
 $up = $false
+$scheme = if ((Get-Content -LiteralPath $Config -Raw) -match '(?m)^tls_cert\s*=\s*"[^"]+"') { 'https' } else { 'http' }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }   # localhost check of our own self-signed cert
 for ($i = 0; $i -lt 40; $i++) {
-    try { Invoke-WebRequest "http://localhost:$Port/" -UseBasicParsing -TimeoutSec 3 | Out-Null; $up = $true; break }
+    try { Invoke-WebRequest "${scheme}://localhost:$Port/login" -UseBasicParsing -TimeoutSec 3 | Out-Null; $up = $true; break }
     catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $up = $true; break } }
     Start-Sleep 1
 }
-if (-not $up) { Fail "The service started but http://localhost:$Port/ is not answering. See $DataDir\logs\NetInventory.err.log" }
+if (-not $up) { Fail "The service started but ${scheme}://localhost:$Port/ is not answering. See $DataDir\logs\NetInventory.err.log" }
 # Downloaded update installers are no longer needed (the one running now can't be deleted; it goes next time).
 Get-ChildItem -LiteralPath (Join-Path $DataDir 'updates') -Filter *.exe -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
-Log "Done. Dashboard: http://localhost:$Port/ (user admin)"
+Log "Done. Dashboard: ${scheme}://localhost:$Port/ (user admin)"
 exit 0
 }
 catch { Fail $_.Exception.Message }

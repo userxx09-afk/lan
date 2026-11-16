@@ -3,6 +3,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = (v) => (v === null || v === undefined ? "" : String(v)).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const api = async (path, opts = {}) => {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (r.status === 401 && !path.startsWith("/api/auth/test")) { location.href = "/login"; throw new Error("Signed out"); }
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 };
@@ -169,6 +170,7 @@ $("#clearsel").onclick = () => { grid.selected.clear(); loaders.computers(); };
 
 async function download(path, spec) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+  if (r.status === 401) { location.href = "/login"; return; }
   if (!r.ok) return toast(await r.text(), true);
   const name = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/)?.[1] || "export";
   const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(await r.blob()), download: name });
@@ -639,7 +641,7 @@ const THELP = {
 };
 let creds = [];
 loaders.settings = async () => {
-  loadUpdate();
+  loadUpdate(); loadAuth();
   const [c, t, s] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings")]);
   creds = c; appSettings = s;
   table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
@@ -755,6 +757,33 @@ $("#updinstall").onclick = async () => {
   if (!(await confirmBox("Install the update now? NetInventory stops for a minute or two while it upgrades. Running scans are interrupted. Your data, settings and credentials are kept."))) return;
   try { const r = await post("/api/update/install", {}); toast(r.output); } catch (e) { toast(errText(e), true); }
   loadUpdate();
+};
+
+// ------------------------------------------------------------ signed-in user, sign-in settings
+api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});
+$("#logout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
+async function loadAuth() {
+  const a = await api("/api/auth");
+  const f = $("#authform");
+  f.ad_domain.value = a.ad_domain || ""; f.ad_group.value = a.ad_group || ""; f.ad_server.value = a.ad_server || "";
+  $("#authstate").innerHTML = `${kvRow("Local admin", a.local_user ? (a.local_enabled ? `<span class="pill warn">on</span> ${esc(a.local_user)}`
+      : `<span class="pill good">off</span> turned back on by deleting <code>${esc(a.local_disabled_file)}</code>`) : "not configured")}
+    ${kvRow("AD sign-in", a.ad_group ? `<span class="pill good">on</span> members of ${esc(a.ad_group)} in ${esc(a.ad_domain)}` : `<span class="pill mute">off</span>`)}
+    ${kvRow("HTTPS", a.https ? `<span class="pill good">on</span>` : `<span class="pill bad">off</span> passwords cross the network unencrypted`)}`;
+  if (!f.ad_domain.value) {   // suggest the domain from an AD scan target
+    try { const t = (await api("/api/targets")).find((x) => x.kind === "ad_domain"); if (t) f.ad_domain.placeholder = t.value; } catch {}
+  }
+}
+$("#authform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api("/api/auth", { method: "PUT", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Sign-in settings saved. Test an AD sign-in before signing out."); loadAuth(); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#authtest").onclick = async () => {
+  const f = await formModal(`<h3>Test an AD sign-in</h3><p class="hint">Checks the password and group membership. It doesn't sign you in or turn off the local admin.</p>
+    <label>AD username<input name="username" autocomplete="off" required></label><label>Password<input name="password" type="password" autocomplete="off" required></label>`);
+  if (!f) return;
+  try { const r = await post("/api/auth/test", f); toast(r.output, !r.ok); } catch (er) { toast(errText(er), true); }
 };
 
 // ------------------------------------------------------------ search + drawer

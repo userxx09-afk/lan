@@ -19,6 +19,7 @@
     <button data-tab="settings">Settings</button>
   </nav>
   <form id="search"><input id="q" placeholder="Search PC, user, IP or MAC" autocomplete="off"></form>
+  <div class="who"><span id="whoami"></span><button class="ghost" id="logout">Sign out</button></div>
 </header>
 
 <main>
@@ -183,6 +184,18 @@
         <h3>Software updates</h3>
         <div id="updinfo" class="muted">Checking…</div>
         <div class="row"><button class="ghost" id="updcheck">Check now</button><button id="updinstall" hidden>Install update</button></div>
+      </div>
+      <div class="panel">
+        <h3>Sign-in</h3>
+        <p class="muted">Let members of one AD group sign in with their own AD accounts. Actions are then audited under each person's name.
+          After the first successful AD sign-in, the local admin account turns off. If AD sign-in ever stops working, delete the file shown below on the server to turn the local admin back on.</p>
+        <form id="authform" class="lifeform">
+          <label>AD domain <input name="ad_domain" placeholder="corp.example.com"></label>
+          <label>Allowed group <input name="ad_group" placeholder="NetInventory Admins (name or distinguished name)"></label>
+          <label>Domain controller <input name="ad_server" placeholder="optional: blank = find one"></label>
+          <div class="row"><button>Save</button><button type="button" class="ghost" id="authtest">Test an AD sign-in</button></div>
+        </form>
+        <div id="authstate" class="muted"></div>
       </div>
       <div class="panel">
         <h3>Credentials</h3>

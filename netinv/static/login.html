@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · NetInventory</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="loginpage">
+<form id="login" class="loginbox" autocomplete="on">
+  <div class="brand">NetInventory</div>
+  <p class="muted">Sign in with your AD account (<code>user</code>, <code>DOMAIN\user</code> or <code>user@domain</code>), or the local admin account.</p>
+  <label>Username<input name="username" autocomplete="username" required autofocus></label>
+  <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+  <div id="err" class="pill bad longtext" hidden></div>
+  <button>Sign in</button>
+  <p id="plain" class="hint" hidden>This page isn't using HTTPS, so your password crosses the network unencrypted. Ask your administrator to turn on HTTPS.</p>
+</form>
+<script>
+if (location.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(location.hostname)) document.getElementById("plain").hidden = false;
+document.getElementById("login").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target), err = document.getElementById("err"), b = e.target.querySelector("button");
+  b.disabled = true; err.hidden = true;
+  try {
+    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: f.get("username"), password: f.get("password") }) });
+    if (r.ok) { location.href = "/" + (location.hash || ""); return; }
+    let msg = "Sign-in failed."; try { msg = (await r.json()).detail || msg; } catch {}
+    err.textContent = msg; err.hidden = false;
+  } catch { err.textContent = "Can't reach the server."; err.hidden = false; }
+  b.disabled = false;
+};
+</script>
+</body>
+</html>

@@ -11,13 +11,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, exports, jobs, library, reports, updater
+from . import __version__, actions, alerts, auth, exports, jobs, library, reports, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
@@ -49,16 +48,41 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NetInventory", version=__version__, lifespan=lifespan)
-basic = HTTPBasic(auto_error=False)
 
 
-def ui_auth(creds: HTTPBasicCredentials | None = Depends(basic)):
-    if not settings.ui_user:
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def current_user(request: Request) -> str | None:
+    """The signed-in user from the session cookie, or from HTTP basic auth (scripts, BI refreshes)."""
+    s = auth.session_user(request.cookies.get(auth.COOKIE))
+    if s:
+        return s.user
+    h = request.headers.get("authorization", "")
+    if h.lower().startswith("basic "):
+        import base64
+        try:
+            user, _, pw = base64.b64decode(h[6:]).decode().partition(":")
+        except Exception:
+            return None
+        with SessionLocal() as db:
+            try:
+                sess = auth.login(db, user, pw, _client_ip(request))
+            except auth.LoginError:
+                return None
+        auth.logout(getattr(sess, "token", None))   # basic auth is per request; keep no session
+        return sess.user
+    return None
+
+
+def ui_auth(request: Request):
+    user = current_user(request)
+    if user:
+        return user
+    if not auth.auth_required():
         return "admin"
-    if not creds or not (secrets.compare_digest(creds.username, settings.ui_user)
-                         and secrets.compare_digest(creds.password, settings.ui_password)):
-        raise HTTPException(401, headers={"WWW-Authenticate": "Basic"})
-    return creds.username
+    raise HTTPException(401, "Sign in required")
 
 
 def ingest_auth(x_ingest_token: str = Header(default="")):
@@ -74,9 +98,98 @@ def db_session():
 UI = [Depends(ui_auth)]
 
 
-@app.get("/", dependencies=UI)
-def index():
-    return FileResponse(STATIC / "index.html")
+@app.get("/")
+def index(request: Request):
+    if not current_user(request) and auth.auth_required():
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/login")
+def login_page():
+    return FileResponse(STATIC / "login.html", headers={"Cache-Control": "no-store"})
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+def do_login(body: LoginIn, request: Request, db=Depends(db_session)):
+    ip = _client_ip(request)
+    try:
+        s = auth.login(db, body.username, body.password, ip)
+    except auth.LoginError as exc:
+        db.add(AuditLog(actor=body.username[:64], action="login.failed", target=f"ip:{ip}", result=str(exc)[:200]))
+        db.commit()
+        raise HTTPException(401, str(exc))
+    db.add(AuditLog(actor=s.user, action=f"login.{s.source}", target=f"ip:{ip}", result="ok"))
+    db.commit()
+    resp = Response('{"ok": true}', media_type="application/json")
+    resp.set_cookie(auth.COOKIE, s.token, httponly=True, samesite="strict", secure=request.url.scheme == "https",
+                    max_age=auth.SESSION_MAX, path="/")
+    return resp
+
+
+@app.post("/api/logout")
+def do_logout(request: Request):
+    auth.logout(request.cookies.get(auth.COOKIE))
+    resp = Response('{"ok": true}', media_type="application/json")
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/me")
+def me(user=Depends(ui_auth)):
+    return {"user": user, "version": __version__}
+
+
+# ----------------------------------------------------------------- sign-in settings (AD group, break-glass)
+class AuthIn(BaseModel):
+    ad_domain: str | None = None
+    ad_group: str | None = None
+    ad_server: str | None = None
+
+
+def _auth_out(db) -> dict:
+    return {"ad_domain": get_setting(db, "auth:ad_domain"), "ad_group": get_setting(db, "auth:ad_group"),
+            "ad_server": get_setting(db, "auth:ad_server"), "local_user": settings.ui_user or None,
+            "local_enabled": auth.local_enabled(), "local_disabled_file": str(auth.local_disabled_file()),
+            "https": bool(settings.tls_cert)}
+
+
+@app.get("/api/auth", dependencies=UI)
+def get_auth(db=Depends(db_session)):
+    return _auth_out(db)
+
+
+@app.put("/api/auth")
+def put_auth(body: AuthIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    for k in ("ad_domain", "ad_group", "ad_server"):
+        v = (getattr(body, k) or "").strip() or None
+        if v and not __import__("re").fullmatch(r"[A-Za-z0-9 ._=,\-]{1,255}", v):
+            raise HTTPException(400, f"{k} has characters that aren't allowed")
+        set_setting(db, f"auth:{k}", v)
+    db.add(AuditLog(actor=actor, action="auth.save", target="sign-in",
+                    result=f"domain={body.ad_domain} group={body.ad_group} server={body.ad_server}"))
+    db.commit()
+    return _auth_out(db)
+
+
+@app.post("/api/auth/test")
+def test_auth(body: LoginIn, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    """Try an AD sign-in without signing in (and without turning off the local admin)."""
+    if auth.locked_out(body.username, _client_ip(request)):
+        raise HTTPException(429, "Too many failed attempts. Try again in 15 minutes.")
+    sam = auth.ad_login(db, body.username, body.password)
+    if not sam:
+        auth._fail(body.username, _client_ip(request))
+    db.add(AuditLog(actor=actor, action="auth.test", target=f"user:{body.username[:64]}", result="ok" if sam else "refused"))
+    db.commit()
+    return {"ok": bool(sam), "output": f"{sam} can sign in." if sam else
+            "Refused: wrong password, account disabled, not in the group, or no domain controller reachable. "
+            "The server log has the reason."}
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

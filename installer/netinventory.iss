@@ -57,7 +57,7 @@ Root: HKLM; Subkey: "SOFTWARE\Classes\dameware\shell\open\command"; ValueType: s
   ValueData: """{sys}\WindowsPowerShell\v1.0\powershell.exe"" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{commonappdata}\{#AppName}\Open-DameWare.ps1"" ""%1"""; Tasks: dameware
 
 [Icons]
-Name: "{group}\Open NetInventory dashboard"; Filename: "http://localhost:{code:GetPort}/"
+Name: "{group}\Open NetInventory dashboard"; Filename: "https://localhost:{code:GetPort}/"
 Name: "{group}\Edit configuration"; Filename: "notepad.exe"; Parameters: """{commonappdata}\{#AppName}\config.toml"""
 Name: "{group}\Restart NetInventory service"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Restart-Service NetInventory"""
 Name: "{group}\Load demo data"; Filename: "{app}\python\python.exe"; Parameters: "-m netinv demo"; WorkingDir: "{app}\app"
@@ -66,7 +66,7 @@ Name: "{group}\Logs folder"; Filename: "{commonappdata}\{#AppName}\logs"
 Name: "{group}\Uninstall NetInventory"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "http://localhost:{code:GetPort}/"; Description: "Open the NetInventory dashboard"; Flags: postinstall shellexec nowait skipifsilent
+Filename: "https://localhost:{code:GetPort}/"; Description: "Open the NetInventory dashboard"; Flags: postinstall shellexec nowait skipifsilent
 
 [UninstallRun]
 Filename: "powershell.exe"; \

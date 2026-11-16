@@ -196,3 +196,11 @@ td.wrap { white-space: normal; min-width: 220px; }
 .modal [hidden] { display: none !important; }
 .longtext { display: inline-block; white-space: normal; max-width: 720px; }
 .brand a.pill { cursor: pointer; font-weight: 500; margin-left: 6px; vertical-align: middle; } .brand a.pill[hidden] { display: none; }
+/* ---- sign-in ---- */
+.loginpage { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.loginbox { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; width: min(400px, 100%); display: grid; gap: 12px; }
+.loginbox .brand { font-size: 20px; }
+.loginbox label { display: grid; gap: 6px; color: var(--muted); }
+.loginbox [hidden] { display: none; }
+.who { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.who button { padding: 4px 10px; font-size: 12.5px; }

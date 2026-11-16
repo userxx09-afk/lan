@@ -5,8 +5,11 @@
 url = "postgresql+psycopg://netinv:change-me@localhost:5432/netinv"
 
 [server]
-ui_user = "admin"                 # HTTP basic auth for the dashboard; leave empty to disable
-ui_password = "env:UI_PASSWORD"
+ui_user = "admin"                 # local admin sign-in; turns itself off after the first AD sign-in (see README)
+ui_password = "env:UI_PASSWORD"   # plain text, or a hash from: python -m netinv hashpw
+# HTTPS: PEM certificate and key. The installer makes a self-signed pair; swap in one from your CA to avoid browser warnings.
+# tls_cert = "C:/ProgramData/NetInventory/tls.crt"
+# tls_key = "C:/ProgramData/NetInventory/tls.key"
 ingest_token = "env:INGEST_TOKEN" # only needed for the optional push agent
 
 # [ad], [winrm] and [snmp] are only used until you add scan targets in the Settings tab of the dashboard,

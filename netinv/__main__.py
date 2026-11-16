@@ -1,4 +1,4 @@
-"""CLI:  python -m netinv serve | collect <ad|snmp|pcs|pcs_updates|dc_logons|all> | demo | views"""
+"""CLI:  python -m netinv serve | collect <ad|snmp|pcs|pcs_updates|dc_logons|all> | demo | views | cert | hashpw"""
 import argparse
 import sys
 
@@ -17,11 +17,29 @@ def main() -> None:
     c.add_argument("job", choices=["ad", "snmp", "pcs", "pcs_updates", "dc_logons", "all"])
     sub.add_parser("demo", help="load sample data so you can try the dashboard")
     sub.add_parser("views", help="(re)create the reporting views")
+    ce = sub.add_parser("cert", help="make a self-signed HTTPS certificate (tls.crt / tls.key)")
+    ce.add_argument("--out", required=True, help="folder to write tls.crt and tls.key to")
+    ce.add_argument("--force", action="store_true", help="replace existing files")
+    sub.add_parser("hashpw", help="read a password on stdin and print its hash for config.toml")
     args = ap.parse_args()
 
     if args.cmd == "serve":
         import uvicorn
-        uvicorn.run("netinv.main:app", host=args.host, port=args.port)
+        tls = {}
+        if settings.tls_cert and settings.tls_key:
+            tls = {"ssl_certfile": settings.tls_cert, "ssl_keyfile": settings.tls_key}
+        uvicorn.run("netinv.main:app", host=args.host, port=args.port, proxy_headers=False, **tls)
+        return
+    if args.cmd == "cert":
+        from .tlscert import make_self_signed
+        print(make_self_signed(args.out, force=args.force))
+        return
+    if args.cmd == "hashpw":
+        from .auth import hash_password
+        pw = sys.stdin.readline().rstrip("\r\n")
+        if len(pw) < 8:
+            sys.exit("password too short")
+        print(hash_password(pw))
         return
 
     init_db(settings.database_url)

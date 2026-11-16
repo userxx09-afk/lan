@@ -1,8 +1,10 @@
 """Encryption at rest for stored credentials (Fernet / AES-128-CBC + HMAC).
 
-The key lives in a file next to config.toml (secret.key), which the installer
-locks down to Administrators and SYSTEM. Losing the key means re-entering the
-credentials; it does not affect any other data.
+The key lives next to config.toml, in a folder the installer locks down to Administrators and SYSTEM.
+On Windows it is also wrapped with DPAPI (machine scope) in secret.key.dpapi, so a copy of the file is
+useless on any other computer; an older plain secret.key is converted on first use. Elsewhere (Docker,
+Linux) it is a plain secret.key readable by its owner only. Losing the key (or moving to a new
+server) means re-entering the credentials in Settings; no other data is affected.
 """
 from __future__ import annotations
 
@@ -21,18 +23,56 @@ def _key_path() -> Path:
     return cfg.parent / "secret.key"
 
 
+# ------------------------------------------------------------------ Windows DPAPI (machine scope)
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in, blob_out = BLOB(len(data), buf), BLOB()
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    flags = 0x4 | 0x1                    # CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    args = (ctypes.byref(blob_in), None, None, None, None, flags, ctypes.byref(blob_out))
+    if not fn(*args):
+        raise OSError(f"DPAPI {'protect' if protect else 'unprotect'} failed: {ctypes.GetLastError()}")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _load_key() -> bytes:
+    plain = _key_path()
+    wrapped = plain.with_name(plain.name + ".dpapi")
+    if os.name == "nt":
+        if wrapped.exists():
+            return _dpapi(wrapped.read_bytes(), protect=False).strip()
+        key = plain.read_bytes().strip() if plain.exists() else Fernet.generate_key()
+        wrapped.parent.mkdir(parents=True, exist_ok=True)
+        wrapped.write_bytes(_dpapi(key, protect=True))
+        if _dpapi(wrapped.read_bytes(), protect=False).strip() != key:
+            raise RuntimeError("DPAPI round trip failed; keeping the plain key")
+        if plain.exists():
+            plain.unlink()               # converted: only the DPAPI-wrapped copy remains
+        return key
+    if not plain.exists():
+        plain.parent.mkdir(parents=True, exist_ok=True)
+        plain.write_bytes(Fernet.generate_key())
+        try:
+            os.chmod(plain, 0o600)
+        except OSError:
+            pass
+    return plain.read_bytes().strip()
+
+
 def _f() -> Fernet:
     global _fernet
     if _fernet is None:
-        p = _key_path()
-        if not p.exists():
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_bytes(Fernet.generate_key())
-            try:
-                os.chmod(p, 0o600)
-            except OSError:
-                pass
-        _fernet = Fernet(p.read_bytes().strip())
+        _fernet = Fernet(_load_key())
     return _fernet
 
 

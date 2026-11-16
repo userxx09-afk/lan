@@ -12,7 +12,9 @@ class Settings:
     database_url: str = "postgresql+psycopg://netinv:netinv@localhost:5432/netinv"
     ingest_token: str = ""                 # required header X-Ingest-Token for /api/ingest/* (future agent)
     ui_user: str = ""                      # optional HTTP basic auth for the dashboard/API
-    ui_password: str = ""
+    ui_password: str = ""                  # plain text or a pbkdf2_sha256$ hash (see auth.py)
+    tls_cert: str = ""                     # PEM certificate (chain) for HTTPS; empty = plain HTTP
+    tls_key: str = ""                      # PEM private key
     ad: dict = field(default_factory=dict)
     winrm: dict = field(default_factory=dict)
     snmp: dict = field(default_factory=dict)
@@ -46,6 +48,8 @@ def load_settings() -> Settings:
     s.ingest_token = srv.get("ingest_token", "")
     s.ui_user = srv.get("ui_user", "")
     s.ui_password = srv.get("ui_password", "")
+    s.tls_cert = srv.get("tls_cert", "")
+    s.tls_key = srv.get("tls_key", "")
     for key in ("ad", "winrm", "snmp", "schedule", "insights", "update"):
         setattr(s, key, data.get(key, {}))
     s.outdated_software = data.get("outdated_software", [])
