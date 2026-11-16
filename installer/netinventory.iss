@@ -348,7 +348,8 @@ begin
     Result := False;
 end;
 
-function DirEmpty(Dir: String): Boolean;
+{ True when Dir holds nothing but the names in Ignore ('|'-separated, lower case, with '|' at both ends). }
+function DirEmpty(Dir, Ignore: String): Boolean;
 var
   F: TFindRec;
 begin
@@ -356,7 +357,7 @@ begin
   if FindFirst(AddBackslash(Dir) + '*', F) then
   try
     repeat
-      if (F.Name <> '.') and (F.Name <> '..') then Result := False;
+      if (F.Name <> '.') and (F.Name <> '..') and (Pos('|' + Lowercase(F.Name) + '|', Ignore) = 0) then Result := False;
     until (not Result) or (not FindNext(F));
   finally
     FindClose(F);
@@ -382,7 +383,10 @@ begin
     MsgBox('Choose a folder for the ' + What + ', not the root of a drive.', mbError, MB_OK)
   else if IsWithin(Dir, WizardDirValue) or IsWithin(WizardDirValue, Dir) then
     MsgBox('Keep the ' + What + ' separate from the install folder (' + WizardDirValue + '), not inside it or around it.', mbError, MB_OK)
-  else if DirExists(Dir) and not FileExists(AddBackslash(Dir) + Marker) and not DirEmpty(Dir) then
+  { Files a NetInventory setup that failed part way may have left (logs, password file, certificate, the
+    DameWare launcher, which always goes to ProgramData\NetInventory) don't make the folder "in use". }
+  else if DirExists(Dir) and not FileExists(AddBackslash(Dir) + Marker) and
+          not DirEmpty(Dir, '|logs|pgdata|.pg-password|tls.crt|tls.key|updates|catalog|open-dameware.ps1|') then
     MsgBox(Dir + ' already has other files in it.' + #13#10#13#10 +
            'Setup restricts the ' + What + ' to Administrators and SYSTEM, which would lock other people out of those files. ' +
            'Choose a new or empty folder.', mbError, MB_OK)
