@@ -50,7 +50,7 @@ with TestClient(m.app) as c:
     assert c.get("/api/agents/push").json()["server"] == "https://netinv.corp.local:8080"
     rows = c.post("/api/query", json={"dataset": "v_devices", "fields": ["hostname", "agent_status"],
                                      "filters": [{"field": "hostname", "op": "in", "value": hosts}]}).json()["rows"]
-    assert all(x["agent_status"] == "installing" for x in rows), rows
+    assert all(x["agent_status"] in ("waiting", "installing") for x in rows), rows      # the dispatcher may already be sending
 
     fixes.poll_once(); time.sleep(1.5)
     assert len(sent) == 2, sent
