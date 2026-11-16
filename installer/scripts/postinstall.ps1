@@ -18,7 +18,9 @@ $InstallDir = $P.InstallDir; $DataDir = $P.DataDir; $Port = [int]$P.Port
 $Python   = Join-Path $InstallDir 'python\python.exe'
 $PgBin    = Join-Path $InstallDir 'pgsql\bin'
 $PgData   = Join-Path $DataDir 'pgdata'
-$PgPort   = 5442                    # not 5432, so it never clashes with another PostgreSQL on this box
+# Chosen in the wizard; 5442 by default (not 5432, so it never clashes with another PostgreSQL on this box).
+# Older installers didn't pass it and always used 5442.
+$PgPort   = if ($P.PgPort) { [int]$P.PgPort } else { 5442 }
 $PgSvc    = 'NetInventory-PostgreSQL'
 $Config   = Join-Path $DataDir 'config.toml'
 $Secrets  = Join-Path $DataDir '.pg-password'
@@ -80,11 +82,19 @@ if ($ok -ne 'ok') {
 }
 Log 'Python and packages OK'
 
-$listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($listener) {
-    $owner = (Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)").ExecutablePath
-    if ($owner -notlike "$InstallDir*") { Fail "Port $Port is already used by $owner. Re-run setup and choose another port." }
+# Backstop for the wizard's own check: never take over a port another program is listening on.
+# NetInventory's own processes (from this install folder) are fine; they are restarted below.
+function PortOwner([int]$port) {
+    $l = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $l) { return $null }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($l.OwningProcess)"
+    if ($proc.ExecutablePath -like "$InstallDir\*") { return $null }
+    if ($proc.ExecutablePath) { return $proc.ExecutablePath }
+    if ($l.OwningProcess -eq 4) { return 'Windows (System process, usually IIS or another HTTP.sys web service)' }
+    return "$($proc.Name) (PID $($l.OwningProcess))"
 }
+$owner = PortOwner $Port
+if ($owner) { Fail "Port $Port is already used by $owner. Re-run setup and choose another web port." }
 
 # ---------------------------------------------------------------- 2. data folder ACL (config holds passwords)
 Log 'Securing data folder'
@@ -106,6 +116,21 @@ if ($P.DbMode -eq 'bundled') {
         try { Run (Join-Path $PgBin 'initdb.exe') @('-D', $PgData, '-U', 'netinv', "--pwfile=$pw", '-A', 'scram-sha-256', '-E', 'UTF8', '--locale=C') | Out-Null }
         finally { Remove-Item $pw -Force -ErrorAction SilentlyContinue }
         Add-Content -LiteralPath (Join-Path $PgData 'postgresql.conf') -Value "`nlisten_addresses = 'localhost'`nport = $PgPort`n"
+    } else {
+        # Existing cluster. Upgrades pass the port it already uses; a fresh install over a leftover
+        # cluster may have picked another one, so set it (the last "port =" line wins).
+        $conf = Join-Path $PgData 'postgresql.conf'
+        $confPort = 5432
+        foreach ($line in [IO.File]::ReadAllLines($conf)) { if ($line -match '^\s*port\s*=\s*(\d+)') { $confPort = [int]$Matches[1] } }
+        if ($confPort -ne $PgPort) {
+            Log "Moving the bundled PostgreSQL from port $confPort to $PgPort"
+            Add-Content -LiteralPath $conf -Value "`nport = $PgPort`n"
+            if ((Get-Service $PgSvc -ErrorAction SilentlyContinue).Status -eq 'Running') { Restart-Service $PgSvc -Force }
+        }
+    }
+    if ((Get-Service $PgSvc -ErrorAction SilentlyContinue).Status -ne 'Running') {
+        $owner = PortOwner $PgPort
+        if ($owner) { Fail "Port $PgPort is already used by $owner. Re-run setup and choose another database port." }
     }
     if (-not (Get-Service $PgSvc -ErrorAction SilentlyContinue)) {
         Log "Registering service $PgSvc"

@@ -41,13 +41,17 @@ the app's packages (also kept as offline wheels), PostgreSQL binaries, WinSW, th
 Inno Setup, then runs a smoke test with the bundled Python before compiling.
 
 What the installer does on the server:
-- **Wizard:** install folder, then a choice between a bundled PostgreSQL and an existing server
-  (connection details), then the web port and dashboard password.
+- **Wizard:** install folder, then a choice between a bundled PostgreSQL (with its port, 5442 by
+  default) and an existing server (connection details), then the web port and dashboard password.
+- **Port checks:** when you click Next on a port page, setup checks whether another program is
+  already listening on that port. If one is, it names the program, leaves it alone, and offers the
+  next free port (or lets you type another). NetInventory's own processes from the same install
+  folder don't count, so reinstalling over a running copy works. Upgrades keep the ports already in use.
 - **Dependency checks, with fixes where possible:** Windows version and 64-bit, PowerShell 5.1,
   VC++ 2015-2022 runtime (installed if missing), Python packages (reinstalled from the bundled
-  wheels if any fail to import), web port already in use, database reachable.
+  wheels if any fail to import), web and database ports already in use (checked again in case something grabbed them after the wizard), database reachable.
 - **Bundled database:** initialises a PostgreSQL cluster in `C:\ProgramData\NetInventory\pgdata`
-  on localhost:5442 with a random password, and registers it as the `NetInventory-PostgreSQL` service.
+  on localhost (port 5442 unless you chose another) with a random password, and registers it as the `NetInventory-PostgreSQL` service.
 - **App service:** registers the `NetInventory` service (automatic, delayed start, restarts on failure),
   writes `C:\ProgramData\NetInventory\config.toml` (only Administrators and SYSTEM can read it),
   opens the web port in the firewall for the Domain and Private profiles, and waits until the dashboard answers.

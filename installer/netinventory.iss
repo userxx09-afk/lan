@@ -45,6 +45,8 @@ Source: "..\tools\dameware\*"; DestDir: "{app}\tools\dameware"; Flags: ignorever
 Source: "..\tools\dameware\Open-DameWare.ps1"; DestDir: "{commonappdata}\{#AppName}"; Flags: ignoreversion; Tasks: dameware
 ; Prerequisite: Microsoft Visual C++ 2015-2022 runtime (PostgreSQL and some Python wheels need it).
 Source: "{#Build}\redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Check: NeedsVcRedist
+; Wizard helper that checks whether a port is free; extracted to {tmp} when needed, never installed.
+Source: "portcheck.ps1"; Flags: dontcopy
 
 [Dirs]
 Name: "{commonappdata}\{#AppName}"
@@ -76,10 +78,12 @@ Filename: "powershell.exe"; \
 [Code]
 var
   DbPage: TInputOptionWizardPage;
+  PgPage: TInputQueryWizardPage;
   ExistingPage: TInputQueryWizardPage;
   WebPage: TInputQueryWizardPage;
-  IsUpgrade: Boolean;      { NetInventory is already set up here: keep its database, config and port }
-  PrevMode, PrevPort: String;
+  IsUpgrade: Boolean;      { NetInventory is already set up here: keep its database, config and ports }
+  PrevMode, PrevPort, PrevPgPort, ConfPgPort: String;
+  PortCheckReady: Boolean;
 
 function NeedsVcRedist: Boolean;
 var
@@ -96,6 +100,33 @@ begin
     Result := DbPage.SelectedValueIndex = 0;
 end;
 
+{ The port an existing bundled cluster listens on, from its postgresql.conf (the last "port =" line wins,
+  as in PostgreSQL itself). Empty when there is no cluster or no port line. }
+function PortFromPgConf: String;
+var
+  Lines: TArrayOfString;
+  I, J: Integer;
+  S: String;
+begin
+  Result := '';
+  if not LoadStringsFromFile(ExpandConstant('{commonappdata}\{#AppName}\pgdata\postgresql.conf'), Lines) then Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    S := Trim(Lines[I]);
+    if (Copy(S, 1, 4) = 'port') and (Length(S) > 4) and ((S[5] = ' ') or (S[5] = '=') or (S[5] = #9)) then
+    begin
+      S := Trim(Copy(S, 5, Length(S)));
+      if (S <> '') and (S[1] = '=') then
+      begin
+        S := Trim(Copy(S, 2, Length(S)));
+        J := 1;
+        while (J <= Length(S)) and (S[J] >= '0') and (S[J] <= '9') do J := J + 1;
+        if J > 1 then Result := Copy(S, 1, J - 1);
+      end;
+    end;
+  end;
+end;
+
 procedure InitializeWizard;
 var
   DataDir: String;
@@ -106,6 +137,10 @@ begin
   if PrevMode = '' then
     if DirExists(DataDir + '\pgdata') then PrevMode := 'bundled' else PrevMode := 'existing';
   PrevPort := GetPreviousData('Port', '');
+  ConfPgPort := PortFromPgConf;
+  PrevPgPort := GetPreviousData('PgPort', '');
+  if PrevPgPort = '' then PrevPgPort := ConfPgPort;
+  if PrevPgPort = '' then PrevPgPort := '5442';    { what versions before 0.5 always used }
   DbPage := CreateInputOptionPage(wpSelectDir, 'Database',
     'Where should NetInventory store its data?',
     'NetInventory uses PostgreSQL. Choose a bundled local server or one you already run.',
@@ -114,7 +149,15 @@ begin
   DbPage.Add('Use an existing PostgreSQL server');
   DbPage.SelectedValueIndex := 0;
 
-  ExistingPage := CreateInputQueryPage(DbPage.ID, 'Existing PostgreSQL server',
+  PgPage := CreateInputQueryPage(DbPage.ID, 'Bundled PostgreSQL',
+    'Choose the port for the bundled database.',
+    'The bundled PostgreSQL only listens on this computer (localhost). The default, 5442, avoids the usual ' +
+    'PostgreSQL port 5432 so it never clashes with another PostgreSQL server here. Setup checks that the port is free.');
+  PgPage.Add('Database port:', False);
+  { A cluster left in the data folder by an earlier install keeps its port. }
+  if ConfPgPort <> '' then PgPage.Values[0] := ConfPgPort else PgPage.Values[0] := '5442';
+
+  ExistingPage := CreateInputQueryPage(PgPage.ID, 'Existing PostgreSQL server',
     'Enter the connection details.',
     'The database must already exist, and the user needs rights to create tables and views in it.');
   ExistingPage.Add('Server (host name or IP):', False);
@@ -139,9 +182,11 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   if IsUpgrade then
-    Result := (PageID = DbPage.ID) or (PageID = ExistingPage.ID) or (PageID = WebPage.ID)
+    Result := (PageID = DbPage.ID) or (PageID = PgPage.ID) or (PageID = ExistingPage.ID) or (PageID = WebPage.ID)
+  else if UseBundledPg then
+    Result := PageID = ExistingPage.ID
   else
-    Result := (PageID = ExistingPage.ID) and UseBundledPg;
+    Result := PageID = PgPage.ID;
 end;
 
 { Upgrades from versions that didn't record the port: read it from the service definition. }
@@ -177,11 +222,83 @@ begin
          'Stop-Service NetInventory-PostgreSQL -Force -ErrorAction SilentlyContinue; Start-Sleep 2"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-function NextButtonClick(CurPageID: Integer): Boolean;
+{ Asks portcheck.ps1 who listens on Port. Returns True when another program has it; a NetInventory
+  process from this install folder (a reinstall over a running copy) doesn't count. Suggest gets the
+  next free port, skipping Avoid. If the check itself can't run, the port counts as free: the
+  post-install script checks again before it starts anything. }
+function PortTaken(Port, Avoid: Integer; var Owner, Suggest: String): Boolean;
 var
-  P: Integer;
+  OutFile, Cmd, Dir: String;
+  Code: Integer;
+  Arr: TArrayOfString;
+begin
+  Result := False;
+  Owner := '';
+  Suggest := '';
+  if not PortCheckReady then
+  begin
+    ExtractTemporaryFile('portcheck.ps1');
+    PortCheckReady := True;
+  end;
+  OutFile := ExpandConstant('{tmp}\portcheck-out.txt');
+  DeleteFile(OutFile);
+  Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\portcheck.ps1') + '" -Port ' + IntToStr(Port) +
+         ' -Avoid ' + IntToStr(Avoid) + ' -Out "' + OutFile + '"';
+  WizardForm.NextButton.Enabled := False;
+  try
+    if Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, Code) and LoadStringsFromFile(OutFile, Arr) and (GetArrayLength(Arr) >= 2) then
+    begin
+      Owner := Trim(Arr[0]);
+      Suggest := Trim(Arr[1]);
+      Dir := Lowercase(AddBackslash(WizardDirValue));
+      Result := (Owner <> '') and (Pos(Dir, Lowercase(Owner)) <> 1);
+    end;
+  finally
+    WizardForm.NextButton.Enabled := True;
+    DeleteFile(OutFile);
+  end;
+end;
+
+{ Checks the port typed in Page.Values[Index]. If another program has it, says which one and offers the next
+  free port; Yes puts that port in the field and carries on, No stays on the page. }
+function PortFreeOrSwitched(Page: TInputQueryWizardPage; Index, Avoid: Integer; What: String): Boolean;
+var
+  Port: Integer;
+  Owner, Suggest: String;
 begin
   Result := True;
+  Port := StrToInt(Trim(Page.Values[Index]));
+  if not PortTaken(Port, Avoid, Owner, Suggest) then Exit;
+  if Suggest = '' then
+  begin
+    MsgBox('Port ' + IntToStr(Port) + ' is already used by:' + #13#10 + Owner + #13#10#13#10 +
+           'Setup will not touch it. Enter another ' + What + ' port.', mbError, MB_OK);
+    Result := False;
+  end
+  else if MsgBox('Port ' + IntToStr(Port) + ' is already used by:' + #13#10 + Owner + #13#10#13#10 +
+                 'Setup will not touch it. Use port ' + Suggest + ' for the ' + What + ' instead?' + #13#10#13#10 +
+                 'Yes uses ' + Suggest + '. No lets you type a different port.', mbConfirmation, MB_YESNO) = IDYES then
+    Page.Values[Index] := Suggest
+  else
+    Result := False;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  P, Pg: Integer;
+begin
+  Result := True;
+  if CurPageID = PgPage.ID then
+  begin
+    P := StrToIntDef(Trim(PgPage.Values[0]), 0);
+    if (P < 1) or (P > 65535) then
+    begin
+      MsgBox('Enter a port between 1 and 65535.', mbError, MB_OK);
+      Result := False;
+    end
+    else
+      Result := PortFreeOrSwitched(PgPage, 0, StrToIntDef(Trim(WebPage.Values[0]), 0), 'database');
+  end;
   if CurPageID = ExistingPage.ID then
   begin
     if (Trim(ExistingPage.Values[0]) = '') or (Trim(ExistingPage.Values[2]) = '') or (Trim(ExistingPage.Values[3]) = '') then
@@ -192,10 +309,16 @@ begin
   end;
   if CurPageID = WebPage.ID then
   begin
-    P := StrToIntDef(WebPage.Values[0], 0);
+    P := StrToIntDef(Trim(WebPage.Values[0]), 0);
+    if UseBundledPg then Pg := StrToIntDef(Trim(PgPage.Values[0]), 0) else Pg := 0;
     if (P < 1) or (P > 65535) then
     begin
       MsgBox('Enter a port between 1 and 65535.', mbError, MB_OK);
+      Result := False;
+    end
+    else if P = Pg then
+    begin
+      MsgBox('Port ' + IntToStr(P) + ' is already chosen for the bundled database. Use a different web port.', mbError, MB_OK);
       Result := False;
     end
     else if Length(WebPage.Values[1]) < 8 then
@@ -207,7 +330,9 @@ begin
     begin
       MsgBox('The passwords do not match.', mbError, MB_OK);
       Result := False;
-    end;
+    end
+    else
+      Result := PortFreeOrSwitched(WebPage, 0, Pg, 'dashboard');
   end;
 end;
 
@@ -258,10 +383,22 @@ begin
   else if WebPage = nil then Result := '8080' else Result := Clean(Trim(WebPage.Values[0]));
 end;
 
+{ Port of the bundled PostgreSQL. Upgrades keep the one in use; empty for an existing server. }
+function GetPgPort(Param: String): String;
+begin
+  if not UseBundledPg then
+    Result := ''
+  else if IsUpgrade then
+    Result := PrevPgPort
+  else
+    Result := Clean(Trim(PgPage.Values[0]));
+end;
+
 procedure RegisterPreviousData(PreviousDataKey: Integer);
 begin
   SetPreviousData(PreviousDataKey, 'DbMode', GetDbMode(''));
   SetPreviousData(PreviousDataKey, 'Port', GetPort(''));
+  if UseBundledPg then SetPreviousData(PreviousDataKey, 'PgPort', GetPgPort(''));
 end;
 
 { Secrets go to a temp file (deleted by the script) instead of the command line, so they
@@ -287,6 +424,7 @@ begin
            'DbMode=' + GetDbMode('') + #13#10 +
            'DbUrl=' + GetDbUrl('') + #13#10 +
            'Port=' + GetPort('') + #13#10 +
+           'PgPort=' + GetPgPort('') + #13#10 +
            'UiPassword=' + WebPage.Values[1] + #13#10;
   if IsUpgrade then Lines := Lines + 'Upgrade=1' + #13#10;
   SetArrayLength(Arr, 1);
