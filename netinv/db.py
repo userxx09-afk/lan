@@ -428,6 +428,21 @@ class Deployment(Base):
     expires: Mapped[datetime | None] = mapped_column(DateTime)
     task: Mapped[str | None] = mapped_column(String(128))            # scheduled task name on the PC while running
     check_until: Mapped[datetime | None] = mapped_column(DateTime)
+    payload: Mapped[str | None] = mapped_column(Text)               # a script: the exact text that was approved and runs
+
+
+class Script(Base):
+    """A saved PowerShell or command prompt script that can be run on one PC or many (fixes.py, action "script")."""
+    __tablename__ = "scripts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(String(16), default="powershell")      # powershell | cmd
+    body: Mapped[str] = mapped_column(Text)
+    timeout_min: Mapped[int] = mapped_column(Integer, default=30)
+    created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    who: Mapped[str | None] = mapped_column(String(64))
 
 
 class ScanExclusion(Base):

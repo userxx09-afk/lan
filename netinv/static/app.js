@@ -441,6 +441,102 @@ async function runFix(action) {
 }
 document.querySelectorAll("[data-fix]").forEach((b) => b.onclick = async () => { b.disabled = true; try { await runFix(b.dataset.fix); } finally { b.disabled = false; } });
 
+// ------------------------------------------------------------ scripts: a library, and running one on one PC or many
+const LANGS = { powershell: "PowerShell", cmd: "Command prompt" };
+let scriptData = null;
+const getScripts = async () => (scriptData = await api("/api/scripts"));
+async function loadScripts() {
+  const d = await getScripts();
+  const render = () => {
+    const f = $("#scf").value.toLowerCase();
+    const rows = d.scripts.filter((x) => [x.name, x.description, x.body].some((v) => String(v || "").toLowerCase().includes(f)));
+    table($("#sctable"), rows.map((x) => ({ ...x, act: x.id })), ["name", "language", "description", "runs", "timeout_min", "updated", "who", "act"], {
+      labels: { timeout_min: "time limit", who: "by", act: "" },
+      cell: { name: (v, r) => `<a class="link" data-scedit="${r.id}">${esc(v)}</a>`, language: (v) => esc(LANGS[v] || v),
+        description: (v) => `<span class="longtext small">${esc(v || "")}</span>`, timeout_min: (v) => `${esc(v)} min`, updated: (v) => esc(v || ""),
+        runs: (v, r) => (v ? `${v} <span class="muted small">(${r.ok} ok, ${r.failed} failed)</span>` : `<span class="muted">never</span>`),
+        act: (id) => `<a class="link" data-scrun="${id}">Run…</a> &nbsp; <a class="link" data-scdel="${id}">Delete</a>` } });
+    const byId = (id) => d.scripts.find((x) => String(x.id) === String(id));
+    $("#sctable").querySelectorAll("[data-scedit]").forEach((a) => a.onclick = () => editScript(byId(a.dataset.scedit)));
+    $("#sctable").querySelectorAll("[data-scrun]").forEach((a) => a.onclick = () => runScriptDialog({ scriptId: +a.dataset.scrun, hosts: [...grid.selected] }));
+    $("#sctable").querySelectorAll("[data-scdel]").forEach((a) => a.onclick = async () => {
+      if (!(await confirmBox(`Delete the script ${byId(a.dataset.scdel).name}? Pushes already queued still run the text they were queued with.`))) return;
+      try { await api(`/api/scripts/${a.dataset.scdel}`, { method: "DELETE" }); toast("Deleted."); } catch (e) { toast(errText(e), true); }
+      loadScripts();
+    });
+  };
+  $("#scf").oninput = render;
+  render();
+}
+const langSelect = (v) => `<select name="language">${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${v === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
+const SCRIPT_HELP = `<p class="muted small">Runs as SYSTEM on the PC, with no window and nobody to answer prompts, so make it silent.
+  Exit code 0 counts as success, anything else as failed (in PowerShell, <code>exit 1</code> or an error with <code>-ErrorAction Stop</code>).
+  Everything it prints is kept (the last 3,500 characters).</p>`;
+async function editScript(x = {}) {
+  const f = await formModal(`<h3>${x.id ? "Edit script" : "New script"}</h3>
+    <label>Name <input name="name" value="${esc(x.name || "")}" maxlength="128" required></label>
+    <label>What it does <input name="description" value="${esc(x.description || "")}" placeholder="optional"></label>
+    <div class="row"><label>Language ${langSelect(x.language || "powershell")}</label>
+      <label>Time limit (minutes) <input name="timeout_min" type="number" min="1" max="240" value="${esc(x.timeout_min || 30)}"></label></div>
+    <label>Script <textarea name="body" class="code" rows="16" spellcheck="false" required>${esc(x.body || "")}</textarea></label>${SCRIPT_HELP}`, true);
+  if (!f) return;
+  try {
+    await (x.id ? api(`/api/scripts/${x.id}`, { method: "PUT", body: JSON.stringify(f) }) : post("/api/scripts", f));
+    toast("Saved."); loadScripts();
+  } catch (e) { toast(errText(e), true); }
+}
+$("#scnew").onclick = () => editScript();
+const splitHosts = (t) => String(t || "").split(/[\s,;]+/).map((h) => h.trim()).filter(Boolean);
+async function runScriptDialog({ scriptId = null, hosts = [] } = {}) {
+  const d = scriptData || (await getScripts().catch(() => ({ scripts: [], groups: [] })));
+  const one = hosts.length === 1 && !scriptId ? hosts[0] : null;
+  const f = await formModal(`<h3>Run a script${one ? ` on ${esc(one)}` : ""}</h3>
+    <label>Script <select name="sid"><option value="">A one-off command (type it below)</option>
+      ${d.scripts.map((x) => `<option value="${x.id}" ${x.id === scriptId ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+    <div id="sc-adhoc"><div class="row"><label>Language ${langSelect("powershell")}</label>
+        <label>Time limit (minutes) <input name="timeout" type="number" min="1" max="240" value="10"></label></div>
+      <label>Command <textarea name="body" class="code" rows="8" spellcheck="false" placeholder="for example: ipconfig /flushdns"></textarea></label></div>
+    <pre id="sc-preview" class="code small" hidden></pre>
+    ${one ? "" : `<label>On <select name="on">
+        <option value="sel" ${hosts.length ? "selected" : ""}>the ${hosts.length} computer${hosts.length === 1 ? "" : "s"} selected in Computers</option>
+        <option value="group" ${hosts.length ? "" : "selected"}>every computer in a group</option><option value="list">these computers</option></select></label>
+      <label id="sc-group">Group <select name="group">${(d.groups || []).map((g) => `<option>${esc(g)}</option>`).join("") || "<option value=''>(no groups yet)</option>"}</select></label>
+      <label id="sc-list">Computer names (one per line, or separated by commas) <textarea name="list" rows="4">${esc(hosts.join("\n"))}</textarea></label>`}
+    ${SCRIPT_HELP}<p class="muted small">Offline PCs get it when they come back online. Follow it in Software &gt; Deployments.</p>`, true, (form) => {
+    const sync = () => {
+      const x = d.scripts.find((s) => String(s.id) === form.sid.value);
+      form.querySelector("#sc-adhoc").hidden = !!x;
+      const pv = form.querySelector("#sc-preview"); pv.hidden = !x; pv.textContent = x ? `${LANGS[x.language]}, stops after ${x.timeout_min} min\n\n${x.body}` : "";
+      if (form.on) { form.querySelector("#sc-group").hidden = form.on.value !== "group"; form.querySelector("#sc-list").hidden = form.on.value !== "list"; }
+    };
+    form.sid.onchange = sync; if (form.on) form.on.onchange = sync; sync();
+  });
+  if (!f) return;
+  const x = d.scripts.find((s) => String(s.id) === f.sid);
+  const req = { action: "script", value: x ? String(x.id) : null, adhoc: x ? null : { language: f.language, body: f.body, timeout: +f.timeout || 10 } };
+  if (!x && !f.body.trim()) return toast("Type a command, or pick a saved script.", true);
+  const what = x ? x.name : `the command “${f.body.trim().split("\n")[0].slice(0, 60)}”`;
+  let where, body;
+  if (one) where = one;
+  else if (f.on === "group") { if (!f.group) return toast("Pick a group.", true); body = { ...req, group: f.group }; where = `every computer in the group ${f.group}`; }
+  else { const h = f.on === "list" ? splitHosts(f.list) : hosts; if (!h.length) return toast("No computers picked.", true); body = { ...req, hostnames: h }; where = h.length === 1 ? h[0] : `${h.length} computers`; }
+  if (!(await confirmBox(`Run ${what} as SYSTEM on ${where}?`))) return;
+  try {
+    const r = one ? await post(`/api/devices/${encodeURIComponent(one)}/fix`, req) : await post("/api/fix/bulk", body);
+    toast(r.output, !r.ok);
+    if (one && current === one) openDevice(one);
+  } catch (e) { toast(errText(e), true); }
+}
+$("#runscript").onclick = () => runScriptDialog({ hosts: [current] });
+$("#bulkscript").onclick = () => grid.selected.size ? runScriptDialog({ hosts: [...grid.selected] }) : toast("Select one or more computers first.", true);
+async function viewDeployment(id) {
+  const r = await api(`/api/deployments/${id}`);
+  const sc = r.script;
+  await modal(`<h3>${esc(r.label)} on ${esc(r.hostname)}</h3><p>${depStatus(r.status, r)} queued ${esc(r.created || "")} by ${esc(r.who || "?")}${r.finished ? `, finished ${esc(r.finished)}` : ""}</p>
+    <h4>Result</h4><pre class="code small">${esc(r.message || "(nothing yet)")}</pre>
+    ${sc ? `<h4>What ran (${esc(LANGS[sc.language] || sc.language)}, up to ${esc(sc.timeout)} min)</h4><pre class="code small">${esc(sc.body)}</pre>` : ""}`);
+}
+
 // ------------------------------------------------------------ live tools: processes and services (over WinRM)
 async function loadProcesses(el) {
   el.innerHTML = `<div class="toolbar"><input id="prf" placeholder="Filter by name, user or path"><button class="ghost" id="prref">Refresh</button>
@@ -499,9 +595,11 @@ function depTable(el, rows, withHost = true) {
   const cols = [...(withHost ? ["hostname"] : []), "label", "status", "message", "who", "created", "finished", "attempts", "act"];
   table(el, rows.map((r) => ({ ...r, act: r.id })), cols, {
     labels: { label: "what", message: "result", who: "by", created: "queued", attempts: "tries", act: "" },
-    cell: { hostname: hostLink, status: depStatus, message: (v, r) => `<span class="longtext small">${esc(v || "")}</span>${r.status === "queued" && r.expires ? `<div class="muted small">gives up ${esc(r.expires)}</div>` : ""}`,
+    cell: { hostname: hostLink, status: depStatus, label: (v, r) => r.action === "script" ? `<a class="link" data-dview="${r.id}" title="Show the script and its full output">${esc(v)}</a>` : esc(v),
+      message: (v, r) => `<span class="longtext small">${esc(r.action === "script" && v ? v.split("\n").slice(0, 3).join(" · ").slice(0, 300) : v || "")}</span>${r.status === "queued" && r.expires ? `<div class="muted small">gives up ${esc(r.expires)}</div>` : ""}`,
       act: (id, r) => r.status === "queued" ? `<a class="link" data-dcancel="${id}">Cancel</a>` : ["failed", "expired", "cancelled"].includes(r.status) ? `<a class="link" data-dretry="${id}">Retry</a>` : "" } });
   el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
+  el.querySelectorAll("[data-dview]").forEach((a) => a.onclick = () => viewDeployment(a.dataset.dview));
   el.querySelectorAll("[data-dcancel]").forEach((a) => a.onclick = async () => { try { toast((await post(`/api/deployments/${a.dataset.dcancel}/cancel`, {})).output); } catch (e) { toast(errText(e), true); } refreshDeploy(); });
   el.querySelectorAll("[data-dretry]").forEach((a) => a.onclick = async () => { try { toast((await post(`/api/deployments/${a.dataset.dretry}/retry`, {})).output); } catch (e) { toast(errText(e), true); } refreshDeploy(); });
 }
@@ -527,14 +625,16 @@ $("#depset").onsubmit = async (e) => {
 };
 function appTab(t) {
   $("#apptabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.ptab === t));
-  $("#deploypane").hidden = t !== "deploy"; $("#programspane").hidden = t === "deploy";
+  $("#deploypane").hidden = t !== "deploy"; $("#scriptspane").hidden = t !== "scripts"; $("#programspane").hidden = t !== "programs";
   if (t === "deploy") loadDeploy();
+  if (t === "scripts") loadScripts();
 }
 $("#apptabs").querySelectorAll("button").forEach((b) => b.onclick = () => appTab(b.dataset.ptab));
 
 let appRows = [];
 loaders.apps = async () => {
   if (!$("#deploypane").hidden) return loadDeploy();
+  if (!$("#scriptspane").hidden) return loadScripts();
   api("/api/deployments?status=queued,sending,running").then((d) => { $("#depbadge").textContent = d.rows.length ? ` ${d.rows.length}` : ""; }).catch(() => {});
   const r = await api("/api/apps");
   appRows = r.apps;

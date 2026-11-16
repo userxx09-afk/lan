@@ -7,6 +7,9 @@ written to the audit log and the PC's history.
 - start_service: start Microsoft Defender Antivirus, Windows Update or BITS if it is stopped (never changes a
   service that a policy disabled).
 - reboot / cancel_reboot: restart in 5 minutes or tonight at the configured hour, with a notice to the signed-in user.
+- script: a saved script (Software > Scripts) or a one-off command, PowerShell or command prompt, run as SYSTEM.
+  The exact text is stored with the deployment when it's queued, so an edit later never changes what an approved
+  push runs; its output and exit code are the result.
 
 Windows refuses to install updates or MSI/winget packages directly from a remote session, so the first two run
 as SYSTEM from a one-off scheduled task ("NetInventory fix ...") that writes its result to
@@ -30,7 +33,9 @@ from .ingest import log_change
 
 log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
-ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair"}
+ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script"}
+LANGS = {"powershell": "PowerShell", "cmd": "Command prompt"}
+MAX_SCRIPT = 100_000
 KEY_RE = re.compile(r"^[A-Za-z0-9{}\-_. ]{1,128}$")      # an Uninstall registry key name (MSI product code or app id)
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fix")
 _plock = threading.Lock()
@@ -118,6 +123,33 @@ try {
 $res
 """
 
+# Runs a user's script (PowerShell or .cmd) in its own process with a time limit; keeps the end of its output.
+SCRIPT_RUNNER = r"""
+$res = @{ ok = $false }
+try {
+  $dir = Join-Path $env:ProgramData 'NetInventory\fix'
+  $ext = '__EXT__'
+  $f = Join-Path $dir ('__NAME__-script' + $ext)
+  $out = Join-Path $dir '__NAME__-out.txt'
+  $code = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__SB64__'))
+  if ($ext -eq '.cmd') { [IO.File]::WriteAllText($f, $code, [Text.Encoding]::Default) }
+  else { [IO.File]::WriteAllText($f, $code, (New-Object Text.UTF8Encoding $true)) }
+  if ($ext -eq '.cmd') { $exe = "$env:SystemRoot\System32\cmd.exe"; $a = "/d /c `"$f`"" }
+  else { $exe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; $a = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$f`"" }
+  $p = Start-Process $exe -ArgumentList $a -RedirectStandardOutput $out -RedirectStandardError "$out.err" -PassThru
+  if (-not $p.WaitForExit(__TIMEOUT__ * 60000)) {
+    try { & taskkill.exe /PID $p.Id /T /F | Out-Null } catch {}
+    $res.exit = -1; $res.message = 'Stopped: still running after __TIMEOUT__ minutes'
+  } else { $res.exit = $p.ExitCode; $res.ok = ($p.ExitCode -eq 0); $res.message = "Exit code $($p.ExitCode)" }
+  Start-Sleep -Milliseconds 300
+  $o = ("$(Get-Content $out -Raw -ErrorAction SilentlyContinue)" + "$(Get-Content "$out.err" -Raw -ErrorAction SilentlyContinue)").Trim()
+  if ($o.Length -gt 3500) { $o = '...' + $o.Substring($o.Length - 3500) }
+  $res.output = $o
+  Remove-Item $f, $out, "$out.err" -ErrorAction SilentlyContinue
+} catch { $res.message = "$_" }
+$res
+"""
+
 # Writes the script to the PC, runs it as SYSTEM from a one-off task, and returns at once.
 LAUNCH = r'''
 $ErrorActionPreference = 'Stop'
@@ -180,6 +212,40 @@ def queue_days(db) -> int:
         return 7
 
 
+def check_script(language: str, body: str, timeout: int) -> None:
+    if language not in LANGS:
+        raise ValueError("Pick PowerShell or Command prompt.")
+    if not (body or "").strip():
+        raise ValueError("The script is empty.")
+    if len(body) > MAX_SCRIPT:
+        raise ValueError(f"Scripts are limited to {MAX_SCRIPT // 1000} KB.")
+    if not 1 <= int(timeout) <= 240:
+        raise ValueError("The time limit is 1 to 240 minutes.")
+
+
+def script_payload(db, value: str | None, adhoc: dict | None) -> tuple[str, str, str | None]:
+    """(label, payload JSON, value) for a saved script (value = its id) or a one-off command (adhoc)."""
+    from .db import Script
+    if value:
+        sc = db.get(Script, int(value)) if str(value).isdigit() else None
+        if sc is None:
+            raise ValueError("That script doesn't exist any more.")
+        lang, body, timeout, label = sc.language, sc.body, sc.timeout_min or 30, f"Run script {sc.name}"
+    else:
+        adhoc = adhoc or {}
+        lang, body, timeout = adhoc.get("language") or "powershell", adhoc.get("body") or "", int(adhoc.get("timeout") or 10)
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+        label = f"Run command: {first[:80]}" + ("…" if len(first) > 80 or body.strip().count("\n") else "")
+    check_script(lang, body, timeout)
+    return label[:255], json.dumps({"language": lang, "body": body, "timeout": int(timeout)}), (str(value) if value else None)
+
+
+def _digest(payload: str) -> str:
+    import hashlib
+    p = json.loads(payload)
+    return f"{LANGS[p['language']]}, sha256 {hashlib.sha256(p['body'].encode()).hexdigest()[:12]}"
+
+
 def _validate(action: str, value: str | None) -> tuple[str, str | None]:
     """(label, value) or ValueError."""
     from . import catalog
@@ -196,6 +262,8 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
         if not KEY_RE.match(value or ""):
             raise ValueError("That program can't be identified on the PC.")
         return f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {value}", value
+    if action == "script":
+        return "Run script", value
     if action == "start_service":
         if value not in SERVICES:
             raise ValueError("That service can't be started from here.")
@@ -210,20 +278,25 @@ def _sw_name(db, hostname: str, code: str) -> str | None:
     return db.scalar(select(Software.name).join(Device).where(Device.hostname == hostname, Software.product_code == code))
 
 
-def enqueue(db, hostname: str, action: str, who: str, value: str | None = None):
+def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, adhoc: dict | None = None,
+            snapshot: tuple[str, str] | None = None):
+    """snapshot = (label, payload) re-runs exactly what an earlier script push ran (Retry)."""
     from .db import Deployment, utcnow
     from datetime import timedelta
     label, value = _validate(action, value)
+    payload = None
+    if action == "script":
+        label, payload = snapshot if snapshot else script_payload(db, value, adhoc)[:2]
     if action in ("app_uninstall", "app_repair"):
         name = _sw_name(db, hostname, value)
         if not name:
             raise ValueError("That program isn't in this PC's inventory.")
         label = f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {name}"
     now = utcnow()
-    dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued",
+    dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued", payload=payload,
                      created=now, next_try=now, expires=now + timedelta(days=queue_days(db)))
     db.add(dep)
-    _audit(db, who, action, hostname, f"queued: {label}")
+    _audit(db, who, action, hostname, f"queued: {label}" + (f" ({_digest(payload)})" if payload else ""))
     db.commit()
     return dep
 
@@ -246,6 +319,14 @@ def _execute(db, dev: Device, dep) -> str:
     if action in ("app_uninstall", "app_repair"):
         _launch(addr, cfg, _task_name(action, value), REMOVE_SCRIPT.replace("__KEY__", value).replace("__MODE__", "repair" if action == "app_repair" else "remove"))
         return f"Started {'uninstall' if action == 'app_uninstall' else 'repair'}."
+    if action == "script":
+        p = json.loads(dep.payload or "{}")
+        check_script(p.get("language"), p.get("body") or "", p.get("timeout") or 0)
+        body = (SCRIPT_RUNNER.replace("__EXT__", ".cmd" if p["language"] == "cmd" else ".ps1").replace("__NAME__", _dep_task(dep))
+                .replace("__TIMEOUT__", str(int(p["timeout"])))
+                .replace("__SB64__", base64.b64encode(p["body"].encode("utf-8")).decode()))
+        _launch(addr, cfg, _dep_task(dep), body)
+        return f"Started ({LANGS[p['language']]}, as SYSTEM, up to {p['timeout']} min)."
     if action == "start_service":
         r = run_ps(addr, cfg, f"""
 $s = Get-Service -Name '{value}' -ErrorAction SilentlyContinue
@@ -271,6 +352,16 @@ if ($s.Status -ne 'Running') {{ Start-Service -Name '{value}'; Start-Sleep 3; $s
         return label + ". The signed-in user sees a notice."
     r = run_ps(addr, cfg, "& shutdown.exe /a 2>&1 | Out-Null; @{ ok = ($LASTEXITCODE -eq 0); code = $LASTEXITCODE } | ConvertTo-Json -Compress")
     return "Scheduled reboot cancelled." if r.get("ok") else "No reboot was scheduled."
+
+
+def _dep_task(dep) -> str:
+    return f"script-{dep.id}" if dep.action == "script" else _task_name(dep.action, dep.value)
+
+
+def _wait_hours(dep) -> float | None:
+    if dep.action == "script":
+        return (json.loads(dep.payload or "{}").get("timeout") or 30) / 60 + 0.5
+    return LONG.get(dep.action)
 
 
 def attempt(db, dep) -> dict:
@@ -303,10 +394,11 @@ def attempt(db, dep) -> dict:
         log_change(db, dev, "fix", f"{dep.label} (by {dep.who}) failed: {msg}")
         db.commit()
         return {"ok": False, "output": f"Failed: {msg}"}
-    if dep.action in LONG:
+    if _wait_hours(dep):
         dep.status, dep.message = "running", out
-        dep.task = _task_name(dep.action, dep.value)
-        dep.check_until, dep.next_try = now + timedelta(hours=LONG[dep.action]), now + timedelta(seconds=60)
+        dep.task = _dep_task(dep)
+        dep.check_until = now + timedelta(hours=_wait_hours(dep))
+        dep.next_try = now + timedelta(seconds=20 if dep.action == "script" else 60)
         out += " The result appears in the deployment log and the PC's History."
     else:
         dep.status, dep.finished, dep.message = "success", utcnow(), out
@@ -316,10 +408,10 @@ def attempt(db, dep) -> dict:
     return {"ok": True, "output": out}
 
 
-def run(db, dev: Device, action: str, who: str, value: str | None = None) -> dict:
+def run(db, dev: Device, action: str, who: str, value: str | None = None, adhoc: dict | None = None) -> dict:
     """One PC, from its page: queue it and send it right away, so the answer is immediate."""
     try:
-        dep = enqueue(db, dev.hostname, action, who, value)
+        dep = enqueue(db, dev.hostname, action, who, value, adhoc)
     except ValueError as exc:
         return {"ok": False, "output": str(exc)}
     if not _cfg(db):
@@ -329,18 +421,21 @@ def run(db, dev: Device, action: str, who: str, value: str | None = None) -> dic
     return attempt(db, dep)
 
 
-def run_many(hostnames: list[str], action: str, who: str, value: str | None = None) -> int:
+def run_many(hostnames: list[str], action: str, who: str, value: str | None = None, adhoc: dict | None = None,
+             snapshot: tuple[str, str] | None = None) -> int:
     """Queue a push to many PCs; the dispatcher sends them a few at a time. Returns how many were queued."""
     from .db import norm_host
     hosts = list(dict.fromkeys(norm_host(h) for h in hostnames))
     with SessionLocal() as db:
         _validate(action, value)
+        if action == "script" and not snapshot:      # one snapshot for every PC, so they all run the same text
+            snapshot = script_payload(db, value, adhoc)[:2]
         known = {h for (h,) in db.execute(select(Device.hostname).where(Device.hostname.in_(hosts)))}
         queued = 0
         for h in hosts:
             if h in known:
                 try:
-                    enqueue(db, h, action, who, value)
+                    enqueue(db, h, action, who, value, snapshot=snapshot)
                     queued += 1
                 except ValueError:
                     db.rollback()      # e.g. that program isn't on this PC
@@ -408,10 +503,13 @@ def _check_running(db, dep) -> None:
         res = r.get("result") or {}
         ok = bool(res.get("ok"))
         msg = res.get("message") or ("no result after the time limit" if not r.get("done") else "done")
-        if res.get("output") and not ok:
+        if dep.action == "script":
+            if res.get("output"):
+                msg += f"\n{res['output']}"
+        elif res.get("output") and not ok:
             msg += f": {str(res['output'])[-500:]}"
-        dep.status, dep.finished, dep.message = ("success" if ok else "failed"), now, msg[:2000]
-        log_change(db, dev, "fix", f"{dep.label}: {msg} ({'ok' if ok else 'problem'})")
+        dep.status, dep.finished, dep.message = ("success" if ok else "failed"), now, msg[:4000]
+        log_change(db, dev, "fix", f"{dep.label}: {msg.splitlines()[0] if msg else ''} ({'ok' if ok else 'problem'})")
     else:
         dep.next_try = now + timedelta(minutes=2)
 

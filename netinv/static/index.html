@@ -62,6 +62,7 @@
         <button class="ghost" data-bulk="add_group">Add to group</button>
         <button class="ghost" data-bulk="remove_group">Remove from group</button>
         <button class="ghost" data-bulk="set_state">Set state</button>
+        <button class="ghost" id="bulkscript">Run script</button>
         <span id="selinfo" class="muted"></span> <a class="link small" id="clearsel">clear selection</a>
       </div>
       <div class="group">
@@ -96,6 +97,7 @@
         <button class="act" data-fix="start_service">Start a stopped service</button>
         <button class="act" data-fix="reboot">Schedule a reboot</button>
         <button class="act" data-fix="cancel_reboot">Cancel scheduled reboot</button>
+        <button class="act" id="runscript">Run a script or command</button>
         <h3>Power</h3>
         <button class="act danger" data-act="reboot">Reboot now</button>
       </aside>
@@ -119,7 +121,16 @@
   </section>
 
   <section id="apps" class="tab">
-    <nav class="subtabs" id="apptabs"><button data-ptab="programs" class="active">Programs</button><button data-ptab="deploy">Deployments <i id="depbadge"></i></button></nav>
+    <nav class="subtabs" id="apptabs"><button data-ptab="programs" class="active">Programs</button><button data-ptab="deploy">Deployments <i id="depbadge"></i></button><button data-ptab="scripts">Scripts</button></nav>
+    <div id="scriptspane" hidden>
+      <div class="gridbar">
+        <div class="group"><input id="scf" placeholder="Filter scripts"></div>
+        <div class="group"><button id="scnew">New script</button></div>
+      </div>
+      <p class="muted small">Saved PowerShell or command prompt scripts. Run one on a PC from its page, on the computers you select in Computers, or on a group.
+        Scripts run as SYSTEM through the deployment queue: offline PCs get them when they come back, and each run's output and exit code (0 = success) are in Deployments and the PC's history.</p>
+      <div id="sctable"></div>
+    </div>
     <div id="deploypane" hidden>
       <div class="gridbar">
         <div class="group"><input id="depf" placeholder="Filter by PC, package or user">

@@ -164,6 +164,20 @@ Over WinRM, live, on demand:
 
 Every change is confirmed first and written to the audit log and the PC's History.
 
+## Scripts (Software > Scripts)
+
+Keep a library of PowerShell or command prompt scripts, and run one, or a one-off command, on:
+- one PC: *Run a script or command* on its page;
+- the PCs you select in Computers: *Run script* above the list;
+- every PC in a group, or a typed list of names: *Run…* next to a script.
+
+Scripts run as SYSTEM, hidden, with a time limit (1-240 minutes), through the deployment queue: a few PCs at a time,
+and offline PCs get it when they come back online. Exit code 0 counts as success. Each run's output (the last 3,500
+characters) and exit code are in Software > Deployments (click the name to see the output and exactly what ran) and
+the PC's History. The script's text is copied into each push when it's queued, so editing or deleting the script
+later never changes what an approved push runs; *Retry* runs the same text again. Saving and running scripts are in
+the audit log, with a fingerprint (SHA-256) of the text.
+
 ## Dashboard drill-down
 
 Every number on the Dashboard opens the matching list: the KPI tiles (computers, inventoried, not inventoried,

@@ -39,6 +39,7 @@ jobs:
               print(len(al), "alerts and the report library OK")
           PY
           python tests/test_catalog.py
+          python tests/test_scripts.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
       - name: Agent inventory script matches the WinRM one

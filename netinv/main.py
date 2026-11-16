@@ -21,7 +21,7 @@ from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
-from .db import (AdUser, AuditLog, Credential, Deployment, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
+from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac, utcnow)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
@@ -426,30 +426,46 @@ def device_service(hostname: str, body: ServiceIn, user=Depends(ui_auth), db=Dep
     return _tool(lambda: pctools.service(db, dev, body.name, body.action, user))
 
 
+class AdhocIn(BaseModel):
+    language: str = "powershell"
+    body: str
+    timeout: int = 10
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None
+    adhoc: AdhocIn | None = None     # action "script" without a saved script: a one-off command
 
 
 @app.post("/api/devices/{hostname}/fix")
 def device_fix(hostname: str, body: FixIn, user=Depends(ui_auth), db=Depends(db_session)):
-    return fixes.run(db, _device(db, hostname), body.action, user, body.value)
+    return fixes.run(db, _device(db, hostname), body.action, user, body.value, body.adhoc.model_dump() if body.adhoc else None)
 
 
 class BulkFixIn(BaseModel):
     action: str
-    hostnames: list[str]
+    hostnames: list[str] = []
+    group: str | None = None           # every computer in this group, as well as hostnames
     value: str | None = None
+    adhoc: AdhocIn | None = None
 
 
 @app.post("/api/fix/bulk")
 def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
     if body.action not in fixes.ACTIONS:
         raise HTTPException(400, "unknown fix")
-    if len(body.hostnames) > 500:
-        raise HTTPException(400, "at most 500 computers at a time")
+    hosts = list(body.hostnames)
+    if body.group:
+        with SessionLocal() as db:
+            hosts += list(db.scalars(select(Device.hostname).join(DeviceGroup, DeviceGroup.device_id == Device.id)
+                                     .where(DeviceGroup.name == body.group)))
+    if not hosts:
+        raise HTTPException(400, "pick at least one computer")
+    if len(set(hosts)) > 2000:
+        raise HTTPException(400, "at most 2,000 computers at a time")
     try:
-        n = fixes.run_many(body.hostnames, body.action, user, body.value)
+        n = fixes.run_many(hosts, body.action, user, body.value, body.adhoc.model_dump() if body.adhoc else None)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "count": n, "output": f"Queued for {n} computer{'s' if n != 1 else ''}. Track it in Software > Deployments; "
@@ -496,8 +512,103 @@ def deployment_retry(did: int, actor=Depends(ui_auth), db=Depends(db_session)):
     d = db.get(Deployment, did)
     if not d or d.status not in ("failed", "expired", "cancelled"):
         raise HTTPException(400, "only a failed, expired or cancelled deployment can be retried")
-    n = fixes.run_many([d.hostname], d.action, actor, d.value)
+    snap = (d.label, d.payload) if d.action == "script" and d.payload else None
+    try:
+        n = fixes.run_many([d.hostname], d.action, actor, d.value, snapshot=snap)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     return {"ok": True, "output": f"{d.label} on {d.hostname} queued again." if n else "That computer no longer exists."}
+
+
+@app.get("/api/deployments/{did}", dependencies=UI)
+def deployment_one(did: int, db=Depends(db_session)):
+    d = db.get(Deployment, did)
+    if not d:
+        raise HTTPException(404, "not found")
+    out = _dep_out(d)
+    if d.payload:
+        p = json.loads(d.payload)
+        out["script"] = {"language": p.get("language"), "body": p.get("body"), "timeout": p.get("timeout")}
+    return out
+
+
+# ------------------------------------------------------------------ script library (run on one PC or many)
+class ScriptIn(BaseModel):
+    name: str
+    description: str | None = None
+    language: str = "powershell"
+    body: str
+    timeout_min: int = 30
+
+
+def _script_out(x: Script, runs: dict) -> dict:
+    t = lambda v: jobs._local(v).isoformat(sep=" ", timespec="minutes") if v else None  # noqa: E731
+    return {"id": x.id, "name": x.name, "description": x.description, "language": x.language, "body": x.body,
+            "timeout_min": x.timeout_min, "updated": t(x.updated), "who": x.who, **runs.get(str(x.id), {"runs": 0, "ok": 0, "failed": 0})}
+
+
+@app.get("/api/scripts", dependencies=UI)
+def scripts_list(db=Depends(db_session)):
+    from sqlalchemy import func
+    runs: dict = {}
+    for v, st, n in db.execute(select(Deployment.value, Deployment.status, func.count()).where(Deployment.action == "script",
+                                                                                              Deployment.value.is_not(None))
+                               .group_by(Deployment.value, Deployment.status)):
+        r = runs.setdefault(v, {"runs": 0, "ok": 0, "failed": 0})
+        r["runs"] += n
+        if st == "success":
+            r["ok"] += n
+        elif st in ("failed", "expired"):
+            r["failed"] += n
+    groups = sorted({g for (g,) in db.execute(select(DeviceGroup.name).distinct())})
+    return {"scripts": [_script_out(x, runs) for x in db.scalars(select(Script).order_by(Script.name))],
+            "languages": fixes.LANGS, "groups": groups}
+
+
+def _script_save(db, x: Script, body: ScriptIn, actor: str) -> dict:
+    name = body.name.strip()
+    if not name or len(name) > 128:
+        raise HTTPException(400, "give the script a name (up to 128 characters)")
+    try:
+        fixes.check_script(body.language, body.body, body.timeout_min)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    clash = db.scalar(select(Script.id).where(Script.name == name))
+    if clash and clash != x.id:
+        raise HTTPException(400, "another script already has that name")
+    x.name, x.description, x.language, x.body = name, (body.description or "").strip() or None, body.language, body.body
+    x.timeout_min, x.updated, x.who = body.timeout_min, utcnow(), actor[:64]
+    db.add(x)
+    db.flush()
+    db.add(AuditLog(actor=actor, action="script.save", target=f"script:{x.id}", result=f"{name} ({fixes._digest(json.dumps({'language': x.language, 'body': x.body}))})"))
+    db.commit()
+    return {"ok": True, "id": x.id}
+
+
+@app.post("/api/scripts")
+def script_create(body: ScriptIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    return _script_save(db, Script(created=utcnow()), body, actor)
+
+
+@app.put("/api/scripts/{sid}")
+def script_update(sid: int, body: ScriptIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    x = db.get(Script, sid)
+    if not x:
+        raise HTTPException(404, "not found")
+    return _script_save(db, x, body, actor)
+
+
+@app.delete("/api/scripts/{sid}")
+def script_delete(sid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    x = db.get(Script, sid)
+    if not x:
+        raise HTTPException(404, "not found")
+    db.add(AuditLog(actor=actor, action="script.delete", target=f"script:{sid}", result=x.name))
+    db.delete(x)      # pushes already queued keep their own copy of the text
+    from sqlalchemy import update
+    db.execute(update(Deployment).where(Deployment.action == "script", Deployment.value == str(sid)).values(value=None))
+    db.commit()
+    return {"ok": True}
 
 
 class DeploySettingsIn(BaseModel):
