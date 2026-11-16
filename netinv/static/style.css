@@ -238,3 +238,8 @@ h2 button.small { margin-left: 10px; vertical-align: middle; }
 .modal fieldset label:not(.check) { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .modal fieldset label:not(.check) select, .modal fieldset label:not(.check) input { width: auto; }
 .modal fieldset p { margin: 2px 0 0; }
+
+/* live status dot */
+.dot.live { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); animation: pulse 2.4s ease-out infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.atitle + .muted .uptime b { color: var(--text); }

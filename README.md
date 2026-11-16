@@ -167,6 +167,15 @@ Load controls: *PCs scanned at once over WinRM* per job (default 16), and *at mo
 (default 1). A job never overlaps itself, and jobs over the limit wait in a queue, first in line first. Exclusions apply
 to every job. **Run now**, enable/disable, last and next run and a per-job **History** are in the table.
 
+### Live status and uptime
+
+The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it
+didn't (hover for since when), **orange** when it hasn't been checked yet. The up check runs every 5 minutes (Settings,
+Scan schedule; 0 = off): one ICMP echo per PC (no admin rights needed on Windows), then a TCP knock on 445/135/3389/5985
+if ping is blocked. A refused connection counts as up, unless the network rejects everything, which NetInventory detects
+by knocking on an address that can't exist. **Uptime** (since the last boot reported by a scan) is a column in the
+Computers list and is shown at the top of each PC's page; offline PCs show *offline* instead.
+
 ### Scanning view
 
 The **Scanning** tab (or the *Scanning…* pill next to the name at the top, shown while anything runs) lists:
@@ -201,8 +210,10 @@ sections are only used while no scan target exists).
   An OU can be typed the way Active Directory Users and Computers shows it, `corp.example.com/Sites/Office/PCs`, or as a
   DN, `OU=PCs,OU=Office,OU=Sites,DC=corp,DC=example,DC=com`. The *searches* column shows the exact LDAP search base used.
   (Before 0.7 an OU path typed as an AD domain scanned the whole domain; those targets are turned into OU targets on upgrade.)
-  - *IP range* (`10.0.0.0/24`, `10.1.0.1-10.1.0.50`): network gear is polled over SNMP, and Windows PCs that answer
-    WinRM on 5985 are scanned too.
+  - *IP range* (`10.0.0.0/24`, `10.1.0.1-10.1.0.50`): tick what runs on it. *Ping sweep* finds the addresses that are up
+    and marks known PCs online or offline. *SNMP* polls switches and routers (needs an SNMP credential). *WinRM sweep*
+    finds Windows PCs on port 5985 so the PC inventory scans them (needs a Windows credential). Only ticked methods run.
+    A scan job can narrow this further with its own *On IP ranges, run* boxes.
   If no domain controller is given, NetInventory tries the domain name (DNS finds a DC) and then DCs seen in earlier scans.
 - **Scan schedule:** see *Scan jobs* above.
 
@@ -315,6 +326,7 @@ netinv/
   ingest.py          shared payload format for the WinRM pull and the future agent
   jobs.py            collectors, scan jobs, queue and built-in scheduler
   progress.py        live progress of running scans (Scanning view)
+  reach.py           up/down checks for the live status dot
   scanning.py        runs scan targets (AD domain / OU paths, IP ranges) with stored credentials
   alerts.py          dashboard alert rules (High / Important / Informational)
   library.py         standard report library

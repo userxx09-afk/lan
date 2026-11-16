@@ -286,7 +286,9 @@
           A job never overlaps itself: if its last run is still going, the next one waits. Exclusions apply to every job. <a class="link" onclick="showTab('scanning')">See what is scanning now</a>.</p>
         <div id="jobtable"></div>
         <div class="row"><button id="addjob">+ Add scan job</button>
-          <form id="jobcap" class="inline"><label>Run at most <input name="max_concurrent" type="number" min="1" max="8" style="width:4em"> jobs at once</label><button class="ghost">Save</button></form></div>
+          <form id="jobcap" class="inline"><label>Run at most <input name="max_concurrent" type="number" min="1" max="8" style="width:4em"> jobs at once</label>
+            <label>Check whether PCs are up every <input name="reach_interval" type="number" min="0" max="1440" style="width:4.5em"> minutes</label><button class="ghost">Save</button></form></div>
+        <p class="muted small">The up check (ping, then a TCP knock on 445/135/3389/5985) drives the green/red dot next to each PC. It is very light: one packet or connection per PC. 0 turns it off.</p>
         <p class="muted small">More than one job at once finishes sooner but puts more load on the network, the DCs and this server. Jobs over the limit wait their turn.</p>
       </div>
       <div class="panel">

@@ -40,6 +40,8 @@ async def lifespan(app: FastAPI):
         scanning.fix_ou_targets(db)
     if settings.schedule.get("enabled", True):
         threading.Thread(target=jobs.scheduler_loop, args=(_stop,), daemon=True).start()
+    from . import reach
+    threading.Thread(target=reach.loop, args=(_stop,), daemon=True).start()
     with SessionLocal() as db:   # a finished update leaves its "installing" note behind
         if get_setting(db, "update:message") and not updater.status(db)["available"]:
             set_setting(db, "update:message", None)
@@ -907,12 +909,14 @@ class TargetIn(BaseModel):
     server: str | None = None
     credential_ids: list[int] = []
     enabled: bool = True
-    collect: list[str] | None = None     # whole-domain targets: "computers", "users"
+    collect: list[str] | None = None     # whole-domain targets: "computers", "users"; IP ranges: "ping", "snmp", "winrm"
 
 
 def _target_out(t: ScanTarget) -> dict:
     base, collect, err = None, None, None
-    if t.kind != "ip_range":
+    if t.kind == "ip_range":
+        collect = [m for m in scanning.IP_METHODS if m in (t.collect or "").split(",")] or None
+    else:
         try:
             _, _, base, cs = scanning.ad_scope(t)
             collect = [c for c in ("computers", "users") if c in cs]
@@ -956,6 +960,10 @@ def save_target(body: TargetIn, tid: int | None = None, actor=Depends(ui_auth), 
         if not _re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", value):
             raise HTTPException(400, "Type the domain's DNS name, e.g. corp.example.com")
     collect = None
+    if kind == "ip_range":
+        collect = [m for m in scanning.IP_METHODS if m in (body.collect if body.collect is not None else scanning.IP_METHODS)]
+        if not collect:
+            raise HTTPException(400, "Tick at least one of ping, SNMP or WinRM")
     if kind == "ad_domain":
         collect = [c for c in ("computers", "users") if c in (body.collect if body.collect is not None else ["computers", "users"])]
         if not collect:
@@ -999,7 +1007,7 @@ def scan_all():
 
 
 # ----------------------------------------------------------------- scan schedule (see jobs.py)
-JOB_COLLECTORS = {"ad": "Active Directory import (computers, users, DCs)", "snmp": "Network devices (SNMP) and WinRM sweep of IP ranges",
+JOB_COLLECTORS = {"ad": "Active Directory import (computers, users, DCs)", "snmp": "IP ranges (ping, SNMP, WinRM sweep: see below)",
                   "pcs": "PC inventory over WinRM", "pcs_updates": "PC inventory plus pending Windows updates",
                   "dc_logons": "Logons from domain controllers"}
 
@@ -1011,7 +1019,8 @@ def _job_out(j: ScanJob, tnames: dict) -> dict:
             "scope": ", ".join(tnames.get(i, f"#{i}") for i in ids) or "all scan targets",
             "collectors": [c for c in (j.collectors or "").split(",") if c], "every_min": j.every_min, "at_time": j.at_time,
             "days": j.days or "0123456", "window_start": j.window_start, "window_end": j.window_end,
-            "max_parallel": j.max_parallel, "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
+            "max_parallel": j.max_parallel, "ip_methods": [m for m in (j.ip_methods or "").split(",") if m],
+            "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
             "next_run": nxt.isoformat(sep=" ", timespec="minutes") if nxt else None,
             "last_run": jobs._local(j.last_run).isoformat(sep=" ", timespec="minutes") if j.last_run else None,
             "last_ok": j.last_ok, "last_result": j.last_result, "last_seconds": j.last_seconds}
@@ -1021,7 +1030,8 @@ def _job_out(j: ScanJob, tnames: dict) -> dict:
 def list_jobs(db=Depends(db_session)):
     jobs.migrate_schedule(db)
     tnames = {t.id: f"{t.value}" for t in db.scalars(select(ScanTarget))}
-    return {"max_concurrent": jobs.max_concurrent(db), "collectors": JOB_COLLECTORS,
+    from . import reach
+    return {"max_concurrent": jobs.max_concurrent(db), "collectors": JOB_COLLECTORS, "reach_interval": reach.interval(db),
             "jobs": [_job_out(j, tnames) for j in db.scalars(select(ScanJob).order_by(ScanJob.name))]}
 
 
@@ -1036,6 +1046,7 @@ class JobIn(BaseModel):
     window_start: int | None = None
     window_end: int | None = None
     max_parallel: int | None = None
+    ip_methods: list[str] = []          # empty = each IP range target's own ticks
 
 
 def _check_job(body: JobIn, db) -> None:
@@ -1077,6 +1088,7 @@ def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Dep
     j.days = "".join(sorted(set(body.days)))
     j.window_start, j.window_end = body.window_start, body.window_end
     j.max_parallel = body.max_parallel
+    j.ip_methods = ",".join(m for m in scanning.IP_METHODS if m in body.ip_methods) or None
     db.add(j)
     db.add(AuditLog(actor=actor, action="job.save", target=f"job:{j.name[:100]}", result=jobs.describe(j)))
     db.commit()
@@ -1117,6 +1129,7 @@ def job_history(jid: int, db=Depends(db_session)):
 
 class JobSettingsIn(BaseModel):
     max_concurrent: int
+    reach_interval: int | None = None
 
 
 @app.put("/api/jobs/settings")
@@ -1124,7 +1137,11 @@ def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_sess
     if not 1 <= body.max_concurrent <= 8:
         raise HTTPException(400, "1 to 8 jobs at once")
     set_setting(db, "jobs:max_concurrent", str(body.max_concurrent))
-    db.add(AuditLog(actor=actor, action="job.settings", target="schedule", result=f"max_concurrent={body.max_concurrent}"))
+    if body.reach_interval is not None:
+        if not 0 <= body.reach_interval <= 1440:
+            raise HTTPException(400, "status check: 0 (off) to 1440 minutes")
+        set_setting(db, "reach:interval_min", str(body.reach_interval))
+    db.add(AuditLog(actor=actor, action="job.settings", target="schedule", result=f"max_concurrent={body.max_concurrent} reach_interval={body.reach_interval}"))
     db.commit()
     return {"ok": True}
 

@@ -83,6 +83,11 @@ class Device(Base):
     ad_description: Mapped[str | None] = mapped_column(Text)
     ad_location: Mapped[str | None] = mapped_column(String(255))
     ad_managed_by: Mapped[str | None] = mapped_column(Text)
+    # Live status (reach.py, agent heartbeats): None = never checked
+    online: Mapped[bool | None] = mapped_column(Boolean)
+    online_checked: Mapped[datetime | None] = mapped_column(DateTime)
+    online_changed: Mapped[datetime | None] = mapped_column(DateTime)   # when it last went online/offline
+    online_via: Mapped[str | None] = mapped_column(String(16))          # ping | tcp | agent | winrm | dns
 
     nics: Mapped[list[DeviceNic]] = relationship(back_populates="device", cascade="all, delete-orphan")
     disks: Mapped[list[Disk]] = relationship(back_populates="device", cascade="all, delete-orphan")
@@ -353,7 +358,7 @@ class ScanTarget(Base):
     value: Mapped[str] = mapped_column(Text)             # domain fqdn, OU DN, or "10.0.0.0/24" / "10.0.0.1-10.0.0.50"
     server: Mapped[str | None] = mapped_column(String(255))   # optional DC to talk to
     credential_ids: Mapped[str | None] = mapped_column(String(255))  # comma list, tried in order
-    collect: Mapped[str | None] = mapped_column(String(64))   # AD domain: "computers,users" (empty = both)
+    collect: Mapped[str | None] = mapped_column(String(64))   # AD domain: "computers,users"; IP range: "ping,snmp,winrm"
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     interval_min: Mapped[int] = mapped_column(Integer, default=240)
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
@@ -375,6 +380,7 @@ class ScanJob(Base):
     window_start: Mapped[int | None] = mapped_column(Integer)       # only start between these hours (local), e.g. 18-6
     window_end: Mapped[int | None] = mapped_column(Integer)
     max_parallel: Mapped[int | None] = mapped_column(Integer)       # PCs scanned at once over WinRM (default 16)
+    ip_methods: Mapped[str | None] = mapped_column(String(64))      # IP ranges: "ping,snmp,winrm"; empty = each target's own
     last_run: Mapped[datetime | None] = mapped_column(DateTime)     # UTC
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_result: Mapped[str | None] = mapped_column(Text)

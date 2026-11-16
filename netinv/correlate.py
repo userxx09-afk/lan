@@ -96,6 +96,7 @@ VIEWS: dict[str, str] = {
                CASE WHEN LOWER(COALESCE(d.os_caption, d.ad_os, '')) LIKE '%server%' THEN 'Server' ELSE 'Workstation' END AS role,
                d.av_name, d.av_enabled, d.av_up_to_date, d.scan_error_kind, d.scan_error, d.scan_error_time,
                d.ad_description, d.ad_location,
+               d.online, d.online_checked, d.online_changed, d.online_via, d.last_boot AS uptime,
                (SELECT MIN(k.free_gb) FROM disks k WHERE k.device_id = d.id) AS min_disk_free_gb,
                (SELECT COUNT(*) FROM physical_disks p WHERE p.device_id = d.id
                   AND (p.health NOT IN ('Healthy', 'OK', '0', '') OR p.predict_failure = TRUE)) AS disks_unhealthy

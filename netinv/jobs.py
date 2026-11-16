@@ -212,6 +212,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
         name, colls = job.name, [c for c in COLLECTOR_ORDER if c in (job.collectors or "").split(",")]
         ids = [int(x) for x in (job.target_ids or "").split(",") if x.strip().isdigit()]
         par, expected = job.max_parallel, job.last_seconds
+        ipm = {m for m in (job.ip_methods or "").split(",") if m} or None
         job.last_run = utcnow()
         db.commit()
     key = f"job: {name}"
@@ -224,7 +225,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
             run = CollectorRun(collector=f"job:{job_id}", started=utcnow())
             db.add(run)
             db.commit()
-            with scanning.scoped(ids, par):
+            with scanning.scoped(ids, par, ipm):
                 for c in colls:
                     if prog.stop.is_set():
                         break

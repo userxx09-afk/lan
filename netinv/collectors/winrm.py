@@ -246,6 +246,8 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
                     payload.hostname = host  # trust the AD name over $env:COMPUTERNAME
                 dev = apply_endpoint(db, payload)
                 dev.scan_error = dev.scan_error_kind = dev.scan_error_time = None
+                from ..reach import mark
+                mark(dev, True, "winrm")
                 db.commit()
                 ok += 1
             except Exception as exc:

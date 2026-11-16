@@ -98,6 +98,9 @@ def seed(db) -> str:
         dev.ad_enabled, dev.ad_os, dev.ad_os_version = True, os_caption.replace("Microsoft ", ""), "10.0"
         dev.ad_last_logon = now - timedelta(days=random.choice([1, 2, 5, 9]) if i % 17 else 120)
         dev.ad_created = now - timedelta(days=random.randint(100, 1500))
+        if i % 23:      # live status: most up, a few down, some never checked
+            dev.online, dev.online_via = i % 6 != 0, random.choice(["ping", "tcp", "winrm"])
+            dev.online_checked, dev.online_changed = now - timedelta(minutes=2), now - timedelta(hours=random.randint(1, 72))
         dev.ad_dn = f"CN={host},OU=Workstations,DC=corp,DC=example,DC=com"
         dev.fqdn = f"{host.lower()}.corp.example.com"
         dev.first_seen = dev.ad_created

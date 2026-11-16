@@ -21,7 +21,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .db import Credential, ScanTarget, get_setting, set_setting, utcnow
+from .db import Credential, Device, DeviceNic, ScanTarget, get_setting, set_setting, utcnow
 from .secrets import decrypt
 
 log = logging.getLogger(__name__)
@@ -54,13 +54,15 @@ def _creds(db: Session, targets: list[ScanTarget], kinds: tuple[str, ...]) -> li
 SCOPE = threading.local()
 
 
-def scoped(target_ids: list[int] | None, parallel: int | None = None):
-    """Context manager: scans in this thread only see these targets (None = all) and use this WinRM parallelism."""
+def scoped(target_ids: list[int] | None, parallel: int | None = None, ip_methods: set[str] | None = None):
+    """Context manager: scans in this thread only see these targets (None = all), use this WinRM parallelism,
+    and on IP ranges run only these methods (None = each target's own)."""
     class _S:
         def __enter__(self):
             SCOPE.ids, SCOPE.parallel = (set(target_ids) if target_ids else None), parallel
+            SCOPE.ip_methods = set(ip_methods) if ip_methods else None
         def __exit__(self, *a):
-            SCOPE.ids = SCOPE.parallel = None
+            SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = None
     return _S()
 
 
@@ -240,34 +242,71 @@ async def _probe(ips: list[str], port: int, timeout: float = 1.0, parallel: int 
     return [ip for ip in await asyncio.gather(*(one(i) for i in ips)) if ip]
 
 
+IP_METHODS = ("ping", "snmp", "winrm")
+
+
+def ip_methods(db: Session, t: ScanTarget) -> set[str]:
+    """What runs on an IP range: the target's ticked methods (older targets: whatever their credentials allow),
+    narrowed by the scan job's own IP method boxes when the job sets them."""
+    if t.collect:
+        m = {x for x in t.collect.split(",") if x in IP_METHODS}
+    else:
+        m = {"ping"} | ({"snmp"} if _creds(db, [t], ("snmp2", "snmp3")) else set()) | \
+            ({"winrm"} if _creds(db, [t], ("windows",)) else set())
+    job = getattr(SCOPE, "ip_methods", None)
+    return m & job if job else m
+
+
 def run_ip(db: Session) -> str:
     from .collectors import snmp
     from .correlate import track_port_moves
+    from . import progress, reach
+    from .exclusions import Exclusions
     targets = _targets(db, "ip_range")
     msgs = []
     if not targets and settings.snmp.get("targets"):
         msgs.append(snmp.collect(db, settings.snmp))
-    from . import progress
     for t in targets:
         if progress.stopped():
             break
         try:
-            from .exclusions import Exclusions
             excl = Exclusions.load(db)
             ips = [ip for ip in snmp.expand_targets([x for x in t.value.replace(";", ",").split(",")]) if not excl.ip(ip)]
-            snmp_creds = _creds(db, [t], ("snmp2", "snmp3"))
+            methods = ip_methods(db, t)
             parts = []
-            if snmp_creds:
-                parts.append(snmp.collect(db, {**settings.snmp, "targets": ips, "creds": snmp_creds}))
-            winrm_ips = asyncio.run(_probe(ips, 5985)) if _creds(db, [t], ("windows",)) else []
-            set_setting(db, f"ip_scan:{t.id}", json.dumps(winrm_ips))
-            parts.append(f"{len(winrm_ips)} hosts answer on WinRM" + (
-                "" if winrm_ips else " (port 5985 closed or filtered on every address: WinRM is off on those PCs, "
-                "or a firewall blocks it. Turn it on with 'winrm quickconfig' or the WinRM GPO, and allow TCP 5985 "
-                "from this server)"))
+            if "ping" in methods:
+                alive = [ip for ip, (up, _) in reach.sweep(ips, parallel=128).items() if up]
+                set_setting(db, f"ip_alive:{t.id}", json.dumps(alive))
+                byip = {}
+                for n in db.scalars(select(DeviceNic).where(DeviceNic.ip.in_(ips))) if len(ips) <= 4096 else []:
+                    byip.setdefault(n.ip, set()).add(n.device_id)
+                now, alive_set = utcnow(), set(alive)
+                for ip, dev_ids in byip.items():
+                    for did in dev_ids:
+                        d = db.get(Device, did)
+                        if d and not (ip not in alive_set and d.online_via == "agent" and d.online):
+                            reach.mark(d, ip in alive_set, "ping" if ip in alive_set else "", now)
+                parts.append(f"{len(alive)} of {len(ips)} addresses answer")
+            if "snmp" in methods:
+                snmp_creds = _creds(db, [t], ("snmp2", "snmp3"))
+                parts.append(snmp.collect(db, {**settings.snmp, "targets": ips, "creds": snmp_creds}) if snmp_creds
+                             else "SNMP ticked but no SNMP credential on this target")
+            if "winrm" in methods:
+                if _creds(db, [t], ("windows",)):
+                    winrm_ips = asyncio.run(_probe(ips, 5985))
+                    set_setting(db, f"ip_scan:{t.id}", json.dumps(winrm_ips))
+                    parts.append(f"{len(winrm_ips)} hosts answer on WinRM" + (
+                        "" if winrm_ips else " (port 5985 closed or filtered on every address: WinRM is off on those PCs, "
+                        "or a firewall blocks it. Turn it on with 'winrm quickconfig' or the WinRM GPO, and allow TCP 5985 "
+                        "from this server)"))
+                else:
+                    parts.append("WinRM sweep ticked but no Windows credential on this target")
+            else:
+                set_setting(db, f"ip_scan:{t.id}", "[]")   # PC inventory won't reach into this range over WinRM
             db.commit()
-            _finish(db, [t], True, "; ".join(parts))
-            msgs.append(f"{t.value}: " + "; ".join(parts))
+            msg = "; ".join(parts) or "nothing ticked to run on this range"
+            _finish(db, [t], True, msg)
+            msgs.append(f"{t.value}: {msg}")
         except Exception as exc:
             db.rollback()
             _finish(db, [t], False, str(exc))
@@ -287,6 +326,8 @@ def winrm_cfg(db: Session) -> dict | None:
     known_ips = {r[0] for r in db.execute(text("SELECT ip FROM device_nics WHERE ip IS NOT NULL"))}
     hosts = []
     for t in _targets(db, "ip_range"):
+        if "winrm" not in ip_methods(db, t):
+            continue
         hosts += [ip for ip in json.loads(get_setting(db, f"ip_scan:{t.id}", "[]")) if ip not in known_ips]
     par = getattr(SCOPE, "parallel", None)
     bases, whole = [], False

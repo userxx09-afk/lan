@@ -100,14 +100,14 @@ document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = async () 
 
 // ------------------------------------------------------------ asset grid (server-side paging + per-column filters)
 const GRID_COLS = [
-  ["hostname", "Name"], ["os", "OS"], ["os_display_version", "Version"], ["last_user", "Last user"], ["model", "Model"],
+  ["hostname", "Name"], ["uptime", "Uptime"], ["os", "OS"], ["os_display_version", "Version"], ["last_user", "Last user"], ["model", "Model"],
   ["manufacturer", "Manufacturer"], ["ip", "IP address"], ["mac", "MAC address"], ["switch_name", "Switch"],
   ["switch_port", "Port"], ["ou", "OU"], ["groups", "Groups"], ["state", "State"], ["min_disk_pct_free", "Disk free"],
   ["pending_updates", "Updates"], ["first_seen", "First seen"], ["last_seen", "Last seen"], ["inventory_last_collected", "Last scan"],
 ];
 const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, selected: new Set(), total: 0, rows: [] };
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: GRID_COLS.map((c) => c[0]),
+  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via"],
   filters: Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
   sort: grid.sort, desc: grid.desc, ...extra,
 });
@@ -136,6 +136,7 @@ loaders.computers = async () => {
 function gridCell(c, v, row) {
   if (c === "hostname") return `${statusDot(row)} ${hostLink(v)}`;
   if (c === "last_user") return userLink(v);
+  if (c === "uptime") return uptimeCell(row);
   if (c === "min_disk_pct_free") return diskPill(v);
   if (c === "pending_updates") return v ? `<span class="pill warn">${v}</span>` : v === 0 ? `<span class="pill good">0</span>` : "";
   if (c === "os") return esc((v || "").replace("Microsoft ", ""));
@@ -143,9 +144,27 @@ function gridCell(c, v, row) {
   if (/seen|scan|collected/.test(c)) return esc(fmtDate(v));
   return esc(v);
 }
+// Live status: green = answered the last reachability check (or a scan/agent report), red = didn't, orange = not checked yet.
+const utc = (v) => v ? new Date(String(v).replace(" ", "T") + (/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? "" : "Z")) : null;
+const agoUtc = (v) => { const t = utc(v); if (!t) return ""; const s = Math.max(0, (Date.now() - t) / 1000);
+  return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`; };
+const VIA = { ping: "answered ping", tcp: "answered on TCP", winrm: "scanned over WinRM", scan: "recently scanned", agent: "agent heartbeat", dns: "name not found in DNS" };
 function statusDot(row) {
-  const scanned = row.inventory_last_collected && (Date.now() - new Date(row.inventory_last_collected.replace(" ", "T") + "Z")) < 7 * 864e5;
-  return `<span class="dot ${scanned ? "good" : "warn"}" title="${scanned ? "Scanned in the last 7 days" : "Not scanned recently"}"></span>`;
+  if (row.online == null) return `<span class="dot warn" title="Not checked yet"></span>`;
+  const since = row.online_changed ? ` since ${fmtDate(utcLocal(row.online_changed))}` : "";
+  const t = row.online ? `Online${since} (${VIA[row.online_via] || "reachable"}, checked ${agoUtc(row.online_checked)})`
+    : `Offline${since}${row.online_via === "dns" ? " (name not found in DNS)" : ""}, checked ${agoUtc(row.online_checked)}`;
+  return `<span class="dot ${row.online ? "good live" : "bad"}" title="${esc(t)}"></span>`;
+}
+const utcLocal = (v) => { const t = utc(v); return t ? new Date(t - t.getTimezoneOffset() * 60000).toISOString() : v; };
+const span = (sec) => sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} min` : sec < 172800 ? `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min` : `${Math.floor(sec / 86400)} days ${Math.floor(sec % 86400 / 3600)} h`;
+const isOff = (r) => r.online != null && !r.online;     // SQLite sends 0/1, PostgreSQL true/false
+function uptimeCell(row) {
+  if (isOff(row)) return `<span class="muted" title="Last boot ${esc(fmtDate(row.uptime))}">offline</span>`;
+  const b = utc(row.uptime || row.last_boot);
+  if (!b) return "";
+  const sec = (Date.now() - b) / 1000;
+  return `<span class="${sec > 30 * 86400 ? "pill warn" : ""}" title="Booted ${esc(fmtDate(row.uptime || row.last_boot))} UTC">${span(sec)}</span>`;
 }
 function buildGridHead() {
   $("#gridhead").innerHTML = `<tr><th class="chk"><input type="checkbox" id="selall" title="Select page"></th>${GRID_COLS.map(([c, l]) =>
@@ -204,9 +223,13 @@ async function openDevice(host) {
   $("#drawer").hidden = true;
   const d = await api(`/api/devices/${encodeURIComponent(host)}`);
   const v = d.device;
-  $("#assettitle").innerHTML = `<div class="atitle"><span class="dot ${v.inventory_last_collected ? "good" : "warn"}"></span>${esc(v.hostname)}
+  const live = v.online == null ? `<span class="pill warn">not checked yet</span>` : v.online
+    ? `<span class="pill good">online</span>` : `<span class="pill bad">offline${v.online_changed ? ` since ${esc(fmtDate(utcLocal(v.online_changed)))}` : ""}</span>`;
+  const up = !isOff(v) && (v.uptime || v.last_boot) ? `<span class="uptime"><b>Up ${span((Date.now() - utc(v.uptime || v.last_boot)) / 1000)}</b> <span class="muted">since ${esc(fmtDate(utcLocal(v.uptime || v.last_boot)))}</span></span>` : "";
+  $("#assettitle").innerHTML = `<div class="atitle">${statusDot(v)}${esc(v.hostname)}
     <span class="muted">${esc((v.os || "").replace("Microsoft ", ""))} ${esc(v.os_display_version || "")}</span></div>
-    <div class="muted">${esc(v.ip || "no IP")} · ${esc(v.fqdn || "")} ${v.state ? `· <span class="pill ${v.state === "Active" ? "good" : "mute"}">${esc(v.state)}</span>` : ""}</div>`;
+    <div class="muted">${live} ${up} · ${esc(v.ip || "no IP")} · ${esc(v.fqdn || "")} ${v.state ? `· <span class="pill ${v.state === "Active" ? "good" : "mute"}">${esc(v.state)}</span>` : ""}
+      ${v.online_checked ? `<span class="small">· checked ${agoUtc(v.online_checked)}</span>` : ""}</div>`;
   renderAssetTab(d, $("#assettabs .active")?.dataset.atab || "summary");
   $("#assettabs").querySelectorAll("button").forEach((b) => b.onclick = () => renderAssetTab(d, b.dataset.atab));
 }
@@ -491,6 +514,12 @@ async function pollStatus() {
   } catch { statusTimer = setTimeout(pollStatus, 30000); }
 }
 $("#scanind").onclick = () => showTab("scanning");
+// keep status dots and uptime live without a manual refresh
+setInterval(() => {
+  if (document.hidden || document.querySelector(".modal")) return;
+  const t = document.querySelector(".tab.active")?.id;
+  if (t === "computers") loaders.computers();
+}, 60000);
 
 // ------------------------------------------------------------ Scanning view: running (with progress), queue, upcoming, recent
 const dur = (sec) => sec == null ? "" : sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, "0")}s` : `${Math.floor(sec / 3600)}h ${String(Math.floor(sec % 3600 / 60)).padStart(2, "0")}m`;
@@ -820,12 +849,16 @@ async function runLibrary(id) {
 
 // ------------------------------------------------------------ settings: credentials, scan targets, schedule, DameWare
 const KIND = { windows: "Windows / AD (LDAP + WinRM)", snmp2: "SNMP v2c", snmp3: "SNMP v3" };
+const IPM = { ping: "Ping sweep: find which addresses are up, and mark known PCs online or offline",
+  snmp: "SNMP: poll switches and routers (needs an SNMP credential)",
+  winrm: "WinRM sweep: find Windows PCs on port 5985 for the PC inventory (needs a Windows credential)" };
+const IPM_SHORT = { ping: "ping", snmp: "SNMP", winrm: "WinRM sweep" };
 const TKIND = { ad_domain: "Whole AD domain", ad_computer_path: "AD OU of computers", ad_user_path: "AD OU of users", ip_range: "IP range" };
 const THELP = {
   ad_domain: ["corp.example.com", "The whole domain: tick below whether to read its computers, its users or both. Domain controllers are always read. To scan only part of AD, pick an OU instead."],
   ad_computer_path: ["corp.example.com/Sites/Office/PCs", "Only computers in this OU and the OUs below it are imported and scanned over WinRM. No users are read. Type the path as Active Directory Users and Computers shows it (domain/OU/OU), or a DN like OU=PCs,OU=Office,OU=Sites,DC=corp,DC=example,DC=com."],
   ad_user_path: ["corp.example.com/Staff/Office", "Only user accounts in this OU and the OUs below it are imported. No computers are read. Path as domain/OU/OU, or a DN like OU=Office,OU=Staff,DC=corp,DC=example,DC=com."],
-  ip_range: ["10.0.0.0/24, 10.1.0.1-10.1.0.50", "Switches and routers are polled over SNMP; Windows PCs that answer WinRM are scanned too."],
+  ip_range: ["10.0.0.0/24, 10.1.0.1-10.1.0.50", "Tick below what runs on these addresses. Only the ticked methods run, and each needs its credential."],
 };
 let creds = [];
 loaders.settings = async () => {
@@ -837,7 +870,7 @@ loaders.settings = async () => {
       edit: (id) => `<a class="link" data-cedit="${id}">Edit</a> · <a class="link" data-ctest="${id}">Test</a> · <a class="link" data-cdel="${id}">Delete</a>` } });
   table($("#targettable"), t.map((x) => ({ ...x, credentials: x.credential_ids, edit: x.id })), ["kind", "value", "search_base", "server", "credentials", "enabled", "last_run", "last_result", "edit"], {
     labels: { edit: "", last_result: "result", search_base: "searches" },
-    cell: { kind: (v, r) => esc(TKIND[v] || v) + (r.kind === "ad_domain" && r.collect ? `<div class="muted small">${esc(r.collect.join(" and "))}</div>` : ""),
+    cell: { kind: (v, r) => esc(TKIND[v] || v) + (r.collect ? `<div class="muted small">${esc(r.collect.map((m) => IPM_SHORT[m] || m).join(r.kind === "ip_range" ? ", " : " and "))}</div>` : ""),
       search_base: (v, r) => r.scope_error ? `<span class="pill bad longtext">${esc(r.scope_error)}</span>` : v ? `<code class="small">${esc(v)}</code>` : r.kind === "ip_range" ? `<span class="muted">addresses</span>` : "", credentials: (ids) => esc(ids.map((i) => creds.find((c) => c.id === i)?.name || `#${i}`).join(", ") || "none"),
       enabled: (v) => yesNo(v), last_run: fmtDate,
       // Full text, wrapped: errors are only useful whole. A run that worked but reached no Windows hosts is a warning.
@@ -896,6 +929,8 @@ async function editTarget(x = {}) {
     <div id="tcollect" class="checks" ${kind === "ad_domain" ? "" : "hidden"}><span class="muted">Read from the domain:</span>
       <label><input type="checkbox" data-multi="1" name="collect" value="computers" ${!x.collect || x.collect.includes("computers") ? "checked" : ""}> Computers (and scan them over WinRM)</label>
       <label><input type="checkbox" data-multi="1" name="collect" value="users" ${!x.collect || x.collect.includes("users") ? "checked" : ""}> User accounts and groups</label></div>
+    <div id="tmethods" class="checks" ${kind === "ip_range" ? "" : "hidden"}><span class="muted">On these addresses, run:</span>
+      ${Object.entries(IPM).map(([k, l]) => `<label><input type="checkbox" data-multi="1" name="methods" value="${k}" ${!x.collect || x.kind !== "ip_range" || x.collect.includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div>
     <label id="tserver">Domain controller (optional)<input name="server" value="${esc(x.server || "")}" placeholder="dc01.corp.example.com, blank = find one"></label>
     <label>Credentials to try, in order</label>
     <div class="checks">${creds.map((c) => `<label><input type="checkbox" data-multi="1" name="credential_ids" value="${c.id}" ${(x.credential_ids || []).includes(c.id) ? "checked" : ""}> ${esc(c.name)} <span class="muted">${esc(KIND[c.kind])}</span></label>`).join("") || `<span class="muted">Add a credential first.</span>`}</div>
@@ -904,13 +939,15 @@ async function editTarget(x = {}) {
   const f = await pending;
   if (!f) return;
   f.credential_ids = (f.credential_ids || []).map(Number);
-  if (f.kind !== "ad_domain") delete f.collect;
+  if (f.kind === "ip_range") f.collect = f.methods;
+  else if (f.kind !== "ad_domain") delete f.collect;
+  delete f.methods;
   try { await post(`/api/targets${x.id ? `?tid=${x.id}` : ""}`, f); toast("Scan target saved."); loaders.settings(); } catch (e) { toast(errText(e), true); }
 }
 document.addEventListener("change", (e) => {
   if (e.target.id !== "tkind") return;
   const k = e.target.value;
-  $("#tvalue").placeholder = THELP[k][0]; $("#thelp").textContent = THELP[k][1]; $("#tserver").hidden = k === "ip_range"; $("#tcollect").hidden = k !== "ad_domain";
+  $("#tvalue").placeholder = THELP[k][0]; $("#thelp").textContent = THELP[k][1]; $("#tserver").hidden = k === "ip_range"; $("#tcollect").hidden = k !== "ad_domain"; $("#tmethods").hidden = k !== "ip_range";
 });
 const errText = (e) => { try { return JSON.parse(e.message).detail || e.message; } catch { return e.message; } };
 $("#addcred").onclick = () => editCred();
@@ -923,6 +960,7 @@ async function loadJobs(targets) {
   if (targets) jobTargets = targets;
   jobData = await api("/api/jobs");
   $("#jobcap").max_concurrent.value = jobData.max_concurrent;
+  $("#jobcap").reach_interval.value = jobData.reach_interval;
   const stateCell = (v, r) => r.state ? `<span class="pill warn">${r.state}</span>` : !r.enabled ? `<span class="pill mute">off</span>` : fmtDate(r.next_run);
   table($("#jobtable"), jobData.jobs.map((j) => ({ ...j, what: j.collectors.map((c) => JOB_LABEL[c] || c).join(", "), next: j.id, act: j.id })),
     ["name", "scope", "what", "schedule", "next", "last_run", "last_result", "act"], {
@@ -958,6 +996,9 @@ async function editJob(j = null) {
       <p class="muted small">To scan one OU on its own schedule, add it under "What to scan" as an OU of computers, then pick it here.</p></fieldset>
     <fieldset><legend>Collect</legend>
       ${Object.entries(jobData.collectors).map(([k, l]) => `<label class="check"><input type="checkbox" data-multi="1" name="c" value="${k}" ${v.collectors.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}</fieldset>
+    <fieldset><legend>On IP ranges, run <span class="muted small">(none ticked = what each range has ticked)</span></legend>
+      ${Object.entries(IPM_SHORT).map(([k, l]) => `<label class="check"><input type="checkbox" data-multi="1" name="ipm" value="${k}" ${(v.ip_methods || []).includes(k) ? "checked" : ""}> ${l}</label>`).join("")}
+      <p class="muted small">Applies when this job scans IP ranges. A method also needs to be ticked on the range itself.</p></fieldset>
     <fieldset><legend>When</legend>
       <label>Run <select name="mode"><option value="every" ${mode === "every" ? "selected" : ""}>repeatedly</option><option value="daily" ${mode === "daily" ? "selected" : ""}>once a day</option><option value="manual" ${mode === "manual" ? "selected" : ""}>only when started by hand</option></select></label>
       <label class="m-every">Every <input name="every_n" type="number" min="1" value="${v.every_min ? (v.every_min % 60 === 0 ? v.every_min / 60 : v.every_min) : 30}" style="width:5em">
@@ -975,14 +1016,14 @@ async function editJob(j = null) {
   const num = (x) => (x === "" || x == null ? null : +x);
   const body = { name: f.name, enabled: f.enabled, target_ids: f.t.map(Number), collectors: f.c, days: f.d.join(""),
     every_min: f.mode === "every" ? (+f.every_n) * (+f.every_u) : null, at_time: f.mode === "daily" ? f.at_time : null,
-    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel) };
+    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel), ip_methods: f.ipm };
   try { await post(`/api/jobs${j ? `?jid=${j.id}` : ""}`, body); toast("Scan job saved."); loadJobs(); }
   catch (e) { toast(errText(e), true); }
 }
 $("#addjob").onclick = () => editJob();
 $("#jobcap").onsubmit = async (e) => {
   e.preventDefault();
-  try { await api("/api/jobs/settings", { method: "PUT", body: JSON.stringify({ max_concurrent: +e.target.max_concurrent.value }) }); toast("Saved."); }
+  try { await api("/api/jobs/settings", { method: "PUT", body: JSON.stringify({ max_concurrent: +e.target.max_concurrent.value, reach_interval: +e.target.reach_interval.value }) }); toast("Saved."); }
   catch (er) { toast(errText(er), true); }
 };
 $("#dwform").onsubmit = async (e) => {
