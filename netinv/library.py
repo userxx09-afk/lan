@@ -61,6 +61,10 @@ LIBRARY: list[tuple[str, str, str, dict]] = [
     ("sw_titles", "Software", "Software titles and install counts", {"sql": "SELECT name, publisher, COUNT(DISTINCT hostname) AS computers, COUNT(DISTINCT version) AS versions FROM v_software GROUP BY name, publisher ORDER BY computers DESC"}),
     ("sw_versions", "Software", "Software versions", {"sql": "SELECT name, version, COUNT(*) AS computers FROM v_software GROUP BY name, version ORDER BY name, version"}),
     ("sw_all", "Software", "Installed software by computer", {"spec": S("v_software", ["hostname", "name", "version", "publisher", "install_date"], sort="hostname")}),
+    ("sw_outdated", "Software", "Outdated apps (winget catalog)", {"spec": S("v_software", ["hostname", "name", "version", "latest_version", "catalog_id", "scope"], [F("status", "eq", "outdated")], "name")}),
+    ("sw_outdated_apps", "Software", "Outdated apps by program", {"sql": "SELECT name, catalog_id, MAX(latest_version) AS latest_version, COUNT(DISTINCT hostname) AS computers_behind FROM v_software WHERE status = 'outdated' GROUP BY name, catalog_id ORDER BY computers_behind DESC"}),
+    ("sw_unknown", "Software", "Apps not found in the app catalog", {"sql": "SELECT name, publisher, COUNT(DISTINCT hostname) AS computers FROM v_software WHERE status = 'unknown' OR status IS NULL GROUP BY name, publisher ORDER BY computers DESC"}),
+    ("sw_catalog_status", "Software", "Installs by app catalog status", {"sql": "SELECT COALESCE(status, 'not checked') AS status, COUNT(*) AS installs, COUNT(DISTINCT hostname) AS computers FROM v_software GROUP BY 1 ORDER BY installs DESC"}),
     ("sw_changes", "Software", "Software installed or removed in the last 30 days", {"spec": S("v_changes", ["time", "hostname", "kind", "detail"], [F("kind", "contains", "software"), F("time", "gt", "30d")], "time", True)}),
 
     ("net_portmap", "Network", "Which port each computer is plugged into", {"spec": S("v_port_map", ["hostname", "ip", "mac", "switch_name", "port", "port_alias", "vlan", "last_seen"], sort="switch_name")}),

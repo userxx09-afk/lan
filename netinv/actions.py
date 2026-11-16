@@ -92,6 +92,8 @@ def rescan(hostname: str) -> dict:
                 base = winrm_cfg(db) or dict(settings.winrm)
                 cfg = {**base, "hosts": [_addr(dev)], "include_ad": False}
                 msg = winrm.collect_endpoints(db, cfg, check_pending=True)
+                from .scanning import _reconcile
+                _reconcile(db)
                 dev = db.scalar(select(Device).where(Device.hostname == hostname))
                 log_change(db, dev, "action", f"Rescan: {msg}")
                 db.commit()

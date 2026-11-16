@@ -44,8 +44,14 @@ $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Obj
 
 $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-$software = @(Get-ItemProperty $keys | Where-Object { $_.DisplayName -and -not $_.SystemComponent -and -not $_.ParentKeyName } | ForEach-Object {
-  @{ name = $_.DisplayName; version = $_.DisplayVersion; publisher = $_.Publisher; install_date = $_.InstallDate } })
+$sw = { param($scope) process { if ($_.DisplayName -and -not $_.SystemComponent -and -not $_.ParentKeyName) {
+  @{ name = $_.DisplayName; version = $_.DisplayVersion; publisher = $_.Publisher; install_date = $_.InstallDate;
+     product_code = $_.PSChildName; scope = $scope } } } }
+# Per-user installs (Chrome, Zoom, Teams, VS Code...) from the profiles loaded right now
+$userKeys = @(Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' } |
+  ForEach-Object { "Registry::HKEY_USERS\$($_.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" })
+$software = @(@(Get-ItemProperty $keys -ErrorAction SilentlyContinue | & $sw 'machine') +
+              @(if ($userKeys) { Get-ItemProperty $userKeys -ErrorAction SilentlyContinue | & $sw 'user' }))
 
 $hotfixes = @(Get-HotFix | ForEach-Object {
   @{ kb = $_.HotFixID; title = $_.Description; installed_on = if ($_.InstalledOn) { $_.InstalledOn.ToString('o') } else { $null } } })

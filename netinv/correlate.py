@@ -37,7 +37,8 @@ VIEWS: dict[str, str] = {
         FROM disks k JOIN devices d ON d.id = k.device_id
     """,
     "v_software": """
-        SELECT d.hostname, s.name, s.version, s.publisher, s.install_date
+        SELECT d.hostname, s.name, s.version, s.publisher, s.install_date, s.scope, s.product_code,
+               s.catalog_id, s.latest_version, s.sw_status AS status, s.match_method
         FROM software s JOIN devices d ON d.id = s.device_id
     """,
     "v_updates": """

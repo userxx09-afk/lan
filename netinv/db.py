@@ -133,7 +133,26 @@ class Software(Base):
     version: Mapped[str | None] = mapped_column(String(64))
     publisher: Mapped[str | None] = mapped_column(String(255))
     install_date: Mapped[str | None] = mapped_column(String(16))
+    product_code: Mapped[str | None] = mapped_column(String(255))   # uninstall key name (MSI product code)
+    scope: Mapped[str | None] = mapped_column(String(8))            # machine | user
+    # Filled in by catalog.reconcile from the winget catalog
+    catalog_id: Mapped[str | None] = mapped_column(String(128))
+    latest_version: Mapped[str | None] = mapped_column(String(64))
+    sw_status: Mapped[str | None] = mapped_column(String(12))       # current | outdated | unknown | ignored
+    match_method: Mapped[str | None] = mapped_column(String(16))
     device: Mapped[Device] = relationship(back_populates="software")
+
+
+class SoftwareRule(Base):
+    """App catalog rule from Settings: ignore an app, map it to a winget package, or set the wanted version."""
+    __tablename__ = "software_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match: Mapped[str] = mapped_column(String(200))     # regex on the program name, case-insensitive
+    action: Mapped[str] = mapped_column(String(16))     # ignore | package | target
+    value: Mapped[str | None] = mapped_column(String(128))
+    note: Mapped[str | None] = mapped_column(String(255))
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class UpdateItem(Base):

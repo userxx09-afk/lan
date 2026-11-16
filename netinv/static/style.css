@@ -204,3 +204,6 @@ td.wrap { white-space: normal; min-width: 220px; }
 .loginbox [hidden] { display: none; }
 .who { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .who button { padding: 4px 10px; font-size: 12.5px; }
+button.small { padding: 3px 10px; font-size: 12.5px; }
+h2 button.small { margin-left: 10px; vertical-align: middle; }
+#assetbody > .banner { margin-bottom: 12px; }

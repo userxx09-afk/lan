@@ -200,7 +200,17 @@ def run_pcs(db: Session, check_pending: bool) -> str:
         return "No Windows credential configured."
     if not cfg.get("hosts") and not cfg.get("include_ad", True) and not settings.winrm.get("user"):
         return "Nothing to scan."
-    return winrm.collect_endpoints(db, cfg, check_pending=check_pending)
+    msg = winrm.collect_endpoints(db, cfg, check_pending=check_pending)
+    _reconcile(db)
+    return msg
+
+
+def _reconcile(db) -> None:
+    from . import catalog
+    try:
+        catalog.reconcile(db, only_new=True)
+    except Exception:
+        log.exception("app catalog reconcile")
 
 
 def run_dc_logons(db: Session) -> str:

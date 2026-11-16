@@ -119,6 +119,9 @@ RULES: list[tuple[str, str, str, callable]] = [
     ("pending_updates", IMPORTANT, "Updates: Pending Windows updates",
      lambda db: _q(db, _active("pending_updates > 0").replace(DEV_COLS, DEV_COLS + ", pending_updates"))),
     ("outdated_sw", IMPORTANT, "Software: Outdated or end-of-life installs", outdated_software),
+    ("catalog_outdated", INFO, "Software: Apps behind the latest version (winget catalog)",
+     lambda db: _q(db, "SELECT name, catalog_id, MAX(latest_version) AS latest_version, COUNT(DISTINCT hostname) AS computers "
+                       "FROM v_software WHERE status = 'outdated' GROUP BY name, catalog_id ORDER BY computers DESC")),
     ("unknown_mac", IMPORTANT, "Network: Unknown devices on switch ports",
      lambda db: _q(db, "SELECT mac, ip, switch_name, port, vlan, last_seen FROM v_port_map WHERE hostname IS NULL ORDER BY switch_name, port")),
     # ---- Informational

@@ -218,9 +218,10 @@ function renderAssetTab(d, tab) {
     history: d.history.length, comments: d.comments.length, location: d.location.length };
   $("#assettabs").querySelectorAll("button").forEach((b) => { const n = counts[b.dataset.atab]; b.querySelector("i") && (b.querySelector("i").textContent = n ? ` ${n}` : ""); });
   if (tab === "summary") {
+    const running = d.fixes_running?.length ? `<div class="banner">Running on this PC: ${d.fixes_running.map(esc).join(", ")}. The result appears in History.</div>` : "";
     const wEnd = v.warranty_end ? new Date(v.warranty_end.replace(" ", "T")) : null;
     const wCls = wEnd ? (wEnd < new Date() ? "bad" : wEnd - new Date() < 90 * 864e5 ? "warn" : "good") : "";
-    el.innerHTML = `<div class="summary">
+    el.innerHTML = `${running}<div class="summary">
       <div class="panel"><h3>Hardware</h3>
         ${kvRow("Manufacturer", esc(v.manufacturer))}${kvRow("Model", esc(v.model))}${kvRow("Serial", esc(v.serial))}
         ${kvRow("Processor", esc(v.cpu))}${kvRow("Memory", v.ram_gb ? `${v.ram_gb} GB` : "")}${kvRow("Graphics", esc(v.gpu))}
@@ -266,10 +267,18 @@ function renderAssetTab(d, tab) {
     el.querySelectorAll("[data-rmgroup]").forEach((a) => a.onclick = async () => { await api(`/api/devices/${current}/groups/${encodeURIComponent(a.dataset.rmgroup)}`, { method: "DELETE" }); openDevice(current); });
     el.querySelectorAll("[data-rmfield]").forEach((a) => a.onclick = async () => { await api(`/api/devices/${current}/fields`, { method: "PUT", body: JSON.stringify({ name: a.dataset.rmfield, value: "" }) }); openDevice(current); });
   } else if (tab === "software") {
-    el.innerHTML = `<div class="toolbar"><input id="swf" placeholder="Filter software"></div><div id="swt"></div>`;
-    table($("#swt"), d.software, ["name", "version", "publisher", "install_date"], { filterEl: $("#swf"), sort: "name" });
+    const behind = d.software.filter((s) => s.status === "outdated").length;
+    el.innerHTML = `<div class="toolbar"><input id="swf" placeholder="Filter software">
+      <span class="muted">${behind ? `${behind} behind the latest version` : "Nothing behind the latest version"}</span></div><div id="swt"></div>`;
+    table($("#swt"), d.software, ["name", "version", "latest_version", "status", "publisher", "scope", "fix"], { filterEl: $("#swf"), sort: "name",
+      labels: { latest_version: "latest", fix: "" },
+      cell: { status: swPill, fix: (_, r) => swFixCell(r) } });
+    el.querySelectorAll("[data-swupd]").forEach((b) => b.onclick = () => appUpdate([current], b.dataset.swupd, b.dataset.name));
   } else if (tab === "updates") {
-    el.innerHTML = `<h2>Pending</h2><div id="up1"></div><h2>Installed</h2><div id="up2"></div>`;
+    const npend = d.updates.filter((u) => u.status === "pending").length;
+    el.innerHTML = `<h2>Pending ${npend ? `<button class="small" id="wuinstall">Install ${npend} pending update${npend === 1 ? "" : "s"}</button>` : ""}</h2>
+      <div id="up1"></div><h2>Installed</h2><div id="up2"></div>`;
+    $("#wuinstall") && ($("#wuinstall").onclick = () => runFix("windows_updates"));
     table($("#up1"), d.updates.filter((u) => u.status === "pending"), ["kb", "title", "severity"]);
     table($("#up2"), d.updates.filter((u) => u.status === "installed"), ["kb", "title", "installed_on"], { sort: "installed_on" });
   } else if (tab === "location") {
@@ -308,6 +317,130 @@ document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   } catch (e) { toast(e.message, true); }
   b.disabled = false;
 });
+
+// ------------------------------------------------------------ app catalog and one-click fixes
+const SW_PILL = { current: "good", outdated: "warn", unknown: "mute", ignored: "mute" };
+const swPill = (v) => (v ? `<span class="pill ${SW_PILL[v] || "mute"}">${v === "unknown" ? "not in catalog" : esc(v)}</span>` : "");
+function swFixCell(r) {
+  if (r.status !== "outdated" || !r.catalog_id) return "";
+  if (r.scope === "user") return `<span class="muted small" title="Installed for one user only. Update it from that user's session, or install it machine-wide.">per-user install</span>`;
+  if (r.match_method === "family") return `<span class="muted small" title="Several catalog packages fit (for example 32-bit and 64-bit). Add a rule in Settings > App catalog to pick one.">pick package</span>`;
+  return `<button class="small" data-swupd="${esc(r.catalog_id)}" data-name="${esc(r.name)}">Update</button>`;
+}
+async function appUpdate(hosts, pkg, name) {
+  const n = hosts.length;
+  if (!(await confirmBox(`Update ${name} to the latest version with winget (${pkg}) on ${n === 1 ? hosts[0] : `${n} computers`}? ` +
+    "The app is closed and updated silently; anyone using it loses unsaved work in it.")) ) return;
+  try {
+    const r = n === 1 ? await post(`/api/devices/${encodeURIComponent(hosts[0])}/fix`, { action: "app_update", value: pkg })
+      : await post("/api/fix/bulk", { action: "app_update", value: pkg, hostnames: hosts });
+    toast(r.output, !r.ok);
+  } catch (e) { toast(errText(e), true); }
+}
+const SERVICES = { WinDefend: "Microsoft Defender Antivirus", wuauserv: "Windows Update", BITS: "Background Intelligent Transfer (BITS)" };
+async function runFix(action) {
+  const host = current;
+  let value = null, ask = "";
+  if (action === "windows_updates") ask = `Install all pending Windows updates on ${host} now? It does not restart the PC; if an update needs a restart, the PC shows “reboot pending”.`;
+  if (action === "cancel_reboot") ask = `Cancel a reboot scheduled on ${host}?`;
+  if (action === "start_service") {
+    const f = await formModal(`<h3>Start a service on ${esc(host)}</h3><label>Service <select name="svc">${Object.entries(SERVICES).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+      <p class="muted">Only starts it if it is stopped. A service disabled by policy is left alone.</p>`);
+    if (!f) return; value = f.svc;
+  } else if (action === "reboot") {
+    const h = String((await getSettings())?.["fix:reboot_hour"] ?? 2).padStart(2, "0");
+    const f = await formModal(`<h3>Schedule a reboot of ${esc(host)}</h3>
+      <label>When <select name="when"><option value="tonight">Tonight at ${h}:00 (PC local time)</option><option value="soon">In 5 minutes</option></select></label>
+      <p class="muted">The signed-in user sees a notice and can save their work. You can cancel it until then.</p>`);
+    if (!f) return; value = f.when;
+  } else if (!(await confirmBox(ask))) return;
+  try {
+    const r = await post(`/api/devices/${encodeURIComponent(host)}/fix`, { action, value });
+    toast(r.output, !r.ok);
+    openDevice(host);
+  } catch (e) { toast(errText(e), true); }
+}
+document.querySelectorAll("[data-fix]").forEach((b) => b.onclick = async () => { b.disabled = true; try { await runFix(b.dataset.fix); } finally { b.disabled = false; } });
+
+let appRows = [];
+loaders.apps = async () => {
+  const r = await api("/api/apps");
+  appRows = r.apps;
+  const c = r.catalog || {};
+  $("#appcat").innerHTML = c.updated ? `App catalog: ${esc(c.packages)} packages, downloaded ${fmtDate(c.updated)}` + (c.error ? ` · <span class="pill bad">${esc(c.error)}</span>` : "")
+    : c.error ? `<span class="pill bad">App catalog download failed: ${esc(c.error)}</span>` : "App catalog not downloaded yet (Settings > App catalog).";
+  renderApps();
+};
+function renderApps() {
+  const show = $("#appshow").value;
+  const rows = appRows.filter((a) => show === "all" || a.status === show).map((a) => ({ ...a, computers: a.installed, actions: "" }));
+  table($("#apptable"), rows, ["name", "publisher", "computers", "outdated", "oldest", "newest", "latest_version", "catalog_id", "status", "actions"], {
+    filterEl: $("#appf"), labels: { outdated: "behind", latest_version: "latest", catalog_id: "winget package" },
+    cell: { status: swPill, outdated: (v) => (v ? `<span class="pill warn">${v}</span>` : "0"),
+      name: (v, r) => `<a class="link" data-appname="${esc(v)}">${esc(v)}</a>`,
+      actions: (_, r) => {
+        const n = r.outdated - r.outdated_user;
+        const upd = r.status === "outdated" && r.catalog_id && r.match_method !== "family" && n > 0
+          ? `<button class="small" data-appupd="${esc(r.name)}">Update ${n}</button> ` : "";
+        return `${upd}<a class="link small" data-apprule="${esc(r.name)}">rule</a>`;
+      } } });
+  const find = (n) => appRows.find((a) => a.name === n);
+  $("#apptable").querySelectorAll("[data-appname]").forEach((a) => a.onclick = () => appComputers(a.dataset.appname));
+  $("#apptable").querySelectorAll("[data-apprule]").forEach((a) => a.onclick = () => ruleModal(a.dataset.apprule));
+  $("#apptable").querySelectorAll("[data-appupd]").forEach((b) => b.onclick = async () => {
+    const a = find(b.dataset.appupd);
+    const list = (await api(`/api/apps/computers?name=${encodeURIComponent(a.name)}&status=outdated`)).filter((x) => x.scope !== "user" && x.catalog_id === a.catalog_id);
+    await appUpdate([...new Set(list.map((x) => x.hostname))], a.catalog_id, a.name);
+  });
+}
+$("#appshow").onchange = renderApps;
+async function appComputers(name) {
+  const rows = await api(`/api/apps/computers?name=${encodeURIComponent(name)}`);
+  const m = Object.assign(document.createElement("div"), { className: "modal" });
+  m.innerHTML = `<div class="box wide"><h3>${esc(name)}</h3><div id="appc"></div><div class="row"><button class="ghost">Close</button></div></div>`;
+  document.body.appendChild(m);
+  table(m.querySelector("#appc"), rows, ["hostname", "version", "latest_version", "status", "scope"], { cell: { hostname: hostLink, status: swPill }, sort: "hostname" });
+  m.querySelector("#appc").addEventListener("click", (e) => { if (e.target.dataset.host) m.remove(); });
+  m.querySelector(".ghost").onclick = () => m.remove();
+}
+async function ruleModal(name = "") {
+  const esc_re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const f = await formModal(`<h3>App catalog rule</h3>
+    <label>Programs whose name matches <input name="match" value="${esc(name ? `^${esc_re(name)}$` : "")}" placeholder="^Adobe Acrobat Reader"></label>
+    <p class="muted small">A regular expression, not case sensitive. ^ and $ mean the whole name.</p>
+    <label>Rule <select name="action"><option value="package">Use this winget package</option><option value="target">Treat this version as up to date</option><option value="ignore">Ignore (don't report as behind)</option></select></label>
+    <label>Package id or version <input name="value" list="catpkgs" placeholder="Adobe.Acrobat.Reader.64-bit, or 8.0.4510"></label><datalist id="catpkgs"></datalist>
+    <label>Note <input name="note" placeholder="optional, e.g. why"></label>`);
+  if (!f) return;
+  try { await post("/api/catalog/rules", f); toast("Rule saved. Statuses update in a few seconds."); setTimeout(() => { loaders.apps(); loadCatalog(); }, 3000); }
+  catch (e) { toast(errText(e), true); }
+}
+document.addEventListener("input", async (e) => {   // package suggestions while typing in the rule form
+  if (e.target.name !== "value" || !e.target.getAttribute("list") || e.target.value.length < 3) return;
+  const sel = e.target.form.querySelector("[name=action]");
+  if (sel.value !== "package") return;
+  const r = await api(`/api/catalog/search?q=${encodeURIComponent(e.target.value)}`);
+  $("#catpkgs").innerHTML = r.map((p) => `<option value="${esc(p.id)}">${esc(p.name)} ${esc(p.latest_version)}</option>`).join("");
+});
+const RULE_LABEL = { ignore: "ignore", package: "use package", target: "up to date from version" };
+async function loadCatalog() {
+  const c = await api("/api/catalog");
+  $("#catinfo").innerHTML = c.updated ? `${esc(c.packages)} packages, downloaded ${fmtDate(c.updated)}; last matched ${fmtDate(c.reconciled)}.` : "Not downloaded yet.";
+  if (c.error) $("#catinfo").innerHTML += ` <span class="pill bad">${esc(c.error)}</span>`;
+  table($("#catrules"), c.rules.map((r) => ({ ...r, rule: `${RULE_LABEL[r.action]} ${r.value || ""}`, del: r.id })), ["match", "rule", "note", "created_by", "del"], {
+    labels: { del: "" }, cell: { del: (id) => `<a class="link small" data-rdel="${id}">delete</a>` } });
+  $("#catrules").querySelectorAll("[data-rdel]").forEach((a) => a.onclick = async () => {
+    if (await confirmBox("Delete this rule?")) { await api(`/api/catalog/rules/${a.dataset.rdel}`, { method: "DELETE" }); setTimeout(loadCatalog, 1500); }
+  });
+  $("#rebootform")["fix:reboot_hour"].value = appSettings?.["fix:reboot_hour"] ?? 2;
+}
+$("#catrefresh").onclick = async () => { const r = await post("/api/catalog/refresh", {}); toast(r.output); setTimeout(loadCatalog, 15000); };
+$("#catrule").onclick = () => ruleModal();
+$("#rebootform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { appSettings = await api("/api/settings", { method: "PUT", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Saved."); }
+  catch (er) { toast(errText(er), true); }
+};
 
 // ------------------------------------------------------------ small UI helpers: toast, prompt, confirm, scan banner
 function toast(msg, bad = false) {
@@ -643,7 +776,7 @@ let creds = [];
 loaders.settings = async () => {
   loadUpdate(); loadAuth();
   const [c, t, s] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings")]);
-  creds = c; appSettings = s;
+  creds = c; appSettings = s; loadCatalog();
   table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
     labels: { edit: "" }, cell: { kind: (v) => esc(KIND[v] || v), secret: (v) => (v ? `<span class="pill good">stored</span>` : `<span class="pill warn">missing</span>`),
       edit: (id) => `<a class="link" data-cedit="${id}">Edit</a> · <a class="link" data-ctest="${id}">Test</a> · <a class="link" data-cdel="${id}">Delete</a>` } });

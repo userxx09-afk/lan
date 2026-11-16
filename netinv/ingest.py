@@ -34,6 +34,8 @@ class SoftwareIn(BaseModel):
     version: str | None = None
     publisher: str | None = None
     install_date: str | None = None
+    product_code: str | None = None
+    scope: str | None = None
 
 
 class HotfixIn(BaseModel):
@@ -175,8 +177,10 @@ def apply_endpoint(db: Session, p: EndpointPayload) -> Device:
         key = (s.name.strip(), s.version)
         if s.name.strip() and key not in seen:
             seen.add(key)
-            sw.append(Software(name=s.name.strip(), version=s.version, publisher=s.publisher,
-                               install_date=s.install_date))
+            sw.append(Software(name=s.name.strip()[:255], version=(s.version or None) and s.version[:64],
+                               publisher=(s.publisher or None) and s.publisher[:255], install_date=s.install_date,
+                               product_code=(s.product_code or None) and s.product_code[:255],
+                               scope=s.scope if s.scope in ("machine", "user") else None))
     dev.software = sw
 
     pending_old = [u for u in dev.updates if u.status == "pending"]

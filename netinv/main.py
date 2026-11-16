@@ -16,12 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, exports, jobs, library, reports, updater
+from . import __version__, actions, alerts, auth, catalog, exports, fixes, jobs, library, reports, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
-from .db import (AdUser, AuditLog, Credential, ScanTarget, get_setting, set_setting)
+from .db import (AdUser, AuditLog, Credential, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
@@ -43,6 +43,8 @@ async def lifespan(app: FastAPI):
             set_setting(db, "update:message", None)
             db.commit()
     threading.Thread(target=updater.loop, args=(_stop,), daemon=True).start()
+    threading.Thread(target=catalog.loop, args=(_stop,), daemon=True).start()
+    threading.Thread(target=fixes.loop, args=(_stop,), daemon=True).start()
     yield
     _stop.set()
 
@@ -248,6 +250,7 @@ def device(hostname: str, db=Depends(db_session)):
             "updates": one("v_updates"), "users": one("v_user_devices", sort="last_logon", desc=True),
             "logons": reports.run_query(db, "v_logons", filters=[{"field": "hostname", "op": "eq", "value": h}],
                                         sort="time", desc=True, limit=300)["rows"],
+            "fixes_running": fixes.running(h),
             "location": location, "nics": [{"mac": n.mac, "ip": n.ip, "description": n.description} for n in dev.nics],
             "groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id))),
             "custom_fields": {c.name: c.value for c in db.scalars(select(CustomField).where(CustomField.device_id == dev.id))},
@@ -352,6 +355,146 @@ def device_action(hostname: str, action: str, user=Depends(ui_auth), db=Depends(
     if action == "reboot":
         return actions.reboot(db, dev, user)
     raise HTTPException(404)
+
+
+class FixIn(BaseModel):
+    action: str
+    value: str | None = None
+
+
+@app.post("/api/devices/{hostname}/fix")
+def device_fix(hostname: str, body: FixIn, user=Depends(ui_auth), db=Depends(db_session)):
+    return fixes.run(db, _device(db, hostname), body.action, user, body.value)
+
+
+class BulkFixIn(BaseModel):
+    action: str
+    hostnames: list[str]
+    value: str | None = None
+
+
+@app.post("/api/fix/bulk")
+def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
+    if body.action not in fixes.ACTIONS:
+        raise HTTPException(400, "unknown fix")
+    if len(body.hostnames) > 500:
+        raise HTTPException(400, "at most 500 computers at a time")
+    n = fixes.run_many(body.hostnames, body.action, user, body.value)
+    return {"ok": True, "count": n, "output": f"Started on {n} computer{'s' if n != 1 else ''}. Results appear in each PC's History."}
+
+
+# ------------------------------------------------------------------ app catalog
+@app.get("/api/apps", dependencies=UI)
+def apps(db=Depends(db_session)):
+    """One row per program (name + publisher + catalog package), with how many PCs are behind."""
+    raw = db.execute(text(
+        "SELECT name, publisher, catalog_id, version, latest_version, sw_status, scope, match_method, "
+        "COUNT(DISTINCT device_id) AS n FROM software GROUP BY 1, 2, 3, 4, 5, 6, 7, 8")).all()
+    out: dict[tuple, dict] = {}
+    for name, pub, cid, ver, latest, st, scope, how, n in raw:
+        a = out.setdefault((name, pub, cid), {"name": name, "publisher": pub, "catalog_id": cid, "latest_version": latest,
+                                              "installed": 0, "outdated": 0, "outdated_user": 0, "versions": set(),
+                                              "status": st or "unknown", "match_method": how})
+        a["installed"] += n
+        a["versions"].add(ver or "")
+        if st == "outdated":
+            a["outdated"] += n
+            a["status"] = "outdated"
+            if scope == "user":
+                a["outdated_user"] += n
+        elif st == "current" and a["status"] in ("unknown", "ignored"):
+            a["status"] = "current"
+        if latest and catalog.vt(latest) > catalog.vt(a["latest_version"]):
+            a["latest_version"] = latest
+    rows = []
+    for a in out.values():
+        vs = sorted((v for v in a.pop("versions") if v), key=catalog.vt)
+        a["oldest"], a["newest"] = (vs[0], vs[-1]) if vs else ("", "")
+        rows.append(a)
+    rows.sort(key=lambda a: (-a["outdated"], -a["installed"], a["name"].lower()))
+    return {"apps": rows, "catalog": catalog.status_info(db)}
+
+
+@app.get("/api/apps/computers", dependencies=UI)
+def app_computers(name: str, status: str | None = None, db=Depends(db_session)):
+    q = ("SELECT d.hostname, s.version, s.latest_version, s.sw_status AS status, s.scope, s.catalog_id "
+         "FROM software s JOIN devices d ON d.id = s.device_id WHERE s.name = :n")
+    if status:
+        q += " AND s.sw_status = :st"
+    return _rows_of(db.execute(text(q + " ORDER BY d.hostname"), {"n": name, "st": status}))
+
+
+@app.get("/api/catalog", dependencies=UI)
+def catalog_status(db=Depends(db_session)):
+    return {**catalog.status_info(db), "rules": [
+        {"id": r.id, "match": r.match, "action": r.action, "value": r.value, "note": r.note, "created_by": r.created_by}
+        for r in db.scalars(select(SoftwareRule).order_by(SoftwareRule.id))]}
+
+
+def _catalog_bg(download: bool) -> None:
+    def work():
+        with SessionLocal() as db:
+            try:
+                if download:
+                    catalog.refresh(db)
+                catalog.reconcile(db)
+            except Exception as exc:
+                set_setting(db, "catalog:error", f"{type(exc).__name__}: {exc}"[:300])
+                db.commit()
+    threading.Thread(target=work, daemon=True).start()
+
+
+@app.post("/api/catalog/refresh")
+def catalog_refresh(user=Depends(ui_auth)):
+    _catalog_bg(True)
+    return {"ok": True, "output": "Downloading the app catalog. Statuses update in a minute."}
+
+
+@app.get("/api/catalog/search", dependencies=UI)
+def catalog_search(q: str):
+    return catalog.search(q[:100])
+
+
+class RuleIn(BaseModel):
+    match: str
+    action: str
+    value: str | None = None
+    note: str | None = None
+
+
+@app.post("/api/catalog/rules")
+def add_rule(body: RuleIn, user=Depends(ui_auth), db=Depends(db_session)):
+    import re as _re
+    if body.action not in ("ignore", "package", "target"):
+        raise HTTPException(400, "action must be ignore, package or target")
+    if not body.match.strip() or len(body.match) > 200:
+        raise HTTPException(400, "enter the program name or a pattern")
+    try:
+        _re.compile(body.match)
+    except _re.error as exc:
+        raise HTTPException(400, f"pattern: {exc}")
+    if body.action == "package" and not catalog.package_exists((body.value or "").strip()):
+        raise HTTPException(400, "that package id isn't in the catalog")
+    if body.action == "target" and not catalog.vt(body.value):
+        raise HTTPException(400, "enter a version number")
+    r = SoftwareRule(match=body.match.strip(), action=body.action, value=(body.value or "").strip() or None,
+                     note=(body.note or "")[:255] or None, created_by=user[:64])
+    db.add(r)
+    db.add(AuditLog(actor=user, action="catalog.rule", target=f"software:{r.match[:100]}", result=f"{r.action} {r.value or ''}"))
+    db.commit()
+    _catalog_bg(False)
+    return {"ok": True, "id": r.id}
+
+
+@app.delete("/api/catalog/rules/{rid}")
+def delete_rule(rid: int, user=Depends(ui_auth), db=Depends(db_session)):
+    r = db.get(SoftwareRule, rid)
+    if r:
+        db.add(AuditLog(actor=user, action="catalog.rule.delete", target=f"software:{r.match[:100]}", result=r.action))
+        db.delete(r)
+        db.commit()
+        _catalog_bg(False)
+    return {"ok": True}
 
 
 @app.get("/api/devices/{hostname}/rdp", dependencies=UI)
@@ -680,7 +823,8 @@ def update_install(actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 SETTING_KEYS = {"dameware_mode": "windows", "interval:ad": "", "interval:snmp": "",
-                "interval:pcs": "", "interval:pcs_updates": "", "interval:dc_logons": ""}
+                "interval:pcs": "", "interval:pcs_updates": "", "interval:dc_logons": "",
+                "fix:reboot_hour": "2"}
 
 
 @app.get("/api/settings", dependencies=UI)
@@ -698,6 +842,8 @@ def put_settings(body: dict, actor=Depends(ui_auth), db=Depends(db_session)):
                 raise HTTPException(400, "dameware_mode must be windows or saved")
             if k.startswith("interval:") and v not in ("", None) and not str(v).isdigit():
                 raise HTTPException(400, f"{k} must be minutes")
+            if k == "fix:reboot_hour" and not (str(v).isdigit() and 0 <= int(v) <= 23):
+                raise HTTPException(400, "reboot hour must be 0-23")
             set_setting(db, k, None if v in ("", None) else str(v))
     db.add(AuditLog(actor=actor, action="settings.save", target="settings", result=json.dumps(body)[:500]))
     db.commit()

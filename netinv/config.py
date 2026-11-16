@@ -22,6 +22,7 @@ class Settings:
     insights: dict = field(default_factory=dict)
     outdated_software: list = field(default_factory=list)
     update: dict = field(default_factory=dict)
+    catalog: dict = field(default_factory=dict)
 
 
 def _env(value: str) -> str:
@@ -50,7 +51,7 @@ def load_settings() -> Settings:
     s.ui_password = srv.get("ui_password", "")
     s.tls_cert = srv.get("tls_cert", "")
     s.tls_key = srv.get("tls_key", "")
-    for key in ("ad", "winrm", "snmp", "schedule", "insights", "update"):
+    for key in ("ad", "winrm", "snmp", "schedule", "insights", "update", "catalog"):
         setattr(s, key, data.get(key, {}))
     s.outdated_software = data.get("outdated_software", [])
     return s

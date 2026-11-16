@@ -77,6 +77,10 @@ uptime_days = 30
 # eol = true
 # label = "Office 2016 or older"
 
+[catalog]
+# url = "https://cdn.winget.microsoft.com/cache/source2.msix"
+refresh_hours = 24      # 0 turns the daily catalog download off
+
 [update]                          # updates come from github.com/userxx09-afk/prod (release lan-latest)
 check_hours = 24                  # 0 turns the daily check off
 auto_install = false              # true installs a new version as soon as it is found

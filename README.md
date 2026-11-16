@@ -96,6 +96,34 @@ auto_install = false    # true installs new versions without waiting for a click
 - **Stored credentials:** encrypted with a key that Windows DPAPI protects for this machine (`secret.key.dpapi`). Copying
   the file to another server doesn't decrypt anything, so after a rebuild the scan credentials have to be entered again.
 
+## App versions and one-click fixes
+
+**Software tab.** Every program found on the PCs is matched to the public winget catalog. NetInventory downloads that
+catalog from Microsoft once a day (`cdn.winget.microsoft.com`, about 4 MB, into `C:\ProgramData\NetInventory\catalog`).
+Programs are matched by their uninstall key / MSI product code first, then by name and publisher. Each install shows as
+*current*, *outdated* (with the latest version), *not in catalog* or *ignored*. Per-user installs (in a user's profile)
+are included. When the matching gets one wrong, add a rule in **Settings > App catalog**:
+- *Use this winget package*: pick the right package (for example the 32-bit or 64-bit Reader).
+- *Treat this version as up to date*: for software you deliberately keep on an older version.
+- *Ignore*: never report it as behind.
+
+Reports > Software has *Outdated apps* reports, and the Dashboard lists apps behind the latest version.
+
+**Fixes** (PC page > Fix, the Updates tab, and the Software tab). Each one asks for confirmation and goes to the audit
+log and the PC's History:
+- *Install Windows updates*: installs what Windows Update offers that PC (its WSUS server if a GPO sets one). It never
+  restarts the PC.
+- *Update app*: `winget upgrade --id <package> --exact` as SYSTEM, for machine-wide installs. *Update N* on the
+  Software tab does it on every PC that is behind (up to 500 at a time). Needs App Installer (winget) on the PC, which
+  Windows 10/11 have; Windows Server and LTSC usually don't.
+- *Start a stopped service*: Microsoft Defender Antivirus, Windows Update or BITS. Services disabled by policy are left alone.
+- *Schedule a reboot*: in 5 minutes or tonight at the hour set in Settings (02:00 by default), with a notice to the
+  signed-in user; *Cancel scheduled reboot* undoes it.
+
+Windows doesn't allow installs straight from a remote session, so updates run from a one-off scheduled task
+("NetInventory fix ...") as SYSTEM, which writes its result to `C:\ProgramData\NetInventory\fix` on the PC.
+NetInventory picks the result up and adds it to the PC's History. Nothing installs automatically.
+
 ## What runs, and how often
 
 | Job | Source | Default interval | What it gives you |
