@@ -273,6 +273,21 @@ class DeviceGroup(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
+    dynamic: Mapped[bool | None] = mapped_column(Boolean, default=False)   # added by a group's rules (groups.py)
+
+
+class GroupDef(Base):
+    """A rule-based computer group: members are the PCs matching its conditions (groups.py)."""
+    __tablename__ = "group_defs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    match: Mapped[str] = mapped_column(String(8), default="all")      # all | any
+    conditions: Mapped[str] = mapped_column(Text)                     # JSON list of {field, value, not}
+    member_count: Mapped[int | None] = mapped_column(Integer)
+    refreshed: Mapped[datetime | None] = mapped_column(DateTime)
+    who: Mapped[str | None] = mapped_column(String(128))
+    updated: Mapped[datetime | None] = mapped_column(DateTime, default=utcnow)
 
 
 class CustomField(Base):
@@ -381,6 +396,7 @@ class ScanJob(Base):
     window_end: Mapped[int | None] = mapped_column(Integer)
     max_parallel: Mapped[int | None] = mapped_column(Integer)       # PCs scanned at once over WinRM (default 16)
     ip_methods: Mapped[str | None] = mapped_column(String(64))      # IP ranges: "ping,snmp,winrm"; empty = each target's own
+    group_name: Mapped[str | None] = mapped_column(String(128))     # PC scans: only the computers in this group
     last_run: Mapped[datetime | None] = mapped_column(DateTime)     # UTC
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_result: Mapped[str | None] = mapped_column(Text)

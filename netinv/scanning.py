@@ -61,15 +61,17 @@ def short_error(exc: Exception) -> str:
 SCOPE = threading.local()
 
 
-def scoped(target_ids: list[int] | None, parallel: int | None = None, ip_methods: set[str] | None = None):
+def scoped(target_ids: list[int] | None, parallel: int | None = None, ip_methods: set[str] | None = None,
+           group: str | None = None):
     """Context manager: scans in this thread only see these targets (None = all), use this WinRM parallelism,
-    and on IP ranges run only these methods (None = each target's own)."""
+    on IP ranges run only these methods (None = each target's own), and PC scans only reach this group's computers."""
     class _S:
         def __enter__(self):
             SCOPE.ids, SCOPE.parallel = (set(target_ids) if target_ids else None), parallel
             SCOPE.ip_methods = set(ip_methods) if ip_methods else None
+            SCOPE.group = group or None
         def __exit__(self, *a):
-            SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = None
+            SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = SCOPE.group = None
     return _S()
 
 
@@ -326,17 +328,29 @@ def run_ip(db: Session) -> str:
 def winrm_cfg(db: Session) -> dict | None:
     targets = _targets(db, *AD_KINDS, "ip_range")
     if not targets:
-        return dict(settings.winrm) if settings.winrm.get("user") else None
-    creds = _creds(db, targets, ("windows",))
-    if not creds:
-        return None
+        if not settings.winrm.get("user"):
+            return None
+        creds = None
+    else:
+        creds = _creds(db, targets, ("windows",))
+        if not creds:
+            return None
+    par = getattr(SCOPE, "parallel", None)
+    group = getattr(SCOPE, "group", None)
+    if group:       # a scan job limited to a computer group: exactly those PCs, whatever the AD targets say
+        from . import groups
+        names = groups.hosts(db, group)
+        fq = dict(db.execute(select(Device.hostname, Device.fqdn).where(Device.hostname.in_(names))).all()) if names else {}
+        return {**settings.winrm, **({"parallel": par} if par else {}), **({"creds": creds} if creds else {}),
+                "group": group, "hosts": [fq.get(n) or n for n in names], "include_ad": False, "computer_bases": None}
+    if not targets:
+        return dict(settings.winrm)
     known_ips = {r[0] for r in db.execute(text("SELECT ip FROM device_nics WHERE ip IS NOT NULL"))}
     hosts = []
     for t in _targets(db, "ip_range"):
         if "winrm" not in ip_methods(db, t):
             continue
         hosts += [ip for ip in json.loads(get_setting(db, f"ip_scan:{t.id}", "[]")) if ip not in known_ips]
-    par = getattr(SCOPE, "parallel", None)
     bases, whole = [], False
     for t in _targets(db, *AD_KINDS):
         try:
@@ -356,6 +370,8 @@ def run_pcs(db: Session, check_pending: bool) -> str:
     cfg = winrm_cfg(db)
     if cfg is None:
         return "No Windows credential configured."
+    if cfg.get("group") and not cfg.get("hosts"):
+        return f"The group {cfg['group']} has no computers."
     if not cfg.get("hosts") and not cfg.get("include_ad", True) and not settings.winrm.get("user"):
         return "Nothing to scan."
     msg = winrm.collect_endpoints(db, cfg, check_pending=check_pending)
