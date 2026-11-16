@@ -33,7 +33,8 @@ from .ingest import log_change
 
 log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
-ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script"}
+ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script",
+           "agent_install", "agent_remove"}
 LANGS = {"powershell": "PowerShell", "cmd": "Command prompt"}
 MAX_SCRIPT = 100_000
 KEY_RE = re.compile(r"^[A-Za-z0-9{}\-_. ]{1,128}$")      # an Uninstall registry key name (MSI product code or app id)
@@ -184,6 +185,8 @@ if (Test-Path $f) {
 def _task_name(action: str, pkg: str | None = None) -> str:
     if action == "windows_updates":
         return "windows-updates"
+    if action in ("agent_install", "agent_remove"):
+        return action.replace("_", "-")
     prefix = {"app_uninstall": "remove-", "app_repair": "repair-"}.get(action, "app-")
     return prefix + re.sub(r"[^A-Za-z0-9.\-]", "_", pkg or "")[:80]
 
@@ -201,7 +204,7 @@ def _audit(db, who: str, action: str, host: str, result: str) -> None:
 # Every push is a Deployment row: queued -> sending -> running (long jobs on the PC) -> success | failed.
 # A PC that can't be reached stays queued and is retried when it's back online, until the deadline
 # (Settings, default 7 days): then it's "expired". At most `fix:parallel` pushes are sent at once.
-LONG = {"windows_updates": 4, "app_update": 1, "app_uninstall": 1, "app_repair": 1}       # hours to wait for the result on the PC
+LONG = {"windows_updates": 4, "app_update": 1, "app_uninstall": 1, "app_repair": 1, "agent_install": 0.5, "agent_remove": 0.5}       # hours to wait for the result on the PC
 OFFLINE_RETRY_MIN = 10
 
 
@@ -264,6 +267,12 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
         return f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {value}", value
     if action == "script":
         return "Run script", value
+    if action == "agent_install":
+        from .agentpush import RUN_AS
+        run_as = value if value in RUN_AS else "LOCALSERVICE"
+        return f"Install NetInventory Agent (runs as {RUN_AS[run_as]})", run_as
+    if action == "agent_remove":
+        return "Remove NetInventory Agent", None
     if action == "start_service":
         if value not in SERVICES:
             raise ValueError("That service can't be started from here.")
@@ -319,6 +328,14 @@ def _execute(db, dev: Device, dep) -> str:
     if action in ("app_uninstall", "app_repair"):
         _launch(addr, cfg, _task_name(action, value), REMOVE_SCRIPT.replace("__KEY__", value).replace("__MODE__", "repair" if action == "app_repair" else "remove"))
         return f"Started {'uninstall' if action == 'app_uninstall' else 'repair'}."
+    if action == "agent_install":
+        from . import agentpush
+        _launch(addr, cfg, _task_name(action), agentpush.install_script(db, dev.hostname, _task_name(action), value or "LOCALSERVICE"))
+        return "Sent. Installing the agent and waiting for its first report."
+    if action == "agent_remove":
+        from . import agentpush
+        _launch(addr, cfg, _task_name(action), agentpush.REMOVE)
+        return "Sent. Removing the agent."
     if action == "script":
         p = json.loads(dep.payload or "{}")
         check_script(p.get("language"), p.get("body") or "", p.get("timeout") or 0)
@@ -506,6 +523,18 @@ def _check_running(db, dep) -> None:
         if dep.action == "script":
             if res.get("output"):
                 msg += f"\n{res['output']}"
+        elif dep.action == "agent_install":
+            from . import agentpush
+            agentpush.drop_ticket(db, dev.hostname)
+            st = agentpush.agent_state(db, dev.hostname)
+            if ok and st and st != "active":
+                msg += f"; {st}"
+            if res.get("log") and not ok:
+                msg += f"\nAgent log:\n{res['log']}"
+        elif dep.action == "agent_remove" and ok:
+            from .db import Agent
+            for a in db.scalars(select(Agent).where(Agent.hostname == dev.hostname, Agent.status != "revoked")):
+                a.status, a.note = "revoked", f"agent removed by {dep.who}"
         elif res.get("output") and not ok:
             msg += f": {str(res['output'])[-500:]}"
         dep.status, dep.finished, dep.message = ("success" if ok else "failed"), now, msg[:4000]

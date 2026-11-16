@@ -390,6 +390,15 @@ Security:
 - The server never sends code: its only answer is "inventory due" or not.
 
 Deploy:
+- **From the dashboard** (easiest): select PCs in Computers and click **Push agent** (or *Install or update the agent* on a
+  PC's page). It goes through the deployment queue over WinRM with the scan credential: the server sends the agent MSI that
+  ships with it (no download on the PC), installs it as SYSTEM, runs it once and only reports success once the PC has
+  enrolled with this server. Each PC gets a one-time enrollment ticket (good once, for that PC, for a day) and is
+  approved automatically; the site token isn't used. Failures show the agent's own error (certificate pin, firewall,
+  name). *Remove the agent instead* uninstalls it and revokes it. The **Agent** column shows active / silent (no report
+  for an hour) / installing / pending / push failed.
+- Download: the MSI is served by NetInventory itself (Settings > Agent) and is on the server in `<install dir>\agent-msi`
+  for a GPO share.
 - Script or Intune: `msiexec /i NetInventory-Agent.msi /qn SERVER=https://netinv.corp.local:8080 TOKEN=nia_... PIN=<sha256> [RUNAS=SYSTEM]`
   (Settings shows the exact command when you create a token).
 - GPO: assign the MSI under *Computer Configuration > Policies > Software Settings > Software installation*, and set

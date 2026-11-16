@@ -39,6 +39,8 @@ Source: "..\netinv\*"; DestDir: "{app}\app\netinv"; Excludes: "__pycache__,*.pyc
 Source: "..\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\agent\*"; DestDir: "{app}\agent"; Flags: recursesubdirs ignoreversion
+; Agent MSI (built first by CI): served at /api/agents/msi and pushed to PCs from the dashboard.
+Source: "output\NetInventory-Agent.msi"; DestDir: "{app}\agent-msi"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#Build}\winsw\WinSW-x64.exe"; DestDir: "{app}\service"; DestName: "NetInventory.exe"; Flags: ignoreversion
 Source: "{#Build}\pgsql\*"; DestDir: "{app}\pgsql"; Flags: recursesubdirs ignoreversion; Check: UseBundledPg
 Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion
