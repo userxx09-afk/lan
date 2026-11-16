@@ -78,6 +78,24 @@ check_hours = 24        # 0 turns the check off
 auto_install = false    # true installs new versions without waiting for a click
 ```
 
+## Sign-in and security
+
+- **HTTPS:** setup creates a self-signed certificate (`tls.crt` / `tls.key` in `C:\ProgramData\NetInventory`) and the
+  dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate once; to avoid that, issue a
+  certificate from AD CS for the server name and point `[server] tls_cert` / `tls_key` at its PEM files.
+- **Local admin:** the account chosen during setup. Its password is stored as a PBKDF2 hash (`python -m netinv hashpw`
+  makes one).
+- **AD sign-in:** in **Settings > Sign-in** enter the domain and an AD group (name or DN). Members of the group, nested
+  groups included, sign in with their own AD account (`user`, `DOMAIN\user` or `user@domain`). Every sign-in and action
+  is audited under that user. **Test** checks an AD account without signing in.
+- **Break-glass:** after the first successful AD sign-in NetInventory writes `C:\ProgramData\NetInventory\local-login.disabled`,
+  which turns the local admin off. If AD or the group is unavailable, or the group was set wrong, delete that file on the
+  server and sign in as the local admin again. It is written again at the next AD sign-in.
+- **Lockout:** 5 failed sign-ins for one username, or 20 from one address, within 15 minutes block sign-in for 15 minutes.
+- **Sessions:** 12 hours, or 2 hours idle, in an HttpOnly, SameSite=Strict, Secure cookie.
+- **Stored credentials:** encrypted with a key that Windows DPAPI protects for this machine (`secret.key.dpapi`). Copying
+  the file to another server doesn't decrypt anything, so after a rebuild the scan credentials have to be entered again.
+
 ## What runs, and how often
 
 | Job | Source | Default interval | What it gives you |
@@ -106,9 +124,8 @@ Add credentials and scan targets in **Settings** instead of editing `config.toml
 sections are only used while no scan target exists).
 
 - **Credentials:** *Windows / AD* accounts are used for LDAP and for WinRM to PCs and DCs. *SNMP v2c* (community)
-  and *SNMP v3* (user, SHA auth key, AES privacy key) are used for switches and routers. Secrets are encrypted with a
-  key in `secret.key` next to `config.toml`, and are never sent back to the browser. Back up `secret.key`: without it, stored
-  credentials have to be entered again. **Test** tries a credential against one DC, PC or switch.
+  and *SNMP v3* (user, SHA auth key, AES privacy key) are used for switches and routers. Secrets are encrypted (see
+  *Sign-in and security*) and are never sent back to the browser. **Test** tries a credential against one DC, PC or switch.
 - **Scan targets**, each with its own list of credentials that are tried in order:
   - *AD domain* (`corp.example.com`): every computer, user and DC in the domain.
   - *AD computer path* (`OU=Workstations,DC=corp,DC=example,DC=com`): only computers in that OU are imported and scanned.

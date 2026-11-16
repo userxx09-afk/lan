@@ -288,7 +288,7 @@ begin
            'Port=' + GetPort('') + #13#10 +
            'UiPassword=' + WebPage.Values[1] + #13#10;
   if IsUpgrade then Lines := Lines + 'Upgrade=1' + #13#10;
-  SaveStringToFile(ParamFile, Lines, False);
+  SaveStringToUTF8File(ParamFile, Lines, False);   { UTF-8, so any character in the password survives }
   WizardForm.StatusLabel.Caption := 'Setting up the database and Windows services...';
   Cmd := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\postinstall.ps1') + '" -ParamFile "' + ParamFile + '"';
   if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then

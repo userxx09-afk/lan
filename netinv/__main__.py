@@ -20,7 +20,7 @@ def main() -> None:
     ce = sub.add_parser("cert", help="make a self-signed HTTPS certificate (tls.crt / tls.key)")
     ce.add_argument("--out", required=True, help="folder to write tls.crt and tls.key to")
     ce.add_argument("--force", action="store_true", help="replace existing files")
-    sub.add_parser("hashpw", help="read a password on stdin and print its hash for config.toml")
+    sub.add_parser("hashpw", help="hash the password in NETINV_HASHPW (or on stdin) for config.toml")
     args = ap.parse_args()
 
     if args.cmd == "serve":
@@ -36,7 +36,10 @@ def main() -> None:
         return
     if args.cmd == "hashpw":
         from .auth import hash_password
-        pw = sys.stdin.readline().rstrip("\r\n")
+        import os
+        pw = os.environ.pop("NETINV_HASHPW", None)   # Unicode-safe on Windows, unlike a PowerShell pipe
+        if pw is None:
+            pw = sys.stdin.readline().rstrip("\r\n")
         if len(pw) < 8:
             sys.exit("password too short")
         print(hash_password(pw))

@@ -41,7 +41,7 @@ def _resolve(obj):
 
 def load_settings() -> Settings:
     path = Path(os.environ.get("NETINV_CONFIG", "config.toml"))
-    data = _resolve(tomllib.loads(path.read_text())) if path.exists() else {}
+    data = _resolve(tomllib.loads(path.read_text(encoding="utf-8-sig"))) if path.exists() else {}
     s = Settings()
     s.database_url = os.environ.get("DATABASE_URL") or data.get("database", {}).get("url", s.database_url)
     srv = data.get("server", {})

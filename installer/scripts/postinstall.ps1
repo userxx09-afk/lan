@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------- params
 $P = @{}
-Get-Content -LiteralPath $ParamFile | ForEach-Object {
+[IO.File]::ReadAllLines($ParamFile, [Text.UTF8Encoding]::new($false)) | ForEach-Object {
     $i = $_.IndexOf('=')
     if ($i -gt 0) { $P[$_.Substring(0, $i)] = $_.Substring($i + 1) }
 }
@@ -39,11 +39,15 @@ function NewSecret([int]$n = 24) {
     -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
 }
 function TomlStr([string]$s) { '"' + ($s -replace '\\', '\\' -replace '"', '\"') + '"' }
+# config.toml is UTF-8 without a BOM: Python's TOML reader rejects a BOM, and PowerShell 5.1 would read and
+# write the Windows code page otherwise. Reading accepts a BOM left by an older version.
+function ReadUtf8([string]$path) { [IO.File]::ReadAllText($path, [Text.UTF8Encoding]::new($false)) }
+function WriteUtf8([string]$path, [string]$text) { [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false)) }
+
 function HashPw([string]$pw) {
-    # UTF-8 both ways, so passwords with accents hash the same as what the browser sends
-    $OutputEncoding = New-Object Text.UTF8Encoding $false
-    $env:PYTHONIOENCODING = 'utf-8'
-    $h = ($pw | & $Python -m netinv hashpw 2>&1 | Out-String).Trim()
+    # Passed in the environment, not a pipe: PowerShell 5.1 pipes mangle accented characters
+    $env:NETINV_HASHPW = $pw
+    try { $h = (& $Python -m netinv hashpw 2>&1 | Out-String).Trim() } finally { Remove-Item Env:NETINV_HASHPW -ErrorAction SilentlyContinue }
     if ($h -notlike 'pbkdf2_sha256$*') { throw "Hashing the dashboard password failed: $h" }
     return $h
 }
@@ -135,7 +139,7 @@ if ($P.DbMode -eq 'bundled') {
 # ---------------------------------------------------------------- 4. config.toml
 if (-not (Test-Path $Config)) {
     Log 'Writing config.toml'
-    $c = Get-Content -LiteralPath (Join-Path $InstallDir 'config.example.toml') -Raw
+    $c = ReadUtf8 (Join-Path $InstallDir 'config.example.toml')
     $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl))
     $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $P.UiPassword)))
     $c = $c -replace '(?m)^ingest_token = .*$', ('ingest_token = ' + (TomlStr (NewSecret 32)))
@@ -145,20 +149,20 @@ if (-not (Test-Path $Config)) {
     $c = $c -replace '(?m)^user = "CORP\\\\svc-netinv"', 'user = ""          '
     $c = $c -replace '"env:([A-Z_]+)"', '""'
     $c = "# Edit, then restart the NetInventory service. Passwords can be written directly here;`r`n# this folder is readable by Administrators and SYSTEM only.`r`n`r`n" + $c
-    Set-Content -LiteralPath $Config -Value $c -Encoding UTF8
+    WriteUtf8 $Config $c
 } else {
     Log 'Keeping existing config.toml'
     if ($P.UiPassword) {
-        $c = Get-Content -LiteralPath $Config -Raw
+        $c = ReadUtf8 $Config
         $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $P.UiPassword)))
         if ($P.DbMode -eq 'existing') { $c = $c -replace '(?m)^url = .*$', ('url = ' + (TomlStr $DbUrl)) }
-        Set-Content -LiteralPath $Config -Value $c -Encoding UTF8
+        WriteUtf8 $Config $c
     }
 }
 # Security settings, for new installs and upgrades alike:
 #  - a dashboard password left in plain text by an older version is replaced with its hash
 #  - HTTPS with a self-signed certificate unless one is configured already
-$c = Get-Content -LiteralPath $Config -Raw
+$c = ReadUtf8 $Config
 if ($c -match '(?m)^ui_password = "(?!pbkdf2_sha256\$)(?!env:)([^"]+)"') {
     $plainPw = $Matches[1] -replace '\\"', '"' -replace '\\\\', '\'
     $c = $c -replace '(?m)^ui_password = .*$', ('ui_password = ' + (TomlStr (HashPw $plainPw)))
@@ -172,7 +176,7 @@ if ($c -notmatch '(?m)^tls_cert\s*=') {
     $c = $c -replace '(?m)^\[server\]\s*$', "[server]`r`ntls_cert = $(TomlStr $crt)`r`ntls_key = $(TomlStr $key)"
     Log 'HTTPS turned on with a self-signed certificate'
 }
-Set-Content -LiteralPath $Config -Value $c -Encoding UTF8
+WriteUtf8 $Config $c
 
 [Environment]::SetEnvironmentVariable('NETINV_CONFIG', $Config, 'Machine')
 $env:NETINV_CONFIG = $Config
@@ -223,7 +227,7 @@ Log "Firewall opened for TCP $Port (Domain and Private profiles)"
 
 # ---------------------------------------------------------------- 7. health check
 $up = $false
-$scheme = if ((Get-Content -LiteralPath $Config -Raw) -match '(?m)^tls_cert\s*=\s*"[^"]+"') { 'https' } else { 'http' }
+$scheme = if ((ReadUtf8 $Config) -match '(?m)^tls_cert\s*=\s*"[^"]+"') { 'https' } else { 'http' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }   # localhost check of our own self-signed cert
 for ($i = 0; $i -lt 40; $i++) {
