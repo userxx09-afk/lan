@@ -245,6 +245,49 @@ def _one(cat: Catalog, rules, s: Software) -> tuple:
     return cat.pkg[k]["id"], latest, st, how
 
 
+_cache: dict = {}
+
+
+def cached() -> Catalog | None:
+    """The catalog, loaded once per download (it takes a second or two)."""
+    path = catalog_file()
+    if not path.exists():
+        return None
+    mtime = path.stat().st_mtime
+    with _lock:
+        if _cache.get("mtime") != mtime:
+            _cache.update(mtime=mtime, cat=Catalog(path))
+        return _cache["cat"]
+
+
+def installed_versions(db, pkg: str, entries: list[dict]) -> list[str]:
+    """Versions of the installed-program entries (name, version, publisher, product_code) that match winget package pkg,
+    using the same matching and rules as the inventory."""
+    from types import SimpleNamespace
+    cat = cached()
+    if cat is None:
+        return []
+    rules = _rules(db)
+    out = []
+    for e in entries:
+        s = SimpleNamespace(name=e.get("name") or "", version=e.get("version") or None,
+                            publisher=e.get("publisher") or None, product_code=e.get("product_code") or None)
+        cid = _one(cat, rules, s)[0]
+        if cid and cid.lower() == pkg.lower() and s.version:
+            out.append(s.version)
+    return out
+
+
+def target_version(pkg: str) -> str | None:
+    """The version an up-to-date install reports (the manifest's ARP version when it has one)."""
+    cat = cached()
+    k = cat.by_id.get(pkg.lower()) if cat else None
+    if k is None:
+        return None
+    p = cat.pkg[k]
+    return p["arp_max"] if p["arp_max"] and vt(p["arp_max"]) else p["latest"]
+
+
 def package_exists(pid: str) -> bool:
     if not PACKAGE_ID_RE.match(pid or ""):
         return False
