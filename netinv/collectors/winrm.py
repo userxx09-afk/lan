@@ -169,8 +169,8 @@ def _targets(db: Session, cfg: dict) -> list[tuple[str | None, str]]:
     q = select(Device).where(Device.ad_enabled.is_(True), or_(Device.ad_last_logon >= active, Device.ad_last_logon.is_(None)))
     if not cfg.get("include_servers", True):
         q = q.where(or_(Device.ad_os.is_(None), ~Device.ad_os.ilike("%server%")))
-    for path in cfg.get("computer_bases") or []:
-        q = q.where(Device.ad_dn.ilike(f"%{path}"))
+    if cfg.get("computer_bases"):   # in any of the OUs (or below them)
+        q = q.where(or_(*[Device.ad_dn.ilike(f"%{path}") for path in cfg["computer_bases"]]))
     names = {h for h, _ in out}
     out += [(d.hostname, d.fqdn or d.hostname) for d in db.scalars(q) if d.hostname not in names]
     # Scanning exclusions: by address or name, and for known PCs also by AD OU, NIC IP or MAC.
@@ -205,13 +205,43 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
     targets = _targets(db, cfg)
     script = (ENDPOINT_SCRIPT.replace("__CHECK_PENDING__", "$true" if check_pending else "$false")
               .replace("__LOGON_DAYS__", str(int(cfg.get("local_logon_days", 14)))))
-    ok, failed, denied = 0, [], 0
-    with ThreadPoolExecutor(max_workers=cfg.get("parallel", 16)) as pool:
-        futs = {pool.submit(run_ps, addr, cfg, script): (host, addr) for host, addr in targets}
+    from .. import progress
+    prog = progress.current()
+    if prog:
+        prog.hosts(len(targets))
+
+    def one(host, addr):
+        if prog:
+            if prog.stop.is_set():
+                raise progress.Cancelled()
+            prog.host_start(host or addr)
+        return run_ps(addr, cfg, script)
+
+    ok, failed, denied, skipped = 0, [], 0, 0
+    pool = ThreadPoolExecutor(max_workers=cfg.get("parallel", 16))
+    try:
+        futs = {pool.submit(one, host, addr): (host, addr) for host, addr in targets}
         for fut in as_completed(futs):
             host, addr = futs[fut]
+            if fut.cancelled():
+                skipped += 1
+                continue
             try:
-                payload = EndpointPayload.model_validate(fut.result())
+                res = fut.result()
+            except progress.Cancelled:
+                skipped += 1
+                continue
+            except Exception as exc:
+                res = exc
+            if prog:
+                prog.host_end(host or addr, not isinstance(res, Exception))
+                if prog.stop.is_set():
+                    for f in futs:
+                        f.cancel()
+            try:
+                if isinstance(res, Exception):
+                    raise res
+                payload = EndpointPayload.model_validate(res)
                 if host:
                     payload.hostname = host  # trust the AD name over $env:COMPUTERNAME
                 dev = apply_endpoint(db, payload)
@@ -224,7 +254,11 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
                 denied += classify_error(exc) == "access_denied"
                 _record_error(db, host, exc)
                 log.warning("WinRM %s failed: %s", host or addr, exc)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
     msg = f"{ok}/{len(targets)} computers collected"
+    if skipped:
+        msg += f"; cancelled, {skipped} not scanned"
     if failed:
         msg += f"; {len(failed)} failed ({denied} access denied): {', '.join(sorted(failed)[:15])}"
     return msg
@@ -234,8 +268,16 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
     from ..exclusions import Exclusions
     excl = Exclusions.load(db)
     dcs = [dc for dc in db.scalars(select(DomainController)) if not excl.host(dc.hostname, dc.fqdn)]
+    from .. import progress
+    prog = progress.current()
+    if prog:
+        prog.hosts(len(dcs))
     total = 0
     for dc in dcs:
+        if prog and prog.stop.is_set():
+            break
+        if prog:
+            prog.host_start(dc.hostname)
         last = db.scalar(select(func.max(LogonEvent.time)).where(LogonEvent.source == f"dc:{dc.hostname}"))
         since = last or (utcnow() - timedelta(days=cfg.get("dc_initial_days", 7)))
         script = (DC_LOGON_SCRIPT.replace("__SINCE__", since.isoformat() + "Z")
@@ -244,9 +286,13 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
             rows = run_ps(dc.fqdn or dc.hostname, cfg, script) or []
         except Exception as exc:
             log.warning("DC %s logon pull failed: %s", dc.hostname, exc)
+            if prog:
+                prog.host_end(dc.hostname, False)
             continue
         if isinstance(rows, dict):
             rows = [rows]
         total += add_logons(db, [LogonIn(source=f"dc:{dc.hostname}", **r) for r in rows])
         db.commit()
+        if prog:
+            prog.host_end(dc.hostname, True)
     return f"{total} logon events from {len(dcs)} DCs"

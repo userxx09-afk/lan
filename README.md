@@ -144,7 +144,10 @@ NetInventory picks the result up and adds it to the PC's History. Nothing instal
 
 ## What runs, and how often
 
-| Job | Source | Default interval | What it gives you |
+These are the collectors. **Scan jobs** (Settings > Scan schedule) decide when they run and on which targets;
+the defaults below are the jobs an upgrade from 0.6 starts with.
+
+| Collector | Source | Default interval | What it gives you |
 |---|---|---|---|
 | `ad` | LDAP to any DC | 60 min | Every computer object, OS, `lastLogonTimestamp`, enabled state, DCs with site, GC and FSMO roles |
 | `snmp` | SNMP to switches and routers | 15 min | Ports, MAC table, LLDP/CDP neighbours, ARP (IP to MAC) |
@@ -152,7 +155,25 @@ NetInventory picks the result up and adds it to the PC's History. Nothing instal
 | `pcs_updates` | WinRM to each PC | daily | Same as `pcs` plus the Windows Update search for pending updates (slow) |
 | `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, matched to PCs by IP |
 
-Run any job by hand with `python -m netinv collect <job|all>`, or from the Collectors buttons on the Overview page.
+Run any collector by hand with `python -m netinv collect <job|all>`, or from the Collectors buttons on the Overview page.
+
+### Scan jobs (Settings > Scan schedule)
+
+Each job has a name, a scope (some scan targets, or all of them), the collectors to run, and a schedule: *repeatedly*
+(every N minutes or hours, optionally only between two hours and on some weekdays), *once a day* at a time, or *only by
+hand*. For example: the front office OU every 30 minutes during the day, everything else daily at 02:00.
+
+Load controls: *PCs scanned at once over WinRM* per job (default 16), and *at most N jobs at once* for the whole server
+(default 1). A job never overlaps itself, and jobs over the limit wait in a queue, first in line first. Exclusions apply
+to every job. **Run now**, enable/disable, last and next run and a per-job **History** are in the table.
+
+### Scanning view
+
+The **Scanning** tab (or the *Scanning…* pill next to the name at the top, shown while anything runs) lists:
+- running jobs with their steps, PCs done of total, failures, the PCs being scanned right now, the time elapsed and an ETA
+  (from the PC rate, or from the job's last run), with **Cancel** (PCs already in progress finish, the rest are skipped);
+- the queue, with an estimated start for each job, **Move to front** and **Remove**;
+- scheduled jobs coming up, and recently finished runs with their counts, errors and whether they were cancelled.
 
 ## How the port mapping works
 
@@ -173,13 +194,17 @@ sections are only used while no scan target exists).
   and *SNMP v3* (user, SHA auth key, AES privacy key) are used for switches and routers. Secrets are encrypted (see
   *Sign-in and security*) and are never sent back to the browser. **Test** tries a credential against one DC, PC or switch.
 - **Scan targets**, each with its own list of credentials that are tried in order:
-  - *AD domain* (`corp.example.com`): every computer, user and DC in the domain.
-  - *AD computer path* (`OU=Workstations,DC=corp,DC=example,DC=com`): only computers in that OU are imported and scanned.
-  - *AD user path* (`OU=Staff,DC=…`): only users in that OU are imported.
+  - *Whole AD domain* (`corp.example.com`): the computers, the users, or both (tick boxes), plus the DCs.
+  - *AD OU of computers*: only computers in that OU and below are imported and scanned; no users.
+  - *AD OU of users*: only user accounts in that OU and below are imported; no computers.
+
+  An OU can be typed the way Active Directory Users and Computers shows it, `corp.example.com/Sites/Office/PCs`, or as a
+  DN, `OU=PCs,OU=Office,OU=Sites,DC=corp,DC=example,DC=com`. The *searches* column shows the exact LDAP search base used.
+  (Before 0.7 an OU path typed as an AD domain scanned the whole domain; those targets are turned into OU targets on upgrade.)
   - *IP range* (`10.0.0.0/24`, `10.1.0.1-10.1.0.50`): network gear is polled over SNMP, and Windows PCs that answer
     WinRM on 5985 are scanned too.
   If no domain controller is given, NetInventory tries the domain name (DNS finds a DC) and then DCs seen in earlier scans.
-- **Schedule:** minutes between scans of each kind.
+- **Scan schedule:** see *Scan jobs* above.
 
 **LDAPS:** NetInventory connects on 636 first and falls back to 389. Unlock works on either, but **password resets need LDAPS**,
 and DCs that enforce LDAP signing need it for everything. Any DC with a certificate from AD CS (or another trusted
@@ -288,7 +313,8 @@ netinv/
   correlate.py       SQL views that join everything (the reporting layer)
   reports.py         prebuilt reports, insights (EOL, disk, patches, outdated software), safe query builder
   ingest.py          shared payload format for the WinRM pull and the future agent
-  jobs.py            collector jobs and built-in scheduler
+  jobs.py            collectors, scan jobs, queue and built-in scheduler
+  progress.py        live progress of running scans (Scanning view)
   scanning.py        runs scan targets (AD domain / OU paths, IP ranges) with stored credentials
   alerts.py          dashboard alert rules (High / Important / Informational)
   library.py         standard report library

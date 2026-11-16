@@ -8,7 +8,8 @@
 </head>
 <body>
 <header>
-  <div class="brand">NetInventory <a id="updbadge" class="pill warn small" hidden>Update available</a></div>
+  <div class="brand">NetInventory <a id="updbadge" class="pill warn small" hidden>Update available</a>
+    <a id="scanind" class="pill small scanind" hidden title="Open the Scanning view"><span class="spinner tiny"></span><span id="scanindtext">Scanning</span></a></div>
   <nav id="tabs">
     <button data-tab="overview" class="active">Dashboard</button>
     <button data-tab="computers">Computers</button>
@@ -17,6 +18,7 @@
     <button data-tab="portmap">Port map</button>
     <button data-tab="network">Network &amp; DCs</button>
     <button data-tab="reports">Reports</button>
+    <button data-tab="scanning">Scanning</button>
     <button data-tab="settings">Settings</button>
   </nav>
   <form id="search"><input id="q" placeholder="Search PC, user, IP or MAC" autocomplete="off"></form>
@@ -25,6 +27,18 @@
 
 <main>
   <div id="scanbanner" class="banner" hidden></div>
+  <section id="scanning" class="tab">
+    <div class="alerthead"><h2>Running now</h2><span class="muted" id="scancap"></span></div>
+    <div id="scanrunning"></div>
+    <h2>Waiting in the queue</h2>
+    <p class="muted small">Jobs over the "at most N jobs at once" limit (Settings, Scan schedule) wait here, first in line first. Start times are estimates from each job's last run.</p>
+    <div id="scanqueue"></div>
+    <h2>Coming up</h2>
+    <div id="scanupcoming"></div>
+    <h2>Recently finished</h2>
+    <div id="scanrecent"></div>
+  </section>
+
   <section id="overview" class="tab active">
     <div id="kpis" class="kpis"></div>
     <div class="alerthead"><h2>Alerts</h2><span class="muted" id="alertnote"></span>
@@ -267,9 +281,13 @@
         <div id="excltable"></div>
       </div>
       <div class="panel">
-        <h3>Schedule</h3>
-        <p class="muted">Minutes between automatic scans. 0 turns a scan off. Leave blank for the default.</p>
-        <form id="intervals" class="intervals"></form>
+        <h3>Scan schedule</h3>
+        <p class="muted">Each job scans some of your targets (an OU, a domain, an IP range, or all of them) on its own schedule, for example one OU every 30 minutes and the rest once a day at night.
+          A job never overlaps itself: if its last run is still going, the next one waits. Exclusions apply to every job. <a class="link" onclick="showTab('scanning')">See what is scanning now</a>.</p>
+        <div id="jobtable"></div>
+        <div class="row"><button id="addjob">+ Add scan job</button>
+          <form id="jobcap" class="inline"><label>Run at most <input name="max_concurrent" type="number" min="1" max="8" style="width:4em"> jobs at once</label><button class="ghost">Save</button></form></div>
+        <p class="muted small">More than one job at once finishes sooner but puts more load on the network, the DCs and this server. Jobs over the limit wait their turn.</p>
       </div>
       <div class="panel">
         <h3>DameWare Mini Remote Control</h3>

@@ -119,7 +119,7 @@ USER_ATTRS = ["sAMAccountName", "displayName", "givenName", "sn", "initials", "u
 
 
 def collect(db: Session, cfg: dict) -> str:
-    """cfg: server, user, password, base_dn, domain, computer_bases[], user_bases[], users (bool)."""
+    """cfg: server, user, password, base_dn, domain, computer_bases[], user_bases[], users (bool), computers (bool)."""
     from ..exclusions import Exclusions
     excl = Exclusions.load(db)
     conn = connect(cfg)
@@ -129,7 +129,8 @@ def collect(db: Session, cfg: dict) -> str:
 
     computers = 0
     dcs = []
-    for cbase in cfg.get("computer_bases") or [base]:
+    want_computers = cfg.get("computers", True)
+    for cbase in (cfg.get("computer_bases") or [base]) if want_computers else []:
         for e in _search(conn, cbase, "(objectClass=computer)", COMPUTER_ATTRS):
             name = norm_host(_attr(e, "name"))
             if not name or excl.target(hostname=name, fqdn=_attr(e, "dNSHostName"), dn=_attr(e, "distinguishedName")):
@@ -153,7 +154,7 @@ def collect(db: Session, cfg: dict) -> str:
                 dev.first_seen = dev.ad_created or now
             computers += 1
     # DCs live in OU=Domain Controllers, which may be outside a restricted computer path.
-    if cfg.get("computer_bases"):
+    if cfg.get("computer_bases") or not want_computers:
         dcs = _search(conn, base, "(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))", COMPUTER_ATTRS)
 
     fsmo = _fsmo_roles(conn, base)

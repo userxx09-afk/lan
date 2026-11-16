@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import logging
 
 from sqlalchemy import select, text
@@ -49,9 +50,26 @@ def _creds(db: Session, targets: list[ScanTarget], kinds: tuple[str, ...]) -> li
     return out
 
 
-def _targets(db: Session, *kinds: str) -> list[ScanTarget]:
-    return list(db.scalars(select(ScanTarget).where(ScanTarget.enabled.is_(True), ScanTarget.kind.in_(kinds))
-                           .order_by(ScanTarget.id)))
+# A scheduled scan job narrows every scan in its thread to its own targets (see jobs.py).
+SCOPE = threading.local()
+
+
+def scoped(target_ids: list[int] | None, parallel: int | None = None):
+    """Context manager: scans in this thread only see these targets (None = all) and use this WinRM parallelism."""
+    class _S:
+        def __enter__(self):
+            SCOPE.ids, SCOPE.parallel = (set(target_ids) if target_ids else None), parallel
+        def __exit__(self, *a):
+            SCOPE.ids = SCOPE.parallel = None
+    return _S()
+
+
+def _targets(db: Session, *kinds: str, all_scopes: bool = False) -> list[ScanTarget]:
+    q = select(ScanTarget).where(ScanTarget.enabled.is_(True), ScanTarget.kind.in_(kinds))
+    ids = None if all_scopes else getattr(SCOPE, "ids", None)
+    if ids:
+        q = q.where(ScanTarget.id.in_(ids))
+    return list(db.scalars(q.order_by(ScanTarget.id)))
 
 
 def _finish(db: Session, targets: list[ScanTarget], ok: bool, msg: str) -> None:
@@ -74,6 +92,63 @@ def dc_candidates(db: Session, dom: str, ts: list) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+# ------------------------------------------------------------------ AD scope
+def _dn_escape(name: str) -> str:
+    s = "".join("\\" + c if c in ',+"\\<>;=' else c for c in name.strip())
+    return ("\\" + s) if s.startswith(("#", " ")) else s
+
+
+def canonical_to_dn(value: str) -> str:
+    """'corp.example.com/Sites/Office/PCs' (as ADUC shows it) -> 'OU=PCs,OU=Office,OU=Sites,DC=corp,DC=example,DC=com'.
+    The built-in Computers and Users containers right under the domain are CN=, everything else OU=."""
+    parts = [p for p in value.strip().strip("/").split("/") if p.strip()]
+    if len(parts) < 2 or "." not in parts[0]:
+        raise ValueError("start the path with the domain name, e.g. corp.example.com/Sites/Office/PCs")
+    dom, ous = parts[0].strip(), parts[1:]
+    rdns = []
+    for i, name in enumerate(ous):
+        attr = "CN" if i == 0 and name.strip().lower() in ("computers", "users") and len(ous) == 1 else "OU"
+        rdns.append(f"{attr}={_dn_escape(name)}")
+    return ",".join(reversed(rdns)) + "," + ",".join(f"DC={p}" for p in dom.strip(".").split("."))
+
+
+def normalize_dn(value: str) -> str:
+    """Accepts a DN (OU=..,DC=..) or a canonical path (domain/OU/OU) and returns a DN."""
+    v = value.strip()
+    if "=" in v and "DC=" in v.upper():
+        return v
+    if "/" in v:
+        return canonical_to_dn(v)
+    raise ValueError("use a path like corp.example.com/Sites/Office/PCs or a DN like OU=PCs,OU=Office,DC=corp,DC=example,DC=com")
+
+
+def ad_scope(t: ScanTarget) -> tuple[str, str, str, set[str]]:
+    """(effective kind, domain, search base DN, what to collect) for an AD target. An "AD domain" target whose value
+    is really an OU path is treated as an OU of computers (older versions accepted that and scanned the whole domain)."""
+    kind, v = t.kind, (t.value or "").strip()
+    if kind == "ad_domain" and ("/" in v or "=" in v):
+        kind = "ad_computer_path"
+    if kind == "ad_domain":
+        collect = {c for c in (t.collect or "computers,users").split(",") if c}
+        return kind, v.lower(), ",".join(f"DC={p}" for p in v.strip(".").lower().split(".")), collect
+    base = normalize_dn(v)
+    return kind, dn_domain(base).lower(), base, {"users"} if kind == "ad_user_path" else {"computers"}
+
+
+def fix_ou_targets(db: Session) -> None:
+    """Before 0.7 an OU path could be saved as an "AD domain" target, which then scanned the whole domain.
+    Turn those into OU-of-computers targets with a proper DN."""
+    for t in db.scalars(select(ScanTarget).where(ScanTarget.kind == "ad_domain")):
+        v = (t.value or "").strip()
+        if "/" in v or "=" in v:
+            try:
+                t.kind, t.value = "ad_computer_path", normalize_dn(v)
+                log.info("scan target %s: OU path %r is now an OU target %r", t.id, v, t.value)
+            except ValueError:
+                pass
+    db.commit()
+
+
 def has_targets(db: Session) -> bool:
     return db.scalar(select(ScanTarget.id).limit(1)) is not None
 
@@ -87,21 +162,32 @@ def run_ad(db: Session) -> str:
             return ad.collect(db, {**settings.ad, "domain": dn_domain(settings.ad.get("base_dn", ""))})
         return "No Active Directory targets configured."
     domains: dict[str, list[ScanTarget]] = {}
-    for t in targets:
-        dom = t.value.strip().lower() if t.kind == "ad_domain" else dn_domain(t.value).lower()
-        domains.setdefault(dom, []).append(t)
+    scopes: dict[int, tuple] = {}
     msgs = []
+    for t in targets:
+        try:
+            scopes[t.id] = ad_scope(t)
+        except ValueError as exc:
+            _finish(db, [t], False, str(exc))
+            msgs.append(f"{t.value}: {exc}")
+            continue
+        domains.setdefault(scopes[t.id][1], []).append(t)
     for dom, ts in domains.items():
-        creds = _creds(db, ts, ("windows",)) or _creds(db, _targets(db, "ad_domain"), ("windows",))
+        creds = _creds(db, ts, ("windows",)) or _creds(db, _targets(db, "ad_domain", all_scopes=True), ("windows",))
         if not creds:
             _finish(db, ts, False, "No Windows credential assigned.")
             msgs.append(f"{dom}: no credential")
             continue
         servers = dc_candidates(db, dom, ts)
+        sc = [scopes[t.id] for t in ts]
+        whole = [s for s in sc if s[0] == "ad_domain"]
+        want_computers = any("computers" in s[3] for s in sc)
         cfg = {"server": servers[0], "servers": servers, "domain": dom,
-               "computer_bases": [t.value for t in ts if t.kind == "ad_computer_path"] or None,
-               "user_bases": [t.value for t in ts if t.kind == "ad_user_path"] or None,
-               "users": any(t.kind in ("ad_domain", "ad_user_path") for t in ts)}
+               # a whole-domain target wins over OU targets of the same domain
+               "computer_bases": None if any("computers" in s[3] for s in whole) else
+                                 ([s[2] for s in sc if s[0] == "ad_computer_path"] or None),
+               "user_bases": None if any("users" in s[3] for s in whole) else ([s[2] for s in sc if s[0] == "ad_user_path"] or None),
+               "users": any("users" in s[3] for s in sc), "computers": want_computers}
         err = None
         for c in creds:
             try:
@@ -123,8 +209,13 @@ def run_ad(db: Session) -> str:
 def ad_action_cfg(db: Session, user_dn: str) -> dict:
     """Credentials + server for writing to the domain that holds user_dn."""
     dom = dn_domain(user_dn).lower()
-    ts = [t for t in _targets(db, *AD_KINDS)
-          if (t.value.strip().lower() if t.kind == "ad_domain" else dn_domain(t.value).lower()) == dom]
+    ts = []
+    for t in _targets(db, *AD_KINDS, all_scopes=True):
+        try:
+            if ad_scope(t)[1] == dom:
+                ts.append(t)
+        except ValueError:
+            pass
     creds = _creds(db, ts, ("windows",))
     if creds:
         servers = dc_candidates(db, dom, ts)
@@ -156,7 +247,10 @@ def run_ip(db: Session) -> str:
     msgs = []
     if not targets and settings.snmp.get("targets"):
         msgs.append(snmp.collect(db, settings.snmp))
+    from . import progress
     for t in targets:
+        if progress.stopped():
+            break
         try:
             from .exclusions import Exclusions
             excl = Exclusions.load(db)
@@ -194,8 +288,19 @@ def winrm_cfg(db: Session) -> dict | None:
     hosts = []
     for t in _targets(db, "ip_range"):
         hosts += [ip for ip in json.loads(get_setting(db, f"ip_scan:{t.id}", "[]")) if ip not in known_ips]
-    return {**settings.winrm, "creds": creds, "hosts": hosts, "include_ad": bool(_targets(db, *AD_KINDS)),
-            "computer_bases": [t.value for t in _targets(db, "ad_computer_path")] or None}
+    par = getattr(SCOPE, "parallel", None)
+    bases, whole = [], False
+    for t in _targets(db, *AD_KINDS):
+        try:
+            k, _, base, coll = ad_scope(t)
+        except ValueError:
+            continue
+        if k == "ad_domain" and "computers" in coll:
+            whole = True
+        elif k == "ad_computer_path":
+            bases.append(base)
+    return {**settings.winrm, **({"parallel": par} if par else {}), "creds": creds, "hosts": hosts,
+            "include_ad": whole or bool(bases), "computer_bases": None if whole else (bases or None)}
 
 
 def run_pcs(db: Session, check_pending: bool) -> str:

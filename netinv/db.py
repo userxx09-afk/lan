@@ -353,11 +353,32 @@ class ScanTarget(Base):
     value: Mapped[str] = mapped_column(Text)             # domain fqdn, OU DN, or "10.0.0.0/24" / "10.0.0.1-10.0.0.50"
     server: Mapped[str | None] = mapped_column(String(255))   # optional DC to talk to
     credential_ids: Mapped[str | None] = mapped_column(String(255))  # comma list, tried in order
+    collect: Mapped[str | None] = mapped_column(String(64))   # AD domain: "computers,users" (empty = both)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     interval_min: Mapped[int] = mapped_column(Integer, default=240)
     last_run: Mapped[datetime | None] = mapped_column(DateTime)
     last_result: Mapped[str | None] = mapped_column(Text)
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
+
+
+class ScanJob(Base):
+    """A scheduled scan: which targets, which collectors, when, and how hard (see jobs.py)."""
+    __tablename__ = "scan_jobs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    target_ids: Mapped[str | None] = mapped_column(String(512))     # comma list of scan_targets ids; empty = all targets
+    collectors: Mapped[str] = mapped_column(String(128))            # comma list: ad, snmp, pcs, pcs_updates, dc_logons
+    every_min: Mapped[int | None] = mapped_column(Integer)          # repeat every N minutes, or
+    at_time: Mapped[str | None] = mapped_column(String(5))          # run once a day at HH:MM (server local time)
+    days: Mapped[str] = mapped_column(String(7), default="0123456") # weekdays it may run, Monday = 0
+    window_start: Mapped[int | None] = mapped_column(Integer)       # only start between these hours (local), e.g. 18-6
+    window_end: Mapped[int | None] = mapped_column(Integer)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)       # PCs scanned at once over WinRM (default 16)
+    last_run: Mapped[datetime | None] = mapped_column(DateTime)     # UTC
+    last_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_result: Mapped[str | None] = mapped_column(Text)
+    last_seconds: Mapped[int | None] = mapped_column(Integer)
 
 
 class ScanExclusion(Base):

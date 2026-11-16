@@ -463,27 +463,81 @@ const confirmBox = (text) => modal(`<p>${esc(text)}</p>`);
 
 const JOB_LABEL = { ad: "Active Directory", snmp: "switches", pcs: "PCs", pcs_updates: "PCs and Windows Update", dc_logons: "domain controller logs" };
 let statusTimer;
+// Header indicator for every scan (links to the Scanning view); the big banner only for scans started by hand.
 async function pollStatus() {
   clearTimeout(statusTimer);
   try {
     const s = await api("/api/status");
-    const b = $("#scanbanner");
-    if (s.running.length) {
-      const names = s.running.map((r) => r.job.startsWith("rescan:") ? r.job.slice(7) : JOB_LABEL[r.job] || r.job);
+    const b = $("#scanbanner"), ind = $("#scanind");
+    const manual = s.running.filter((r) => !r.job.startsWith("job: "));
+    const busy = s.running.length || s.queued;
+    ind.hidden = !busy;
+    if (busy) $("#scanindtext").textContent = `Scanning${s.running.length ? ` ${s.running.length}` : ""}${s.queued ? ` · ${s.queued} queued` : ""}`;
+    ind.title = s.running.map((r) => r.job.replace(/^job: /, "")).join(", ") || "Jobs waiting for a free slot";
+    if (manual.length) {
+      const names = manual.map((r) => r.job.startsWith("rescan:") ? r.job.slice(7) : JOB_LABEL[r.job] || r.job);
       b.innerHTML = `<span class="spinner"></span><div><b>Scanning ${esc(names.join(", "))}…</b>
         <div class="muted">This can take a few minutes depending on the size of your network. Results appear as they come in.</div></div>
-        <button class="ghost" id="refreshnow">Refresh</button>`;
+        <button class="ghost" id="scanview">Show progress</button><button class="ghost" id="refreshnow">Refresh</button>`;
       b.hidden = false;
       $("#refreshnow").onclick = refreshActive;
-      statusTimer = setTimeout(pollStatus, 4000);
+      $("#scanview").onclick = () => showTab("scanning");
       b.dataset.was = "1";
     } else {
       if (b.dataset.was) { b.dataset.was = ""; refreshActive(); }
       b.hidden = true;
-      statusTimer = setTimeout(pollStatus, 15000);
     }
+    statusTimer = setTimeout(pollStatus, busy ? 4000 : 15000);
   } catch { statusTimer = setTimeout(pollStatus, 30000); }
 }
+$("#scanind").onclick = () => showTab("scanning");
+
+// ------------------------------------------------------------ Scanning view: running (with progress), queue, upcoming, recent
+const dur = (sec) => sec == null ? "" : sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, "0")}s` : `${Math.floor(sec / 3600)}h ${String(Math.floor(sec % 3600 / 60)).padStart(2, "0")}m`;
+const STEP_LABEL = { ad: "AD import", snmp: "IP ranges (SNMP + sweep)", pcs: "PC inventory", pcs_updates: "PC inventory + updates", dc_logons: "DC logons" };
+let scanTimer;
+loaders.scanning = async () => {
+  clearTimeout(scanTimer);
+  if (!$("#scanning").classList.contains("active")) return;
+  let d;
+  try { d = await api("/api/scanning"); } catch (e) { scanTimer = setTimeout(loaders.scanning, 10000); return; }
+  $("#scancap").textContent = `At most ${d.max_concurrent} job${d.max_concurrent > 1 ? "s" : ""} at once (Settings, Scan schedule).`;
+  $("#scanrunning").innerHTML = d.running.length ? d.running.map((r) => {
+    const pct = r.total ? Math.round(100 * r.done / r.total) : null;
+    const steps = r.steps.length > 1 ? `<div class="steps">${r.steps.map((st, i) => `<span class="${i + 1 < r.step_i ? "done" : i + 1 === r.step_i ? "now" : ""}">${esc(STEP_LABEL[st] || st)}</span>`).join("")}</div>` : "";
+    const hosts = r.total ? `<b>${r.done}</b> of ${r.total} ${r.step === "dc_logons" ? "DCs" : "PCs"} done${r.failed ? `, <span class="bad">${r.failed} failed</span>` : ""} (${pct}%)` :
+      `<span class="muted">${esc(STEP_LABEL[r.step] || r.step || "starting")}…</span>`;
+    const cur = r.current.length ? `<div class="muted small">Now scanning: ${esc(r.current.join(", "))}${r.in_flight > r.current.length ? ` and ${r.in_flight - r.current.length} more` : ""}</div>` : "";
+    return `<div class="runcard"><div class="top"><b>${esc(r.name)}</b>
+        <span class="muted">${r.who ? `started by ${esc(r.who)}` : r.job_id ? "scheduled" : "scan now"} · running ${dur(r.elapsed)}${r.eta != null ? ` · about ${dur(r.eta)} left` : ""}</span>
+        ${r.cancelling ? `<span class="pill warn">stopping…</span>` : ""}
+        <span class="actions">${r.job_id && !r.cancelling ? `<button class="ghost" data-scancel="${r.job_id}">Cancel</button>` : ""}</span></div>
+      ${steps}<div class="bar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}</div>`;
+  }).join("") : `<p class="muted">Nothing is scanning right now.</p>`;
+  table($("#scanqueue"), d.queued.map((q) => ({ ...q, act: q.job_id })), ["position", "name", "waiting", "starts_in", "expected", "act"], {
+    labels: { position: "#", waiting: "waiting for", starts_in: "should start", expected: "takes about", act: "" },
+    cell: { waiting: (v) => dur(v), starts_in: (v) => v ? `in about ${dur(v)}` : "next free slot", expected: (v) => v ? dur(v) : "",
+      act: (id, r) => `${r.position > 1 ? `<a class="link" data-sfront="${id}">Move to front</a> · ` : ""}<a class="link" data-scancel="${id}">Remove</a>` } });
+  if (!d.queued.length) $("#scanqueue").innerHTML = `<p class="muted">The queue is empty.</p>`;
+  table($("#scanupcoming"), d.upcoming, ["next_run", "name", "schedule", "expected"], { labels: { next_run: "starts", expected: "takes about" },
+    cell: { next_run: fmtDate, expected: (v) => v ? dur(v) : "" } });
+  if (!d.upcoming.length) $("#scanupcoming").innerHTML = `<p class="muted">No scheduled jobs. Add them in Settings, Scan schedule.</p>`;
+  table($("#scanrecent"), d.recent, ["finished", "name", "seconds", "ok", "result"], { labels: { seconds: "took", ok: "" },
+    cell: { finished: fmtDate, seconds: (v) => dur(v), name: (v) => esc(JOB_LABEL[v] ? `Scan now: ${JOB_LABEL[v]}` : String(v).replace(/^job: /, "")),
+      ok: (v, r) => `<span class="pill ${r.cancelled ? "warn" : v ? "good" : "bad"}">${r.cancelled ? "cancelled" : v ? "ok" : "failed"}</span>`,
+      result: (v) => `<span class="longtext small">${esc(v || "")}</span>` } });
+  $("#scanning").querySelectorAll("[data-scancel]").forEach((a) => a.onclick = async () => {
+    if (!(await confirmBox("Cancel this scan? PCs already being scanned finish; the rest are skipped until the next run."))) return;
+    try { const r = await post(`/api/scanning/${a.dataset.scancel}/cancel`, {}); toast(r.output); } catch (e) { toast(errText(e), true); }
+    loaders.scanning(); pollStatus();
+  });
+  $("#scanning").querySelectorAll("[data-sfront]").forEach((a) => a.onclick = async () => {
+    try { const r = await post(`/api/scanning/${a.dataset.sfront}/front`, {}); toast(r.output); } catch (e) { toast(errText(e), true); }
+    loaders.scanning();
+  });
+  scanTimer = setTimeout(loaders.scanning, d.running.length || d.queued.length ? 3000 : 15000);
+};
+
 // #asset/<pc> and #user/<name> deep links
 function route(fallback) {
   const m = location.hash.match(/^#(asset|user)\/(.+)$/);
@@ -631,7 +685,7 @@ document.querySelectorAll("[data-uact]").forEach((b) => b.onclick = async () => 
   b.disabled = false;
 });
 // a modal with a form; resolves to {name: value} (checkboxes true/false) or null
-function formModal(html, wide = false) {
+function formModal(html, wide = false, init = null) {
   return new Promise((resolve) => {
     const m = Object.assign(document.createElement("div"), { className: "modal" });
     m.innerHTML = `<form class="box ${wide ? "wide" : ""}">${html}<div class="row"><button type="submit">OK</button><button type="button" class="ghost">Cancel</button></div></form>`;
@@ -649,6 +703,7 @@ function formModal(html, wide = false) {
       });
       done(out);
     };
+    if (init) init(form);
     form.querySelector("input:not([type=checkbox]), select")?.focus();
   });
 }
@@ -765,11 +820,11 @@ async function runLibrary(id) {
 
 // ------------------------------------------------------------ settings: credentials, scan targets, schedule, DameWare
 const KIND = { windows: "Windows / AD (LDAP + WinRM)", snmp2: "SNMP v2c", snmp3: "SNMP v3" };
-const TKIND = { ad_domain: "AD domain", ad_computer_path: "AD computer path", ad_user_path: "AD user path", ip_range: "IP range" };
+const TKIND = { ad_domain: "Whole AD domain", ad_computer_path: "AD OU of computers", ad_user_path: "AD OU of users", ip_range: "IP range" };
 const THELP = {
-  ad_domain: ["corp.example.com", "Reads every computer, user and domain controller in the domain."],
-  ad_computer_path: ["OU=Workstations,DC=corp,DC=example,DC=com", "Only computers in this OU (and below) are imported and scanned over WinRM."],
-  ad_user_path: ["OU=Staff,DC=corp,DC=example,DC=com", "Only users in this OU (and below) are imported."],
+  ad_domain: ["corp.example.com", "The whole domain: tick below whether to read its computers, its users or both. Domain controllers are always read. To scan only part of AD, pick an OU instead."],
+  ad_computer_path: ["corp.example.com/Sites/Office/PCs", "Only computers in this OU and the OUs below it are imported and scanned over WinRM. No users are read. Type the path as Active Directory Users and Computers shows it (domain/OU/OU), or a DN like OU=PCs,OU=Office,OU=Sites,DC=corp,DC=example,DC=com."],
+  ad_user_path: ["corp.example.com/Staff/Office", "Only user accounts in this OU and the OUs below it are imported. No computers are read. Path as domain/OU/OU, or a DN like OU=Office,OU=Staff,DC=corp,DC=example,DC=com."],
   ip_range: ["10.0.0.0/24, 10.1.0.1-10.1.0.50", "Switches and routers are polled over SNMP; Windows PCs that answer WinRM are scanned too."],
 };
 let creds = [];
@@ -780,9 +835,10 @@ loaders.settings = async () => {
   table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
     labels: { edit: "" }, cell: { kind: (v) => esc(KIND[v] || v), secret: (v) => (v ? `<span class="pill good">stored</span>` : `<span class="pill warn">missing</span>`),
       edit: (id) => `<a class="link" data-cedit="${id}">Edit</a> · <a class="link" data-ctest="${id}">Test</a> · <a class="link" data-cdel="${id}">Delete</a>` } });
-  table($("#targettable"), t.map((x) => ({ ...x, credentials: x.credential_ids, edit: x.id })), ["kind", "value", "server", "credentials", "enabled", "last_run", "last_result", "edit"], {
-    labels: { edit: "", last_result: "result" },
-    cell: { kind: (v) => esc(TKIND[v] || v), credentials: (ids) => esc(ids.map((i) => creds.find((c) => c.id === i)?.name || `#${i}`).join(", ") || "none"),
+  table($("#targettable"), t.map((x) => ({ ...x, credentials: x.credential_ids, edit: x.id })), ["kind", "value", "search_base", "server", "credentials", "enabled", "last_run", "last_result", "edit"], {
+    labels: { edit: "", last_result: "result", search_base: "searches" },
+    cell: { kind: (v, r) => esc(TKIND[v] || v) + (r.kind === "ad_domain" && r.collect ? `<div class="muted small">${esc(r.collect.join(" and "))}</div>` : ""),
+      search_base: (v, r) => r.scope_error ? `<span class="pill bad longtext">${esc(r.scope_error)}</span>` : v ? `<code class="small">${esc(v)}</code>` : r.kind === "ip_range" ? `<span class="muted">addresses</span>` : "", credentials: (ids) => esc(ids.map((i) => creds.find((c) => c.id === i)?.name || `#${i}`).join(", ") || "none"),
       enabled: (v) => yesNo(v), last_run: fmtDate,
       // Full text, wrapped: errors are only useful whole. A run that worked but reached no Windows hosts is a warning.
       last_result: (v, r) => (v ? `<span class="pill longtext ${!r.last_ok ? "bad" : /(^|[;:] )0 hosts answer on WinRM/.test(v) ? "warn" : "good"}">${esc(v)}</span>` : ""),
@@ -805,8 +861,7 @@ loaders.settings = async () => {
     if (await confirmBox(`Stop scanning ${TKIND[x.kind]} ${x.value}? Data already collected is kept.`)) { await api(`/api/targets/${x.id}`, { method: "DELETE" }); loaders.settings(); }
   });
   $("#targettable").querySelectorAll("[data-tscan]").forEach((a) => a.onclick = async () => { await post(`/api/targets/${a.dataset.tscan}/scan`, {}); toast("Scan started."); setTimeout(pollStatus, 500); });
-  $("#intervals").innerHTML = Object.entries(JOB_LABEL).map(([k, l]) => `<label>${esc(l[0].toUpperCase() + l.slice(1))}
-    <input name="interval:${k}" inputmode="numeric" placeholder="${s.intervals[k]}" value="${esc(s["interval:" + k] || "")}"></label>`).join("") + `<button>Save schedule</button>`;
+  loadJobs(t);
   $("#dwform").dameware_mode.value = s.dameware_mode;
 };
 const kick = () => document.querySelector(".modal [name=kind]")?.dispatchEvent(new Event("change", { bubbles: true }));
@@ -838,6 +893,9 @@ async function editTarget(x = {}) {
     <label>Scan<select name="kind" id="tkind">${Object.entries(TKIND).map(([k, l]) => `<option value="${k}" ${kind === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     <label>Value<input name="value" required value="${esc(x.value || "")}" id="tvalue" placeholder="${esc(THELP[kind][0])}"></label>
     <p class="hint" id="thelp">${esc(THELP[kind][1])}</p>
+    <div id="tcollect" class="checks" ${kind === "ad_domain" ? "" : "hidden"}><span class="muted">Read from the domain:</span>
+      <label><input type="checkbox" data-multi="1" name="collect" value="computers" ${!x.collect || x.collect.includes("computers") ? "checked" : ""}> Computers (and scan them over WinRM)</label>
+      <label><input type="checkbox" data-multi="1" name="collect" value="users" ${!x.collect || x.collect.includes("users") ? "checked" : ""}> User accounts and groups</label></div>
     <label id="tserver">Domain controller (optional)<input name="server" value="${esc(x.server || "")}" placeholder="dc01.corp.example.com, blank = find one"></label>
     <label>Credentials to try, in order</label>
     <div class="checks">${creds.map((c) => `<label><input type="checkbox" data-multi="1" name="credential_ids" value="${c.id}" ${(x.credential_ids || []).includes(c.id) ? "checked" : ""}> ${esc(c.name)} <span class="muted">${esc(KIND[c.kind])}</span></label>`).join("") || `<span class="muted">Add a credential first.</span>`}</div>
@@ -846,20 +904,85 @@ async function editTarget(x = {}) {
   const f = await pending;
   if (!f) return;
   f.credential_ids = (f.credential_ids || []).map(Number);
+  if (f.kind !== "ad_domain") delete f.collect;
   try { await post(`/api/targets${x.id ? `?tid=${x.id}` : ""}`, f); toast("Scan target saved."); loaders.settings(); } catch (e) { toast(errText(e), true); }
 }
 document.addEventListener("change", (e) => {
   if (e.target.id !== "tkind") return;
   const k = e.target.value;
-  $("#tvalue").placeholder = THELP[k][0]; $("#thelp").textContent = THELP[k][1]; $("#tserver").hidden = k === "ip_range";
+  $("#tvalue").placeholder = THELP[k][0]; $("#thelp").textContent = THELP[k][1]; $("#tserver").hidden = k === "ip_range"; $("#tcollect").hidden = k !== "ad_domain";
 });
 const errText = (e) => { try { return JSON.parse(e.message).detail || e.message; } catch { return e.message; } };
 $("#addcred").onclick = () => editCred();
 $("#addtarget").onclick = () => editTarget();
 $("#scanall").onclick = async () => { await post("/api/scan/all", {}); toast("Full scan started."); setTimeout(pollStatus, 500); };
-$("#intervals").onsubmit = async (e) => {
+// ------------------------------------------------------------ scan schedule (jobs)
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+let jobData = { jobs: [], collectors: {} }, jobTargets = [];
+async function loadJobs(targets) {
+  if (targets) jobTargets = targets;
+  jobData = await api("/api/jobs");
+  $("#jobcap").max_concurrent.value = jobData.max_concurrent;
+  const stateCell = (v, r) => r.state ? `<span class="pill warn">${r.state}</span>` : !r.enabled ? `<span class="pill mute">off</span>` : fmtDate(r.next_run);
+  table($("#jobtable"), jobData.jobs.map((j) => ({ ...j, what: j.collectors.map((c) => JOB_LABEL[c] || c).join(", "), next: j.id, act: j.id })),
+    ["name", "scope", "what", "schedule", "next", "last_run", "last_result", "act"], {
+      labels: { what: "scans", next: "next run", last_result: "result", act: "" },
+      cell: { next: stateCell, last_run: (v, r) => v ? `${fmtDate(v)}${r.last_seconds != null ? ` <span class="muted small">(${Math.round(r.last_seconds / 60)} min)</span>` : ""}` : "never",
+        last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}">${esc(v)}</span>` : "",
+        act: (id) => `<a class="link" data-jrun="${id}">Run now</a> · <a class="link" data-jhist="${id}">History</a> · <a class="link" data-jedit="${id}">Edit</a> · <a class="link" data-jdel="${id}">Delete</a>` } });
+  const byId = (a, k) => jobData.jobs.find((j) => j.id === +a.dataset[k]);
+  $("#jobtable").querySelectorAll("[data-jrun]").forEach((a) => a.onclick = async () => {
+    try { const r = await post(`/api/jobs/${a.dataset.jrun}/run`, {}); toast(r.output); setTimeout(() => { loadJobs(); pollStatus(); }, 1000); } catch (e) { toast(errText(e), true); }
+  });
+  $("#jobtable").querySelectorAll("[data-jedit]").forEach((a) => a.onclick = () => editJob(byId(a, "jedit")));
+  $("#jobtable").querySelectorAll("[data-jdel]").forEach((a) => a.onclick = async () => {
+    const j = byId(a, "jdel");
+    if (await confirmBox(`Delete the scan job "${j.name}"? Data already collected is kept.`)) { await api(`/api/jobs/${j.id}`, { method: "DELETE" }); loadJobs(); }
+  });
+  $("#jobtable").querySelectorAll("[data-jhist]").forEach((a) => a.onclick = async () => {
+    const j = byId(a, "jhist"), h = await api(`/api/jobs/${j.id}/history`);
+    drawer(`<h2>${esc(j.name)}</h2><p class="muted">${esc(j.schedule)} · ${esc(j.scope)}</p><div id="jobhist"></div>`);
+    table($("#jobhist"), h, ["started", "seconds", "ok", "result"], { labels: { seconds: "took (s)" },
+      cell: { ok: (v) => `<span class="pill ${v ? "good" : v === false ? "bad" : "mute"}">${v ? "ok" : v === false ? "failed" : "running"}</span>`,
+        result: (v) => `<span class="longtext">${esc(v || "")}</span>` } });
+  });
+}
+async function editJob(j = null) {
+  const v = j || { name: "", enabled: true, target_ids: [], collectors: ["ad", "pcs"], every_min: 30, at_time: null, days: "0123456", window_start: null, window_end: null, max_parallel: null };
+  const mode = v.at_time ? "daily" : v.every_min ? "every" : "manual";
+  const f = await formModal(`<h3>${j ? "Edit" : "New"} scan job</h3>
+    <label>Name <input name="name" value="${esc(v.name)}" placeholder="Front office PCs, every 30 minutes" required></label>
+    <fieldset><legend>Scan these targets <span class="muted small">(none ticked = all targets)</span></legend>
+      ${jobTargets.length ? jobTargets.map((t) => `<label class="check"><input type="checkbox" data-multi="1" name="t" value="${t.id}" ${v.target_ids.includes(t.id) ? "checked" : ""}> ${esc(TKIND[t.kind] || t.kind)}: ${esc(t.value)}</label>`).join("")
+        : `<p class="muted small">No scan targets yet: add them under "What to scan".</p>`}
+      <p class="muted small">To scan one OU on its own schedule, add it under "What to scan" as an OU of computers, then pick it here.</p></fieldset>
+    <fieldset><legend>Collect</legend>
+      ${Object.entries(jobData.collectors).map(([k, l]) => `<label class="check"><input type="checkbox" data-multi="1" name="c" value="${k}" ${v.collectors.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}</fieldset>
+    <fieldset><legend>When</legend>
+      <label>Run <select name="mode"><option value="every" ${mode === "every" ? "selected" : ""}>repeatedly</option><option value="daily" ${mode === "daily" ? "selected" : ""}>once a day</option><option value="manual" ${mode === "manual" ? "selected" : ""}>only when started by hand</option></select></label>
+      <label class="m-every">Every <input name="every_n" type="number" min="1" value="${v.every_min ? (v.every_min % 60 === 0 ? v.every_min / 60 : v.every_min) : 30}" style="width:5em">
+        <select name="every_u"><option value="1" ${v.every_min && v.every_min % 60 ? "selected" : ""}>minutes</option><option value="60" ${v.every_min && v.every_min % 60 === 0 ? "selected" : ""}>hours</option></select></label>
+      <label class="m-daily">At <input name="at_time" type="time" value="${esc(v.at_time || "02:00")}"></label>
+      <div class="days">${DAYS.map((d, i) => `<label class="check"><input type="checkbox" data-multi="1" name="d" value="${i}" ${v.days.includes(String(i)) ? "checked" : ""}> ${d}</label>`).join("")}</div>
+      <label class="m-every">Only between <input name="window_start" type="number" min="0" max="23" placeholder="any" value="${v.window_start ?? ""}" style="width:4em">:00 and
+        <input name="window_end" type="number" min="0" max="23" placeholder="any" value="${v.window_end ?? ""}" style="width:4em">:00 <span class="muted small">(server time; 18 and 6 means overnight)</span></label></fieldset>
+    <label>PCs scanned at once over WinRM <input name="max_parallel" type="number" min="1" max="64" placeholder="16" value="${v.max_parallel ?? ""}" style="width:5em"></label>
+    <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? "checked" : ""}> Enabled</label>`, true, (form) => {
+      const sync = () => { const m = form.mode.value; form.querySelectorAll(".m-every").forEach((e) => e.hidden = m !== "every"); form.querySelectorAll(".m-daily").forEach((e) => e.hidden = m !== "daily"); };
+      form.mode.onchange = sync; sync();
+    });
+  if (!f) return;
+  const num = (x) => (x === "" || x == null ? null : +x);
+  const body = { name: f.name, enabled: f.enabled, target_ids: f.t.map(Number), collectors: f.c, days: f.d.join(""),
+    every_min: f.mode === "every" ? (+f.every_n) * (+f.every_u) : null, at_time: f.mode === "daily" ? f.at_time : null,
+    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel) };
+  try { await post(`/api/jobs${j ? `?jid=${j.id}` : ""}`, body); toast("Scan job saved."); loadJobs(); }
+  catch (e) { toast(errText(e), true); }
+}
+$("#addjob").onclick = () => editJob();
+$("#jobcap").onsubmit = async (e) => {
   e.preventDefault();
-  try { await api("/api/settings", { method: "PUT", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Schedule saved."); loaders.settings(); }
+  try { await api("/api/jobs/settings", { method: "PUT", body: JSON.stringify({ max_concurrent: +e.target.max_concurrent.value }) }); toast("Saved."); }
   catch (er) { toast(errText(er), true); }
 };
 $("#dwform").onsubmit = async (e) => {

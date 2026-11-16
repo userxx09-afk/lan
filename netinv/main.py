@@ -16,12 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, jobs, library, reports, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, jobs, library, reports, scanning, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
-from .db import (AdUser, AuditLog, Credential, ScanExclusion, ScanTarget, SoftwareRule, get_setting, set_setting)
+from .db import (AdUser, AuditLog, Credential, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
     with SessionLocal() as db:
         create_views(db)
         exclusions.seed(db)
+        scanning.fix_ou_targets(db)
     if settings.schedule.get("enabled", True):
         threading.Thread(target=jobs.scheduler_loop, args=(_stop,), daemon=True).start()
     with SessionLocal() as db:   # a finished update leaves its "installing" note behind
@@ -199,6 +200,14 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 # ----------------------------------------------------------------- overview
+def _run_name(db, collector: str) -> str:
+    if collector.startswith("job:") and collector[4:].isdigit():
+        j = db.get(ScanJob, int(collector[4:]))
+        return f"job: {j.name}" if j else "job (deleted)"
+    return collector
+
+
+
 @app.get("/api/summary", dependencies=UI)
 def summary(db=Depends(db_session)):
     q = lambda sql: db.execute(text(sql)).scalar()  # noqa: E731
@@ -217,7 +226,7 @@ def summary(db=Depends(db_session)):
         "os_breakdown": [dict(r._mapping) for r in db.execute(text(
             "SELECT COALESCE(os, 'Unknown') AS os, COALESCE(os_display_version, '') AS version, COUNT(*) AS n "
             "FROM v_devices GROUP BY 1, 2 ORDER BY n DESC"))],
-        "runs": [{"collector": r.collector, "started": r.started.isoformat(timespec="seconds"),
+        "runs": [{"collector": _run_name(db, r.collector), "started": r.started.isoformat(timespec="seconds"),
                   "ok": r.ok, "message": r.message} for r in runs],
     }
 
@@ -645,7 +654,67 @@ def bulk(body: Bulk, user=Depends(ui_auth), db=Depends(db_session)):
 @app.get("/api/status", dependencies=UI)
 def status():
     import time as _t
-    return {"running": [{"job": k, "seconds": int(_t.time() - v)} for k, v in jobs.RUNNING.items()]}
+    return {"running": [{"job": k, "seconds": int(_t.time() - v)} for k, v in jobs.RUNNING.items()],
+            "queued": len(jobs.QUEUE)}
+
+
+@app.get("/api/scanning", dependencies=UI)
+def scanning_view(db=Depends(db_session)):
+    """The Scanning view: what runs now (with progress), what waits and when it should start, what finished lately."""
+    import heapq
+    import time as _t
+    from . import progress
+    now = _t.time()
+    alljobs = {j.id: j for j in db.scalars(select(ScanJob))}
+    running = progress.snapshot()
+    cap = jobs.max_concurrent(db)
+    # When does each queued job start? Fill the slots in queue order: a running job frees its slot at its ETA
+    # (5 min if unknown), a queued job then holds it for as long as its last run took.
+    free = [now + (r["eta"] if r["eta"] is not None else 300) for r in running if r["job_id"]]
+    free = sorted(free)[:cap] + [now] * max(0, cap - len(free))
+    heapq.heapify(free)
+    queued = []
+    for pos, (jid, since, who) in enumerate(jobs.queue_snapshot()):
+        j = alljobs.get(jid)
+        start = heapq.heappop(free)
+        heapq.heappush(free, start + ((j.last_seconds if j and j.last_seconds else 300)))
+        queued.append({"job_id": jid, "name": j.name if j else f"#{jid}", "position": pos + 1, "who": who,
+                       "waiting": int(now - since), "starts_in": max(0, int(start - now)),
+                       "expected": j.last_seconds if j else None})
+    upcoming = []
+    for j in alljobs.values():
+        if j.enabled and not jobs.JOB_STATE.get(j.id):
+            nxt = jobs.next_run(j)
+            if nxt:
+                upcoming.append({"job_id": j.id, "name": j.name, "next_run": nxt.isoformat(sep=" ", timespec="minutes"),
+                                 "schedule": jobs.describe(j), "expected": j.last_seconds})
+    upcoming.sort(key=lambda u: u["next_run"])
+    recent = []
+    for r in db.scalars(select(CollectorRun).where(CollectorRun.finished.is_not(None))
+                        .order_by(CollectorRun.finished.desc()).limit(20)):
+        recent.append({"name": _run_name(db, r.collector), "job_id": int(r.collector[4:]) if r.collector.startswith("job:") and r.collector[4:].isdigit() else None,
+                       "finished": jobs._local(r.finished).isoformat(sep=" ", timespec="minutes"),
+                       "seconds": int((r.finished - r.started).total_seconds()), "ok": r.ok,
+                       "cancelled": (r.message or "").startswith("Cancelled by"), "result": r.message})
+    return {"max_concurrent": cap, "running": running, "queued": queued, "upcoming": upcoming[:8], "recent": recent}
+
+
+@app.post("/api/scanning/{jid}/cancel")
+def scanning_cancel(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    what = jobs.cancel_job(jid, actor)
+    if what is None:
+        raise HTTPException(400, "that job isn't queued or running")
+    j = db.get(ScanJob, jid)
+    db.add(AuditLog(actor=actor, action="job.cancel", target=f"job:{(j.name if j else jid)}"[:120], result=what))
+    db.commit()
+    return {"ok": True, "output": f"{j.name if j else 'Job'}: {what}."}
+
+
+@app.post("/api/scanning/{jid}/front", dependencies=UI)
+def scanning_front(jid: int):
+    if not jobs.move_to_front(jid):
+        raise HTTPException(400, "that job isn't waiting in the queue")
+    return {"ok": True, "output": "Moved to the front of the queue."}
 
 
 @app.get("/api/users/{username}", dependencies=UI)
@@ -838,10 +907,19 @@ class TargetIn(BaseModel):
     server: str | None = None
     credential_ids: list[int] = []
     enabled: bool = True
+    collect: list[str] | None = None     # whole-domain targets: "computers", "users"
 
 
 def _target_out(t: ScanTarget) -> dict:
+    base, collect, err = None, None, None
+    if t.kind != "ip_range":
+        try:
+            _, _, base, cs = scanning.ad_scope(t)
+            collect = [c for c in ("computers", "users") if c in cs]
+        except ValueError as exc:
+            err = str(exc)
     return {"id": t.id, "kind": t.kind, "value": t.value, "server": t.server, "enabled": t.enabled,
+            "search_base": base, "collect": collect, "scope_error": err,
             "credential_ids": [int(x) for x in (t.credential_ids or "").split(",") if x.strip().isdigit()],
             "last_run": t.last_run.isoformat(sep=" ", timespec="minutes") if t.last_run else None,
             "last_ok": t.last_ok, "last_result": t.last_result}
@@ -864,12 +942,29 @@ def save_target(body: TargetIn, tid: int | None = None, actor=Depends(ui_auth), 
             raise HTTPException(400, f"Invalid IP range: {exc}")
         if n > 65536:
             raise HTTPException(400, "IP range too large (max 65,536 addresses)")
-    elif body.kind != "ad_domain" and "DC=" not in body.value.upper():
-        raise HTTPException(400, "Use a distinguished name such as OU=Workstations,DC=corp,DC=example,DC=com")
+    kind, value = body.kind, body.value.strip()
+    if kind == "ad_domain" and ("/" in value or "=" in value):   # an OU typed into "whole domain": scan just that OU
+        kind = "ad_user_path" if body.collect == ["users"] else "ad_computer_path"
+    if kind in ("ad_computer_path", "ad_user_path"):
+        try:
+            value = scanning.normalize_dn(value)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    elif kind == "ad_domain":
+        import re as _re
+        value = value.lower().strip(".")
+        if not _re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", value):
+            raise HTTPException(400, "Type the domain's DNS name, e.g. corp.example.com")
+    collect = None
+    if kind == "ad_domain":
+        collect = [c for c in ("computers", "users") if c in (body.collect if body.collect is not None else ["computers", "users"])]
+        if not collect:
+            raise HTTPException(400, "Tick computers, users or both")
     t = db.get(ScanTarget, tid) if tid else ScanTarget()
     if t is None:
         raise HTTPException(404)
-    t.kind, t.value, t.server, t.enabled = body.kind, body.value.strip(), (body.server or "").strip() or None, body.enabled
+    t.kind, t.value, t.server, t.enabled = kind, value, (body.server or "").strip() or None, body.enabled
+    t.collect = ",".join(collect) if collect else None
     t.credential_ids = ",".join(str(i) for i in body.credential_ids)
     db.add(t)
     db.add(AuditLog(actor=actor, action="target.save", target=f"{t.kind}:{t.value}"))
@@ -901,6 +996,137 @@ def scan_target(tid: int, db=Depends(db_session)):
 def scan_all():
     threading.Thread(target=jobs.run_all, daemon=True).start()
     return {"started": jobs.ALL_ORDER}
+
+
+# ----------------------------------------------------------------- scan schedule (see jobs.py)
+JOB_COLLECTORS = {"ad": "Active Directory import (computers, users, DCs)", "snmp": "Network devices (SNMP) and WinRM sweep of IP ranges",
+                  "pcs": "PC inventory over WinRM", "pcs_updates": "PC inventory plus pending Windows updates",
+                  "dc_logons": "Logons from domain controllers"}
+
+
+def _job_out(j: ScanJob, tnames: dict) -> dict:
+    ids = [int(x) for x in (j.target_ids or "").split(",") if x.strip().isdigit()]
+    nxt = jobs.next_run(j)
+    return {"id": j.id, "name": j.name, "enabled": j.enabled, "target_ids": ids,
+            "scope": ", ".join(tnames.get(i, f"#{i}") for i in ids) or "all scan targets",
+            "collectors": [c for c in (j.collectors or "").split(",") if c], "every_min": j.every_min, "at_time": j.at_time,
+            "days": j.days or "0123456", "window_start": j.window_start, "window_end": j.window_end,
+            "max_parallel": j.max_parallel, "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
+            "next_run": nxt.isoformat(sep=" ", timespec="minutes") if nxt else None,
+            "last_run": jobs._local(j.last_run).isoformat(sep=" ", timespec="minutes") if j.last_run else None,
+            "last_ok": j.last_ok, "last_result": j.last_result, "last_seconds": j.last_seconds}
+
+
+@app.get("/api/jobs", dependencies=UI)
+def list_jobs(db=Depends(db_session)):
+    jobs.migrate_schedule(db)
+    tnames = {t.id: f"{t.value}" for t in db.scalars(select(ScanTarget))}
+    return {"max_concurrent": jobs.max_concurrent(db), "collectors": JOB_COLLECTORS,
+            "jobs": [_job_out(j, tnames) for j in db.scalars(select(ScanJob).order_by(ScanJob.name))]}
+
+
+class JobIn(BaseModel):
+    name: str
+    enabled: bool = True
+    target_ids: list[int] = []
+    collectors: list[str]
+    every_min: int | None = None
+    at_time: str | None = None
+    days: str = "0123456"
+    window_start: int | None = None
+    window_end: int | None = None
+    max_parallel: int | None = None
+
+
+def _check_job(body: JobIn, db) -> None:
+    import re as _re
+    if not body.name.strip() or len(body.name) > 120:
+        raise HTTPException(400, "give the job a name")
+    if not body.collectors or any(c not in JOB_COLLECTORS for c in body.collectors):
+        raise HTTPException(400, "pick at least one thing to scan")
+    if body.at_time and not _re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", body.at_time):
+        raise HTTPException(400, "time of day must look like 02:30")
+    if body.every_min is not None and not body.at_time and not 5 <= body.every_min <= 10080:
+        raise HTTPException(400, "repeat every 5 minutes to 7 days")
+    if not _re.fullmatch(r"[0-6]{1,7}", body.days or ""):
+        raise HTTPException(400, "pick at least one day")
+    for h in (body.window_start, body.window_end):
+        if h is not None and not 0 <= h <= 23:
+            raise HTTPException(400, "time window hours are 0-23")
+    if body.max_parallel is not None and not 1 <= body.max_parallel <= 64:
+        raise HTTPException(400, "PCs at once: 1 to 64")
+    known = {i for (i,) in db.execute(select(ScanTarget.id))}
+    if any(i not in known for i in body.target_ids):
+        raise HTTPException(400, "a chosen scan target no longer exists")
+
+
+@app.post("/api/jobs")
+def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+    _check_job(body, db)
+    j = db.get(ScanJob, jid) if jid else ScanJob()
+    if j is None:
+        raise HTTPException(404)
+    dup = db.scalar(select(ScanJob).where(ScanJob.name == body.name.strip()))
+    if dup and dup.id != j.id:
+        raise HTTPException(400, "another job has that name")
+    j.name, j.enabled = body.name.strip(), body.enabled
+    j.target_ids = ",".join(str(i) for i in sorted(set(body.target_ids))) or None
+    j.collectors = ",".join(c for c in jobs.COLLECTOR_ORDER if c in body.collectors)
+    j.at_time = body.at_time or None
+    j.every_min = None if j.at_time else body.every_min
+    j.days = "".join(sorted(set(body.days)))
+    j.window_start, j.window_end = body.window_start, body.window_end
+    j.max_parallel = body.max_parallel
+    db.add(j)
+    db.add(AuditLog(actor=actor, action="job.save", target=f"job:{j.name[:100]}", result=jobs.describe(j)))
+    db.commit()
+    return {"ok": True, "id": j.id}
+
+
+@app.delete("/api/jobs/{jid}")
+def delete_job(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    j = db.get(ScanJob, jid)
+    if j:
+        db.add(AuditLog(actor=actor, action="job.delete", target=f"job:{j.name[:100]}", result="ok"))
+        db.delete(j)
+        db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{jid}/run")
+def run_job_now(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    j = db.get(ScanJob, jid)
+    if not j:
+        raise HTTPException(404)
+    if jobs.JOB_STATE.get(jid):
+        raise HTTPException(400, f"{j.name} is already {jobs.JOB_STATE[jid]}")
+    db.add(AuditLog(actor=actor, action="job.run", target=f"job:{j.name[:100]}", result="started"))
+    db.commit()
+    threading.Thread(target=jobs.run_scan_job, args=(jid, actor), daemon=True).start()
+    return {"ok": True, "output": f"{j.name} started (or queued if other jobs are running)."}
+
+
+@app.get("/api/jobs/{jid}/history", dependencies=UI)
+def job_history(jid: int, db=Depends(db_session)):
+    rows = db.scalars(select(CollectorRun).where(CollectorRun.collector == f"job:{jid}")
+                      .order_by(CollectorRun.started.desc()).limit(30))
+    return [{"started": jobs._local(r.started).isoformat(sep=" ", timespec="minutes"),
+             "seconds": int((r.finished - r.started).total_seconds()) if r.finished else None,
+             "ok": r.ok, "result": r.message} for r in rows]
+
+
+class JobSettingsIn(BaseModel):
+    max_concurrent: int
+
+
+@app.put("/api/jobs/settings")
+def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    if not 1 <= body.max_concurrent <= 8:
+        raise HTTPException(400, "1 to 8 jobs at once")
+    set_setting(db, "jobs:max_concurrent", str(body.max_concurrent))
+    db.add(AuditLog(actor=actor, action="job.settings", target="schedule", result=f"max_concurrent={body.max_concurrent}"))
+    db.commit()
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------- software updates (see updater.py)

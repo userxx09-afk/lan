@@ -212,3 +212,29 @@ td.wrap { white-space: normal; min-width: 220px; }
 button.small { padding: 3px 10px; font-size: 12.5px; }
 h2 button.small { margin-left: 10px; vertical-align: middle; }
 #assetbody > .banner { margin-bottom: 12px; }
+
+/* scanning view + header indicator */
+.brand a.scanind { display: inline-flex; align-items: center; gap: 6px; background: var(--accent-soft); }
+.brand a.scanind[hidden] { display: none; }
+.spinner.tiny { width: 10px; height: 10px; border-width: 2px; }
+.runcard { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+.runcard .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.runcard .top .actions { margin-left: auto; }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 8px 0 6px; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .5s; }
+.bar.indet > i { width: 30% !important; animation: indet 1.4s ease-in-out infinite; }
+@keyframes indet { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+.steps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.steps span { font-size: 12px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
+.steps span.now { border-color: var(--accent); color: var(--text); font-weight: 600; }
+.steps span.done { text-decoration: line-through; }
+/* scan job form */
+.modal .box { max-height: 92vh; overflow: auto; }
+.modal fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px 10px; display: grid; gap: 6px; margin: 0; }
+.modal fieldset legend { color: var(--muted); padding: 0 4px; }
+.modal label.check { display: flex; gap: 8px; align-items: center; color: var(--text); }
+.modal label.check input { width: auto; }
+.modal .days { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.modal fieldset label:not(.check) { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.modal fieldset label:not(.check) select, .modal fieldset label:not(.check) input { width: auto; }
+.modal fieldset p { margin: 2px 0 0; }
