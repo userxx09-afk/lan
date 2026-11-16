@@ -360,6 +360,17 @@ class ScanTarget(Base):
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
 
 
+class ScanExclusion(Base):
+    """Something every scan skips (IP, host name, AD OU, MAC), or a Windows event that isn't stored."""
+    __tablename__ = "scan_exclusions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))        # event | ip | host | ou | mac
+    value: Mapped[str] = mapped_column(String(512))
+    note: Mapped[str | None] = mapped_column(String(255))
+    created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+
+
 class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)

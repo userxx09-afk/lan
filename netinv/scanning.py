@@ -158,7 +158,9 @@ def run_ip(db: Session) -> str:
         msgs.append(snmp.collect(db, settings.snmp))
     for t in targets:
         try:
-            ips = snmp.expand_targets([x for x in t.value.replace(";", ",").split(",")])
+            from .exclusions import Exclusions
+            excl = Exclusions.load(db)
+            ips = [ip for ip in snmp.expand_targets([x for x in t.value.replace(";", ",").split(",")]) if not excl.ip(ip)]
             snmp_creds = _creds(db, [t], ("snmp2", "snmp3"))
             parts = []
             if snmp_creds:

@@ -256,7 +256,9 @@ async def _poll_all(ips: list[str], cfg: dict):
 
 
 def collect(db: Session, cfg: dict) -> str:
-    ips = expand_targets(cfg.get("targets", []))
+    from ..exclusions import Exclusions
+    excl = Exclusions.load(db)
+    ips = [ip for ip in expand_targets(cfg.get("targets", [])) if not excl.ip(ip)]
     results = asyncio.run(_poll_all(ips, cfg))
     msgs, errors = [], 0
     for ip, data, err in results:

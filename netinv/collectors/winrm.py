@@ -173,7 +173,23 @@ def _targets(db: Session, cfg: dict) -> list[tuple[str | None, str]]:
         q = q.where(Device.ad_dn.ilike(f"%{path}"))
     names = {h for h, _ in out}
     out += [(d.hostname, d.fqdn or d.hostname) for d in db.scalars(q) if d.hostname not in names]
-    return out
+    # Scanning exclusions: by address or name, and for known PCs also by AD OU, NIC IP or MAC.
+    from ..exclusions import Exclusions
+    from ..db import DeviceNic
+    excl = Exclusions.load(db)
+    devs = {d.hostname: d for d in db.scalars(select(Device).where(Device.hostname.in_([h for h, _ in out if h])))}
+    nics: dict[int, list] = {}
+    for n in db.scalars(select(DeviceNic).where(DeviceNic.device_id.in_([d.id for d in devs.values()]))):
+        nics.setdefault(n.device_id, []).append(n)
+    kept = []
+    for host, addr in out:
+        d = devs.get(host)
+        ns = nics.get(d.id, []) if d else []
+        if excl.target(address=addr, hostname=host, fqdn=d.fqdn if d else None, dn=d.ad_dn if d else None,
+                       macs=[n.mac for n in ns]) or any(excl.ip(n.ip) for n in ns):
+            continue
+        kept.append((host, addr))
+    return kept
 
 
 def _record_error(db: Session, host: str | None, exc: Exception) -> None:
@@ -215,7 +231,9 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
 
 
 def collect_dc_logons(db: Session, cfg: dict) -> str:
-    dcs = list(db.scalars(select(DomainController)))
+    from ..exclusions import Exclusions
+    excl = Exclusions.load(db)
+    dcs = [dc for dc in db.scalars(select(DomainController)) if not excl.host(dc.hostname, dc.fqdn)]
     total = 0
     for dc in dcs:
         last = db.scalar(select(func.max(LogonEvent.time)).where(LogonEvent.source == f"dc:{dc.hostname}"))

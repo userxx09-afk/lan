@@ -205,11 +205,18 @@ def apply_endpoint(db: Session, p: EndpointPayload) -> Device:
 
 
 def add_logons(db: Session, logons: list[LogonIn]) -> int:
+    from .exclusions import Exclusions
+    excl = Exclusions.load(db)
     rows = []
     for l in logons:
         user = l.username.split("\\")[-1].split("@")[0].lower()
         if not user or user.endswith("$") or user in {"system", "anonymous logon", "-"}:
             continue  # computer accounts / system noise
+        # Logons come from Security events 4768 (Kerberos TGT, logon_type 0) and 4624 (logon).
+        if excl.event("Microsoft-Windows-Security-Auditing", 4768 if l.logon_type == 0 else 4624):
+            continue
+        if excl.host(l.hostname) or excl.ip(l.ip):
+            continue
         rows.append(dict(time=_naive(l.time), username=user, hostname=norm_host(l.hostname),
                          ip=l.ip, logon_type=l.logon_type, source=l.source))
     if not rows:

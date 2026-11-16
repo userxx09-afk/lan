@@ -223,6 +223,25 @@
         <div id="authstate" class="muted"></div>
       </div>
       <div class="panel">
+        <h3>HTTPS certificate</h3>
+        <div id="tlsinfo" class="muted">Loading…</div>
+        <details class="tlshelp"><summary>How to stop the browser warning</summary>
+          <p><b>Trust this certificate on your PCs (quickest).</b> Download it below, then in Group Policy Management edit a GPO linked to your computers:
+            Computer Configuration &gt; Policies &gt; Windows Settings &gt; Security Settings &gt; Public Key Policies &gt; <i>Trusted Root Certification Authorities</i> &gt; Import, and pick NetInventory.cer.
+            PCs trust it after their next policy refresh (<code>gpupdate</code>).</p>
+          <p><b>Or use a certificate from your AD Certificate Services.</b> Click <i>Create request for AD CS</i> to download NetInventory.req (the key stays on this server), then on any domain PC run
+            <code>certreq -submit -attrib "CertificateTemplate:WebServer" NetInventory.req NetInventory.cer</code>
+            (or paste the request into your CA's <code>/certsrv</code> page), and install the .cer it returns with <i>Install certificate</i>. Domain PCs already trust your CA, so no GPO is needed.</p>
+          <p><b>Or upload a .pfx</b> exported with its private key from any CA.</p>
+        </details>
+        <div class="row"><a class="button ghost" href="/api/tls/cert.cer" id="tlsdl">Download certificate</a><button class="ghost" id="tlscsr">Create request for AD CS</button></div>
+        <form id="tlsform" class="inline tlsform">
+          <input type="file" name="file" accept=".cer,.crt,.pem,.pfx,.p12" required>
+          <input type="password" name="password" placeholder=".pfx password (if any)" autocomplete="new-password">
+          <button>Install certificate</button>
+        </form>
+      </div>
+      <div class="panel">
         <h3>Credentials</h3>
         <p class="muted">Windows accounts are used for AD (LDAP) and for WinRM to PCs and DCs. SNMP v2c/v3 credentials are used for switches and routers. Secrets are encrypted on the server and never shown again.</p>
         <div id="credtable"></div>
@@ -233,6 +252,19 @@
         <p class="muted">Add an AD domain, an OU of computers or users, or an IP range of network gear and PCs. Each target uses the credentials you pick, tried in order.</p>
         <div id="targettable"></div>
         <div class="row"><button id="addtarget">+ Add scan target</button><button id="scanall" class="ghost">Scan everything now</button></div>
+      </div>
+      <div class="panel">
+        <h3>Scanning exclusions</h3>
+        <p class="muted">Every scan (AD import, WinRM, SNMP and the WinRM port sweep) skips matching IP addresses, host names, AD OUs and MAC addresses.
+          Windows events that match a Windows event exclusion aren't stored, so they never show up in reports or alerts. Event sources match loosely: DCOM and Microsoft-Windows-DistributedCOM are the same.</p>
+        <form id="exclform" class="inline exclform">
+          <select name="kind" id="exclkind"></select>
+          <input name="value" id="exclvalue" required>
+          <input name="note" placeholder="note (optional)">
+          <button>Add exclusion</button>
+        </form>
+        <div class="inline exclfilter"><select id="exclfiltkind"><option value="">All types</option></select><input id="exclfilter" type="search" placeholder="Filter"></div>
+        <div id="excltable"></div>
       </div>
       <div class="panel">
         <h3>Schedule</h3>

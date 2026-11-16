@@ -92,8 +92,15 @@ auto_install = false    # true installs new versions without waiting for a click
 ## Sign-in and security
 
 - **HTTPS:** setup creates a self-signed certificate (`tls.crt` / `tls.key` in the data folder) and the
-  dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate once; to avoid that, issue a
-  certificate from AD CS for the server name and point `[server] tls_cert` / `tls_key` at its PEM files.
+  dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate. To stop that, go to
+  Settings > HTTPS certificate: download the certificate and trust it on PCs by GPO (Trusted Root Certification
+  Authorities), or create a request for AD CS (`certreq -submit -attrib "CertificateTemplate:WebServer" ...`) and install
+  the certificate it returns, or upload a .pfx. NetInventory never sends HSTS. If Edge or Chrome says a server "uses HSTS"
+  and offers no way past the warning, it remembered HSTS from another site that used the same server name: delete the name
+  under `edge://net-internals/#hsts` (or `chrome://net-internals/#hsts`), Delete domain security policies.
+- **Scanning exclusions:** Settings > Scanning exclusions lists IP addresses or ranges, host names (wildcards), AD OUs
+  and MAC addresses that every scan skips, and Windows events (source + ID, e.g. `Microsoft-Windows-DistributedCOM 10009`)
+  that are never stored. Common DCOM/WMI noise events are excluded by default. Changes are in the audit log.
 - **Local admin:** the account chosen during setup. Its password is stored as a PBKDF2 hash (`python -m netinv hashpw`
   makes one).
 - **AD sign-in:** in **Settings > Sign-in** enter the domain and an AD group (name or DN). Members of the group, nested

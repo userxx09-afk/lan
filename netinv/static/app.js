@@ -774,7 +774,7 @@ const THELP = {
 };
 let creds = [];
 loaders.settings = async () => {
-  loadUpdate(); loadAuth();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls();
   const [c, t, s] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings")]);
   creds = c; appSettings = s; loadCatalog();
   table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
@@ -896,6 +896,67 @@ $("#updinstall").onclick = async () => {
 // ------------------------------------------------------------ signed-in user, sign-in settings
 api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});
 $("#logout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
+// ------------------------------------------------------------ HTTPS certificate
+async function loadTls() {
+  const t = await api("/api/tls");
+  if (!t.https) { $("#tlsinfo").textContent = "HTTPS is off (no certificate in config.toml)."; return; }
+  $("#tlsinfo").innerHTML = `${t.self_signed ? `<span class="pill warn">self-signed</span> Browsers warn until PCs trust it (see below).` : `<span class="pill good">issued by ${esc(t.issuer)}</span>`}
+    <br>${esc(t.subject)} · valid until ${fmtDate(t.not_after)} · names: ${esc(t.names.join(", "))}
+    ${t.pending_request ? `<br><span class="pill mute">a certificate request is waiting for its certificate</span>` : ""}`;
+}
+$("#tlscsr").onclick = async () => {
+  try {
+    const r = await fetch("/api/tls/csr", { method: "POST", credentials: "same-origin" });
+    if (!r.ok) throw new Error(await r.text());
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(await r.blob()), download: "NetInventory.req" });
+    a.click(); toast("Request downloaded. Submit it to your CA, then install the certificate it returns."); loadTls();
+  } catch (e) { toast(errText(e), true); }
+};
+$("#tlsform").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target.file.files[0];
+  if (!f) return;
+  const buf = new Uint8Array(await f.arrayBuffer());
+  let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  try { const r = await post("/api/tls/import", { data: btoa(bin), password: e.target.password.value || null }); toast(r.output); e.target.reset(); setTimeout(loadTls, 30000); }
+  catch (er) { toast(errText(er), true); }
+};
+
+// ------------------------------------------------------------ scanning exclusions
+const EXCL_HINT = { event: "Microsoft-Windows-DistributedCOM 10009", ip: "10.0.5.0/24, 10.0.5.10-10.0.5.50 or 10.0.5.7",
+  host: "KIOSK-* or lab-pc01.corp.example.com", ou: "OU=Lab,DC=corp,DC=example,DC=com", mac: "00:15:5D:01:02:03 or 00:15:5D*" };
+let exclRows = [], exclKinds = {};
+async function loadExclusions() {
+  const d = await api("/api/exclusions");
+  exclRows = d.rows; exclKinds = d.kinds;
+  const opts = Object.entries(exclKinds).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("");
+  if (!$("#exclkind").options.length) {
+    $("#exclkind").innerHTML = opts;
+    $("#exclfiltkind").innerHTML += opts;
+    $("#exclvalue").placeholder = EXCL_HINT[$("#exclkind").value];
+  }
+  drawExclusions();
+}
+function drawExclusions() {
+  const k = $("#exclfiltkind").value;
+  table($("#excltable"), exclRows.filter((r) => !k || r.kind === k).map((r) => ({ ...r, type: exclKinds[r.kind] || r.kind, del: r.id })),
+    ["type", "value", "note", "created_by", "created", "del"], {
+      filterEl: $("#exclfilter"), labels: { value: "exclude", created_by: "added by", created: "added", del: "" },
+      cell: { del: (id) => `<a class="link small" data-xdel="${id}">delete</a>` } });
+  $("#excltable").querySelectorAll("[data-xdel]").forEach((a) => a.onclick = async () => {
+    if (!(await confirmBox("Delete this exclusion? Matching items are scanned again from the next scan."))) return;
+    try { await api(`/api/exclusions/${a.dataset.xdel}`, { method: "DELETE" }); loadExclusions(); } catch (e) { toast(errText(e), true); }
+  });
+}
+$("#exclkind").onchange = () => { $("#exclvalue").placeholder = EXCL_HINT[$("#exclkind").value]; };
+$("#exclfiltkind").onchange = drawExclusions;
+$("#exclfilter").oninput = drawExclusions;
+$("#exclform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await post("/api/exclusions", Object.fromEntries(new FormData(e.target))); e.target.value.value = ""; e.target.note.value = ""; toast("Exclusion added. It applies from the next scan."); loadExclusions(); }
+  catch (er) { toast(errText(er), true); }
+};
+
 async function loadAuth() {
   const a = await api("/api/auth");
   const f = $("#authform");

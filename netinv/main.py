@@ -16,12 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exports, fixes, jobs, library, reports, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, jobs, library, reports, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
-from .db import (AdUser, AuditLog, Credential, ScanTarget, SoftwareRule, get_setting, set_setting)
+from .db import (AdUser, AuditLog, Credential, ScanExclusion, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     init_db(settings.database_url)
     with SessionLocal() as db:
         create_views(db)
+        exclusions.seed(db)
     if settings.schedule.get("enabled", True):
         threading.Thread(target=jobs.scheduler_loop, args=(_stop,), daemon=True).start()
     with SessionLocal() as db:   # a finished update leaves its "installing" note behind
@@ -494,6 +495,112 @@ def delete_rule(rid: int, user=Depends(ui_auth), db=Depends(db_session)):
         db.delete(r)
         db.commit()
         _catalog_bg(False)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ HTTPS certificate
+def _tls_folder() -> Path:
+    return Path(settings.tls_cert).parent if settings.tls_cert else auth.data_dir()
+
+
+@app.get("/api/tls", dependencies=UI)
+def tls_info():
+    from . import tlscert
+    return tlscert.info(settings.tls_cert)
+
+
+@app.get("/api/tls/cert.cer", dependencies=UI)
+def tls_download():
+    """The certificate the dashboard serves, to trust on PCs (GPO: Trusted Root Certification Authorities)."""
+    if not settings.tls_cert or not Path(settings.tls_cert).exists():
+        raise HTTPException(404, "HTTPS isn't turned on")
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+    leaf = x509.load_pem_x509_certificates(Path(settings.tls_cert).read_bytes())[0]
+    return Response(leaf.public_bytes(Encoding.PEM), media_type="application/x-x509-ca-cert",
+                    headers={"Content-Disposition": 'attachment; filename="NetInventory.cer"'})
+
+
+@app.post("/api/tls/csr")
+def tls_csr(user=Depends(ui_auth), db=Depends(db_session)):
+    from . import tlscert
+    csr = tlscert.make_csr(str(_tls_folder()))
+    db.add(AuditLog(actor=user, action="tls.request", target="https", result="certificate request created"))
+    db.commit()
+    return Response(csr, media_type="application/pkcs10",
+                    headers={"Content-Disposition": 'attachment; filename="NetInventory.req"'})
+
+
+class TlsIn(BaseModel):
+    data: str                 # base64 of the uploaded file
+    password: str | None = None
+
+
+def _restart_soon() -> None:
+    """Exit so the service wrapper (WinSW, restart on failure) starts the app again with the new certificate."""
+    import os, time
+    def go():
+        time.sleep(2)
+        os._exit(3)
+    threading.Thread(target=go, daemon=True).start()
+
+
+@app.post("/api/tls/import")
+def tls_import(body: TlsIn, user=Depends(ui_auth), db=Depends(db_session)):
+    import base64, os
+    from . import tlscert
+    if not settings.tls_cert:
+        raise HTTPException(400, "HTTPS isn't turned on in config.toml")
+    try:
+        subject = tlscert.install(str(_tls_folder()), base64.b64decode(body.data), body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    db.add(AuditLog(actor=user, action="tls.install", target="https", result=subject[:200]))
+    db.commit()
+    as_service = os.name == "nt" and os.environ.get("NETINV_CONFIG")
+    if as_service:
+        _restart_soon()
+    return {"ok": True, "output": f"Installed {subject}. " + (
+        "NetInventory restarts in a few seconds; reload the page in about 30 seconds." if as_service
+        else "Restart NetInventory to use it.")}
+
+
+# ------------------------------------------------------------------ scanning exclusions
+class ExclusionIn(BaseModel):
+    kind: str
+    value: str
+    note: str | None = None
+
+
+@app.get("/api/exclusions", dependencies=UI)
+def list_exclusions(db=Depends(db_session)):
+    rows = db.scalars(select(ScanExclusion).order_by(ScanExclusion.kind, ScanExclusion.value))
+    return {"kinds": exclusions.KINDS, "rows": [{"id": r.id, "kind": r.kind, "value": r.value, "note": r.note,
+                                                 "created": r.created, "created_by": r.created_by} for r in rows]}
+
+
+@app.post("/api/exclusions")
+def add_exclusion(body: ExclusionIn, user=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        value = exclusions.validate(body.kind, body.value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if db.scalar(select(ScanExclusion).where(ScanExclusion.kind == body.kind, ScanExclusion.value == value)):
+        raise HTTPException(400, "that exclusion already exists")
+    r = ScanExclusion(kind=body.kind, value=value, note=(body.note or "").strip()[:255] or None, created_by=user[:64])
+    db.add(r)
+    db.add(AuditLog(actor=user, action="exclusion.add", target=f"{body.kind}:{value[:200]}", result=r.note or "ok"))
+    db.commit()
+    return {"ok": True, "id": r.id}
+
+
+@app.delete("/api/exclusions/{eid}")
+def delete_exclusion(eid: int, user=Depends(ui_auth), db=Depends(db_session)):
+    r = db.get(ScanExclusion, eid)
+    if r:
+        db.add(AuditLog(actor=user, action="exclusion.delete", target=f"{r.kind}:{r.value[:200]}", result="ok"))
+        db.delete(r)
+        db.commit()
     return {"ok": True}
 
 

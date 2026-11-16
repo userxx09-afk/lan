@@ -120,6 +120,8 @@ USER_ATTRS = ["sAMAccountName", "displayName", "givenName", "sn", "initials", "u
 
 def collect(db: Session, cfg: dict) -> str:
     """cfg: server, user, password, base_dn, domain, computer_bases[], user_bases[], users (bool)."""
+    from ..exclusions import Exclusions
+    excl = Exclusions.load(db)
     conn = connect(cfg)
     base = cfg.get("base_dn") or domain_to_dn(cfg["domain"])
     domain_short = (cfg.get("domain") or "").split(".")[0].upper() or None
@@ -130,7 +132,7 @@ def collect(db: Session, cfg: dict) -> str:
     for cbase in cfg.get("computer_bases") or [base]:
         for e in _search(conn, cbase, "(objectClass=computer)", COMPUTER_ATTRS):
             name = norm_host(_attr(e, "name"))
-            if not name:
+            if not name or excl.target(hostname=name, fqdn=_attr(e, "dNSHostName"), dn=_attr(e, "distinguishedName")):
                 continue
             uac = int(_attr(e, "userAccountControl") or 0)
             if uac & UAC_SERVER_TRUST:
@@ -180,7 +182,7 @@ def collect(db: Session, cfg: dict) -> str:
         for ubase in cfg.get("user_bases") or [base]:
             for e in _search(conn, ubase, "(&(objectCategory=person)(objectClass=user))", USER_ATTRS):
                 sam = (_attr(e, "sAMAccountName") or "").lower()
-                if not sam:
+                if not sam or excl.dn(_attr(e, "distinguishedName")):
                     continue
                 u = db.scalar(select(AdUser).where(AdUser.username == sam)) or AdUser(username=sam)
                 db.add(u)
