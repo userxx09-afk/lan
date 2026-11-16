@@ -30,8 +30,16 @@ $Log = Join-Path $DataDir 'logs\install.log'
 
 function Log($msg) { $line = "$(Get-Date -Format s)  $msg"; Add-Content -LiteralPath $Log -Value $line; Write-Host $line }
 function Fail($msg) { Log "ERROR: $msg"; exit 1 }
+# Runs a program and returns everything it printed, stderr included, as plain text.
+# With $ErrorActionPreference = 'Stop', PowerShell 5.1 turns the first line a program writes to stderr into a
+# terminating error, so a Python traceback would abort setup with only "Traceback (most recent call last):".
+function Native($exe, [string[]]$argv) {
+    $ErrorActionPreference = 'Continue'      # local to this function
+    $lines = & $exe @argv 2>&1 | ForEach-Object { "$_" }
+    return (($lines -join "`r`n").Trim())
+}
 function Run($exe, [string[]]$argv) {
-    $out = & $exe @argv 2>&1 | Out-String
+    $out = Native $exe $argv
     if ($LASTEXITCODE -ne 0) { throw "$([IO.Path]::GetFileName($exe)) $($argv -join ' ') failed ($LASTEXITCODE): $out" }
     return $out
 }
@@ -50,7 +58,7 @@ function WriteUtf8([string]$path, [string]$text) { [IO.File]::WriteAllText($path
 function HashPw([string]$pw) {
     # Passed in the environment, not a pipe: PowerShell 5.1 pipes mangle accented characters
     $env:NETINV_HASHPW = $pw
-    try { $h = (& $Python -m netinv hashpw 2>&1 | Out-String).Trim() } finally { Remove-Item Env:NETINV_HASHPW -ErrorAction SilentlyContinue }
+    try { $h = Native $Python @('-m', 'netinv', 'hashpw') } finally { Remove-Item Env:NETINV_HASHPW -ErrorAction SilentlyContinue }
     if ($h -notlike 'pbkdf2_sha256$*') { throw "Hashing the dashboard password failed: $h" }
     return $h
 }
@@ -72,13 +80,15 @@ if ($vc.Installed -ne 1) { Log 'WARNING: Visual C++ runtime not detected; Postgr
 else { Log "Visual C++ runtime $($vc.Version) present" }
 
 # Python packages: verify imports; reinstall from the bundled offline wheels if anything is missing.
-$check = 'import fastapi, uvicorn, sqlalchemy, psycopg, pydantic, ldap3, pysnmp, pypsrp, openpyxl, cryptography; print("ok")'
-$ok = (& $Python -c $check 2>&1 | Out-String).Trim()
+# No double quotes in Python code passed with -c: PowerShell 5.1 strips them on the way to the program,
+# so print("ok") arrived as print(ok) and failed with a NameError even when every package was fine.
+$check = "import fastapi, uvicorn, sqlalchemy, psycopg, pydantic, ldap3, pysnmp, pypsrp, openpyxl, cryptography; print('ok')"
+$ok = Native $Python @('-c', $check)
 if ($ok -ne 'ok') {
     Log "Python packages incomplete ($ok). Installing from bundled wheels..."
     $wheels = Join-Path $InstallDir 'python\wheels'
     Run $Python @('-m', 'pip', 'install', '--no-index', '--find-links', $wheels, '-r', (Join-Path $wheels 'requirements-win.txt')) | Out-Null
-    $ok = (& $Python -c $check 2>&1 | Out-String).Trim()
+    $ok = Native $Python @('-c', $check)
     if ($ok -ne 'ok') { Fail "Python packages still failing to import: $ok" }
 }
 Log 'Python and packages OK'
@@ -145,7 +155,7 @@ if ($P.DbMode -eq 'bundled') {
         & (Join-Path $PgBin 'pg_isready.exe') -h localhost -p $PgPort -q
         if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 1
     }
-    $exists = (& (Join-Path $PgBin 'psql.exe') -h localhost -p $PgPort -U netinv -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='netinv'" 2>&1 | Out-String).Trim()
+    $exists = Native (Join-Path $PgBin 'psql.exe') @('-h', 'localhost', '-p', "$PgPort", '-U', 'netinv', '-d', 'postgres', '-tAc', "SELECT 1 FROM pg_database WHERE datname='netinv'")
     if ($exists -ne '1') {
         Log 'Creating database netinv'
         Run (Join-Path $PgBin 'createdb.exe') @('-h', 'localhost', '-p', "$PgPort", '-U', 'netinv', 'netinv') | Out-Null
@@ -159,7 +169,7 @@ if ($P.DbMode -eq 'bundled') {
     $DbUrl = $P.DbUrl
     Log 'Testing connection to the existing PostgreSQL server'
     $env:NETINV_TEST_URL = $DbUrl
-    $t = (& $Python -c "import os,sqlalchemy as s; e=s.create_engine(os.environ['NETINV_TEST_URL']); e.connect().close(); print('ok')" 2>&1 | Out-String).Trim()
+    $t = Native $Python @('-c', "import os,sqlalchemy as s; e=s.create_engine(os.environ['NETINV_TEST_URL']); e.connect().close(); print('ok')")
     Remove-Item Env:NETINV_TEST_URL
     if ($t -notmatch 'ok$') { Log "WARNING: could not connect to the database yet: $t" } else { Log 'Database connection OK' }
 }
@@ -242,7 +252,7 @@ $depend = if ($P.DbMode -eq 'bundled') { "<depend>$PgSvc</depend>" } else { '' }
 
 if (Get-Service NetInventory -ErrorAction SilentlyContinue) {
     Log 'Updating NetInventory service'
-    & $svcExe stop 2>&1 | Out-Null
+    Native $svcExe @('stop') | Out-Null
     Run $svcExe @('uninstall') | Out-Null
     Start-Sleep 2
 }
