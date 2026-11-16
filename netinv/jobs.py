@@ -59,7 +59,18 @@ def _run_job(name: str) -> CollectorRun:
         run.finished = utcnow()
         db.add(run)
         db.commit()
+        _refresh_groups(db)
         return run
+
+
+def _refresh_groups(db) -> None:
+    """New scan data can move PCs in or out of rule-based groups."""
+    from . import groups
+    try:
+        groups.refresh(db)
+    except Exception:
+        db.rollback()
+        log.exception("group refresh")
 
 
 def intervals(db) -> dict[str, int]:
@@ -216,6 +227,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
         ids = [int(x) for x in (job.target_ids or "").split(",") if x.strip().isdigit()]
         par, expected = job.max_parallel, job.last_seconds
         ipm = {m for m in (job.ip_methods or "").split(",") if m} or None
+        grp = job.group_name or None
         job.last_run = utcnow()
         db.commit()
     key = f"job: {name}"
@@ -228,7 +240,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
             run = CollectorRun(collector=f"job:{job_id}", started=utcnow())
             db.add(run)
             db.commit()
-            with scanning.scoped(ids, par, ipm):
+            with scanning.scoped(ids, par, ipm, grp):
                 for c in colls:
                     if prog.stop.is_set():
                         break
@@ -247,6 +259,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
                 msg = f"Cancelled by {prog.cancelled_by or 'someone'}. " + msg
             run.ok, run.message, run.finished = ok, msg[:4000], utcnow()
             db.add(run)
+            _refresh_groups(db)
             job = db.get(ScanJob, job_id)
             if job:
                 job.last_ok, job.last_result = ok, msg[:4000]
@@ -269,6 +282,8 @@ def scheduler_loop(stop: threading.Event) -> None:
         try:
             with SessionLocal() as db:
                 migrate_schedule(db)
+                from . import groups
+                groups.refresh_if_stale(db)     # agent reports and edits change membership between scans too
                 now = datetime.now()
                 due = [j.id for j in db.scalars(select(ScanJob).where(ScanJob.enabled.is_(True)))
                        if not JOB_STATE.get(j.id) and is_due(j, now, _local(j.last_run))]

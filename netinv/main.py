@@ -13,16 +13,16 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, jobs, library, reports, scanning, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jobs, library, reports, scanning, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
 
 from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
-from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, SavedReport, SessionLocal,
+from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, GroupDef, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac, utcnow)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
 
@@ -270,6 +270,8 @@ def device(hostname: str, db=Depends(db_session)):
                                                                .order_by(Deployment.created.desc()).limit(200))],
             "location": location, "nics": [{"mac": n.mac, "ip": n.ip, "description": n.description} for n in dev.nics],
             "groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id))),
+            "rule_groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id,
+                                                                                         DeviceGroup.dynamic.is_(True)))),
             "custom_fields": {c.name: c.value for c in db.scalars(select(CustomField).where(CustomField.device_id == dev.id))},
             "comments": [{"id": c.id, "author": c.author, "text": c.text, "created": c.created.isoformat(sep=" ", timespec="minutes")}
                          for c in db.scalars(select(Comment).where(Comment.device_id == dev.id).order_by(Comment.created.desc()))],
@@ -319,15 +321,171 @@ def add_group(hostname: str, body: NameValue, db=Depends(db_session)):
 
 def _add_group(db, dev: Device, name: str) -> None:
     name = name.strip()[:128]
-    if name and not db.scalar(select(DeviceGroup).where(DeviceGroup.device_id == dev.id, DeviceGroup.name == name)):
-        db.add(DeviceGroup(device_id=dev.id, name=name))
+    if not name:
+        return
+    row = db.scalar(select(DeviceGroup).where(DeviceGroup.device_id == dev.id, DeviceGroup.name == name))
+    if row is None:
+        db.add(DeviceGroup(device_id=dev.id, name=name, dynamic=False))
+    elif row.dynamic:
+        row.dynamic = False     # added by hand to a rule-based group: stays whatever the rules say
+
+
+def _remove_group(db, dev: Device, name: str) -> bool:
+    """False when the PC is in the group only because of the group's rules (removing it would be undone)."""
+    rows = list(db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id, DeviceGroup.name == name)))
+    if rows and all(r.dynamic for r in rows):
+        return False
+    for g in rows:
+        if db.scalar(select(GroupDef.id).where(GroupDef.name == name)) and groups.evaluate(
+                db, *_gdef_rules(db, name), devices=[d for d in groups._devices(db) if d["id"] == dev.id]):
+            g.dynamic = True    # added by hand, but the rules match it too: it stays as a rule-based member
+        else:
+            db.delete(g)
+    return True
+
+
+def _gdef_rules(db, name: str) -> tuple[str, list]:
+    g = db.scalar(select(GroupDef).where(GroupDef.name == name))
+    return (g.match or "all", groups.conditions_of(g)) if g else ("all", [])
 
 
 @app.delete("/api/devices/{hostname}/groups/{name}", dependencies=UI)
 def remove_group(hostname: str, name: str, db=Depends(db_session)):
     dev = _device(db, hostname)
-    for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id, DeviceGroup.name == name)):
-        db.delete(g)
+    if not _remove_group(db, dev, name):
+        raise HTTPException(400, f"{dev.hostname} is in {name} because of the group's rules. To leave it out, "
+                                 f"edit the group under Groups and add a condition such as \"host name is not {dev.hostname}\".")
+    db.commit()
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------- groups page (static and rule-based groups)
+class Condition(BaseModel):
+    field: str
+    value: str = ""
+    not_: bool = Field(False, alias="not")
+    model_config = {"populate_by_name": True}
+
+
+class GroupIn(BaseModel):
+    name: str
+    description: str | None = None
+    match: str = "all"
+    conditions: list[Condition] = []
+    hostnames: list[str] = []        # always in the group, whatever the conditions say
+
+
+def _conds(body) -> list[dict]:
+    return [{"field": c.field, "value": c.value, "not": c.not_} for c in body.conditions]
+
+
+def _clean_conds(match: str, conds: list[dict], allow_empty: bool) -> list[dict]:
+    if allow_empty and not any(str(c.get("value") or "").strip() for c in conds):
+        return []
+    try:
+        return groups.validate(match, conds)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/groups", dependencies=UI)
+def groups_list(db=Depends(db_session)):
+    from sqlalchemy import func
+    groups.refresh_if_stale(db)
+    counts = dict(db.execute(select(DeviceGroup.name, func.count()).group_by(DeviceGroup.name)).all())
+    manual = dict(db.execute(select(DeviceGroup.name, func.count()).where(DeviceGroup.dynamic.is_not(True))
+                             .group_by(DeviceGroup.name)).all())
+    defs = {g.name: g for g in db.scalars(select(GroupDef))}
+    used: dict[str, list[str]] = {}
+    for j in db.scalars(select(ScanJob).where(ScanJob.group_name.is_not(None))):
+        used.setdefault(j.group_name, []).append(j.name)
+    out = []
+    for name in groups.names(db):
+        g, conds = defs.get(name), groups.conditions_of(defs[name]) if name in defs else []
+        out.append({"name": name, "description": g.description if g else None, "kind": "rules" if conds else "manual",
+                    "match": g.match if g else "all", "conditions": conds,
+                    "rule": groups.describe(g.match or "all", conds) if conds else "",
+                    "members": counts.get(name, 0), "manual": manual.get(name, 0), "scan_jobs": used.get(name, []),
+                    "updated": jobs._local(g.updated).isoformat(sep=" ", timespec="minutes") if g and g.updated else None,
+                    "who": g.who if g else None})
+    return {"groups": out, "fields": groups.FIELDS, "hints": groups.HINTS}
+
+
+@app.post("/api/groups/preview", dependencies=UI)
+def groups_preview(body: GroupIn, db=Depends(db_session)):
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True)
+    hits = groups.evaluate(db, body.match, conds) if conds else []
+    names = sorted({d["hostname"] for d in hits} | {norm_host(h) for h in body.hostnames if norm_host(h)})
+    return {"count": len(names), "rule_count": len(hits), "hostnames": names[:500]}
+
+
+@app.get("/api/groups/{name}/members", dependencies=UI)
+def group_members(name: str, db=Depends(db_session)):
+    groups.hosts(db, name)
+    rows = db.execute(select(Device.hostname, DeviceGroup.dynamic).join(DeviceGroup, DeviceGroup.device_id == Device.id)
+                      .where(DeviceGroup.name == name).order_by(Device.hostname)).all()
+    return {"members": [{"hostname": h, "how": "rules" if dyn else "added by hand"} for h, dyn in rows]}
+
+
+@app.post("/api/groups")
+def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+    name = body.name.strip()
+    if not name or len(name) > 128 or "," in name:
+        raise HTTPException(400, "give the group a name (up to 128 characters, no commas)")
+    if body.match not in ("all", "any"):
+        raise HTTPException(400, "match must be all or any")
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True)
+    hosts = {norm_host(h) for h in body.hostnames if norm_host(h)}
+    if not conds and not hosts:
+        raise HTTPException(400, "add at least one condition, or list the computers that belong in the group")
+    found = dict(db.execute(select(Device.hostname, Device.id).where(Device.hostname.in_(hosts))).all()) if hosts else {}
+    missing = sorted(hosts - set(found))
+    if missing:
+        raise HTTPException(400, f"not in the inventory: {', '.join(missing[:20])}{' ...' if len(missing) > 20 else ''}")
+    existing = set(groups.names(db))
+    if old and old not in existing:
+        raise HTTPException(404, "that group no longer exists")
+    if name != old and name in existing:
+        raise HTTPException(400, "another group already has that name")
+    if old and old != name:     # rename: memberships, scan jobs and the definition follow
+        for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == old)):
+            r.name = name
+        for j in db.scalars(select(ScanJob).where(ScanJob.group_name == old)):
+            j.group_name = name
+    g = db.scalar(select(GroupDef).where(GroupDef.name == (old or name))) or GroupDef()
+    g.name, g.description, g.match = name, (body.description or "").strip()[:1000] or None, body.match
+    g.conditions, g.who, g.updated = json.dumps(conds), actor, utcnow()
+    db.add(g)
+    db.flush()
+    # The list is the full set of hand-added members: drop the others, add the new ones.
+    for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == name, DeviceGroup.dynamic.is_not(True))):
+        if r.device_id not in found.values():
+            db.delete(r)
+    db.flush()
+    have = {r.device_id: r for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == name))}
+    for did in found.values():
+        if did in have:
+            have[did].dynamic = False
+        else:
+            db.add(DeviceGroup(device_id=did, name=name, dynamic=False))
+    db.commit()
+    n = groups.refresh(db, only=name).get(name, 0)
+    db.add(AuditLog(actor=actor, action="group.save", target=f"group:{name[:100]}",
+                    result=(groups.describe(body.match, conds) if conds else "by hand")[:1000] + f"; {n} computers"))
+    db.commit()
+    return {"ok": True, "members": n}
+
+
+@app.delete("/api/groups/{name}")
+def group_delete(name: str, actor=Depends(ui_auth), db=Depends(db_session)):
+    jobs_using = [j.name for j in db.scalars(select(ScanJob).where(ScanJob.group_name == name))]
+    if jobs_using:
+        raise HTTPException(400, f"the scan job{'s' if len(jobs_using) > 1 else ''} {', '.join(jobs_using)} "
+                                 f"scan{'' if len(jobs_using) > 1 else 's'} this group: change or delete {'them' if len(jobs_using) > 1 else 'it'} first")
+    from sqlalchemy import delete as sql_delete
+    n = db.execute(sql_delete(DeviceGroup).where(DeviceGroup.name == name)).rowcount
+    db.execute(sql_delete(GroupDef).where(GroupDef.name == name))
+    db.add(AuditLog(actor=actor, action="group.delete", target=f"group:{name[:100]}", result=f"{n} memberships removed"))
     db.commit()
     return {"ok": True}
 
@@ -520,8 +678,7 @@ def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
     hosts = list(body.hostnames)
     if body.group:
         with SessionLocal() as db:
-            hosts += list(db.scalars(select(Device.hostname).join(DeviceGroup, DeviceGroup.device_id == Device.id)
-                                     .where(DeviceGroup.name == body.group)))
+            hosts += groups.hosts(db, body.group)
     if not hosts:
         raise HTTPException(400, "pick at least one computer")
     if len(set(hosts)) > 2000:
@@ -622,9 +779,8 @@ def scripts_list(db=Depends(db_session)):
             r["ok"] += n
         elif st in ("failed", "expired"):
             r["failed"] += n
-    groups = sorted({g for (g,) in db.execute(select(DeviceGroup.name).distinct())})
     return {"scripts": [_script_out(x, runs) for x in db.scalars(select(Script).order_by(Script.name))],
-            "languages": fixes.LANGS, "groups": groups}
+            "languages": fixes.LANGS, "groups": groups.names(db)}
 
 
 def _script_save(db, x: Script, body: ScriptIn, actor: str) -> dict:
@@ -924,7 +1080,7 @@ class Bulk(BaseModel):
 
 @app.post("/api/bulk")
 def bulk(body: Bulk, user=Depends(ui_auth), db=Depends(db_session)):
-    done = 0
+    done = ruled = 0
     for h in body.hostnames[:2000]:
         dev = db.scalar(select(Device).where(Device.hostname == norm_host(h)))
         if dev is None:
@@ -936,15 +1092,20 @@ def bulk(body: Bulk, user=Depends(ui_auth), db=Depends(db_session)):
         elif body.action == "add_group" and body.value:
             _add_group(db, dev, body.value)
         elif body.action == "remove_group" and body.value:
-            for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id, DeviceGroup.name == body.value)):
-                db.delete(g)
+            if not _remove_group(db, dev, body.value):
+                ruled += 1
+                continue
         elif body.action == "set_state" and body.value:
             dev.state = body.value
         else:
             raise HTTPException(400, "unknown action")
         done += 1
     db.commit()
-    return {"ok": True, "count": done}
+    out = {"ok": True, "count": done}
+    if ruled:
+        out["note"] = (f"{ruled} computer{'s are' if ruled != 1 else ' is'} in {body.value} because of the group's rules "
+                       "and stayed. Edit the group's conditions under Groups to leave them out.")
+    return out
 
 
 @app.get("/api/status", dependencies=UI)
@@ -1310,10 +1471,12 @@ def _job_out(j: ScanJob, tnames: dict) -> dict:
     ids = [int(x) for x in (j.target_ids or "").split(",") if x.strip().isdigit()]
     nxt = jobs.next_run(j)
     return {"id": j.id, "name": j.name, "enabled": j.enabled, "target_ids": ids,
-            "scope": ", ".join(tnames.get(i, f"#{i}") for i in ids) or "all scan targets",
+            "scope": (", ".join(tnames.get(i, f"#{i}") for i in ids) or "all scan targets")
+                     + (f"; PCs: only group {j.group_name}" if j.group_name else ""),
             "collectors": [c for c in (j.collectors or "").split(",") if c], "every_min": j.every_min, "at_time": j.at_time,
             "days": j.days or "0123456", "window_start": j.window_start, "window_end": j.window_end,
             "max_parallel": j.max_parallel, "ip_methods": [m for m in (j.ip_methods or "").split(",") if m],
+            "group_name": j.group_name,
             "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
             "next_run": nxt.isoformat(sep=" ", timespec="minutes") if nxt else None,
             "last_run": jobs._local(j.last_run).isoformat(sep=" ", timespec="minutes") if j.last_run else None,
@@ -1326,6 +1489,7 @@ def list_jobs(db=Depends(db_session)):
     tnames = {t.id: f"{t.value}" for t in db.scalars(select(ScanTarget))}
     from . import reach
     return {"max_concurrent": jobs.max_concurrent(db), "collectors": JOB_COLLECTORS, "reach_interval": reach.interval(db),
+            "groups": groups.names(db),
             "jobs": [_job_out(j, tnames) for j in db.scalars(select(ScanJob).order_by(ScanJob.name))]}
 
 
@@ -1341,6 +1505,7 @@ class JobIn(BaseModel):
     window_end: int | None = None
     max_parallel: int | None = None
     ip_methods: list[str] = []          # empty = each IP range target's own ticks
+    group_name: str | None = None       # PC scans reach only this group's computers
 
 
 def _check_job(body: JobIn, db) -> None:
@@ -1363,6 +1528,10 @@ def _check_job(body: JobIn, db) -> None:
     known = {i for (i,) in db.execute(select(ScanTarget.id))}
     if any(i not in known for i in body.target_ids):
         raise HTTPException(400, "a chosen scan target no longer exists")
+    if body.group_name and body.group_name not in groups.names(db):
+        raise HTTPException(400, "the chosen group no longer exists")
+    if body.group_name and not {"pcs", "pcs_updates"} & set(body.collectors):
+        raise HTTPException(400, "a group limits PC scans: tick PCs (inventory) or Windows updates, or clear the group")
 
 
 @app.post("/api/jobs")
@@ -1383,6 +1552,7 @@ def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Dep
     j.window_start, j.window_end = body.window_start, body.window_end
     j.max_parallel = body.max_parallel
     j.ip_methods = ",".join(m for m in scanning.IP_METHODS if m in body.ip_methods) or None
+    j.group_name = (body.group_name or "").strip() or None
     db.add(j)
     db.add(AuditLog(actor=actor, action="job.save", target=f"job:{j.name[:100]}", result=jobs.describe(j)))
     db.commit()

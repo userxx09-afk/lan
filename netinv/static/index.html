@@ -13,6 +13,7 @@
   <nav id="tabs">
     <button data-tab="overview" class="active">Dashboard</button>
     <button data-tab="computers">Computers</button>
+    <button data-tab="groups">Groups</button>
     <button data-tab="users">Users</button>
     <button data-tab="apps">Software</button>
     <button data-tab="portmap">Port map</button>
@@ -78,6 +79,14 @@
       </div>
     </div>
     <div class="tablewrap grid"><table><thead id="gridhead"></thead><tbody id="gridbody"></tbody></table></div>
+  </section>
+
+  <section id="groups" class="tab">
+    <div class="alerthead"><h2>Groups</h2>
+      <span class="muted">Groups built from rules (IP range, model, host name, AD OU...) update themselves as the inventory changes.</span></div>
+    <div class="gridbar"><div class="group"><button id="grpnew">New group</button>
+      <input id="grpfilter" placeholder="Filter groups"></div></div>
+    <div id="grptable"></div>
   </section>
 
   <section id="asset" class="tab">
