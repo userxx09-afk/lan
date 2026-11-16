@@ -189,6 +189,31 @@ the PC's History. The script's text is copied into each push when it's queued, s
 later never changes what an approved push runs; *Retry* runs the same text again. Saving and running scripts are in
 the audit log, with a fingerprint (SHA-256) of the text.
 
+## Groups (Groups tab)
+
+Make groups without picking PCs in the Computers list. A group is defined by conditions, by a list of names, or both:
+
+| Condition | Example | Matches |
+|---|---|---|
+| IP address or range | `10.1.20.0/24`, `10.1.20.10-80`, `10.1.20.5` | any of the PC's addresses |
+| Host name | `LAB-*`, `KIOSK??` | wildcards `*` and `?`; plain text = contains |
+| Hardware model / Manufacturer | `OptiPlex 70*`, `HP*` | contains, or wildcards |
+| AD OU | `corp.example.com/Sites/Office/PCs` or a DN | that OU and the OUs under it |
+| Operating system / State | `Windows 11`, `Stock` | |
+
+Combine them with *all of these match* or *any of these matches*; commas in one box mean "any of these", and each
+condition can be *is not* (handy to leave one PC out). The editor shows how many PCs match as you type.
+
+Members follow the inventory: rule-based membership is recalculated after every scan, every 5 minutes (agent
+reports, edits) and whenever the group is saved or used. *Always include these computers* keeps named PCs in the group
+whatever the rules say. A PC in a group only because of its rules shows a "rules" chip on its page instead of ×.
+Groups tagged by hand from the Computers list still work and show as "by hand".
+
+Use a group as a target: *Run script* and *Push agent* on the Groups tab (or the group choice in the script dialog),
+*Show in Computers* to act on its PCs with the usual buttons, and in a scan job (Settings > Scan schedule) *Only PCs
+in this group* limits PC inventory and Windows update scans to its members. Renaming a group carries its scan jobs
+along; a group a scan job uses can't be deleted until the job is changed.
+
 ## Dashboard drill-down
 
 Every number on the Dashboard opens the matching list: the KPI tiles (computers, inventoried, not inventoried,

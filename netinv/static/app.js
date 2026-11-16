@@ -265,7 +265,7 @@ document.querySelectorAll("[data-bulk]").forEach((b) => b.onclick = async () => 
     if (!value) return;
   }
   const r = await post("/api/bulk", { hostnames: [...grid.selected], action, value });
-  toast(`${b.textContent.trim()}: ${r.count} computer${r.count === 1 ? "" : "s"}`);
+  toast(`${b.textContent.trim()}: ${r.count} computer${r.count === 1 ? "" : "s"}${r.note ? `. ${r.note}` : ""}`, !!r.note);
   loaders.computers(); pollStatus();
 });
 
@@ -333,7 +333,9 @@ function renderAssetTab(d, tab) {
         </form>
       </div>
       <div class="panel"><h3>Groups</h3>
-        <div class="chips">${d.groups.map((g) => `<span class="chip">${esc(g)} <a data-rmgroup="${esc(g)}" title="Remove">×</a></span>`).join("") || `<span class="muted">None</span>`}</div>
+        <div class="chips">${d.groups.map((g) => (d.rule_groups || []).includes(g)
+          ? `<span class="chip" title="In this group because of the group's rules (Groups tab)">${esc(g)} <span class="muted small">rules</span></span>`
+          : `<span class="chip">${esc(g)} <a data-rmgroup="${esc(g)}" title="Remove">×</a></span>`).join("") || `<span class="muted">None</span>`}</div>
         <form id="groupform" class="inline"><input name="g" placeholder="Add to group"><button class="ghost">Add</button></form>
         <h3>Custom fields</h3>
         ${Object.entries(d.custom_fields).map(([k, x]) => kvRow(esc(k), `${esc(x)} <a class="link" data-rmfield="${esc(k)}">remove</a>`)).join("") || `<p class="muted">None</p>`}
@@ -345,7 +347,9 @@ function renderAssetTab(d, tab) {
     };
     $("#groupform").onsubmit = async (e) => { e.preventDefault(); const g = e.target.g.value.trim(); if (g) { await post(`/api/devices/${current}/groups`, { name: g }); openDevice(current); } };
     $("#fieldform").onsubmit = async (e) => { e.preventDefault(); const n = e.target.n.value.trim(); if (n) { await api(`/api/devices/${current}/fields`, { method: "PUT", body: JSON.stringify({ name: n, value: e.target.v.value }) }); openDevice(current); } };
-    el.querySelectorAll("[data-rmgroup]").forEach((a) => a.onclick = async () => { await api(`/api/devices/${current}/groups/${encodeURIComponent(a.dataset.rmgroup)}`, { method: "DELETE" }); openDevice(current); });
+    el.querySelectorAll("[data-rmgroup]").forEach((a) => a.onclick = async () => {
+      try { await api(`/api/devices/${current}/groups/${encodeURIComponent(a.dataset.rmgroup)}`, { method: "DELETE" }); } catch (e) { toast(errText(e), true); }
+      openDevice(current); });
     el.querySelectorAll("[data-rmfield]").forEach((a) => a.onclick = async () => { await api(`/api/devices/${current}/fields`, { method: "PUT", body: JSON.stringify({ name: a.dataset.rmfield, value: "" }) }); openDevice(current); });
   } else if (tab === "software") {
     const behind = d.software.filter((s) => s.status === "outdated").length;
@@ -512,8 +516,8 @@ async function editScript(x = {}) {
 }
 $("#scnew").onclick = () => editScript();
 const splitHosts = (t) => String(t || "").split(/[\s,;]+/).map((h) => h.trim()).filter(Boolean);
-async function runScriptDialog({ scriptId = null, hosts = [] } = {}) {
-  const d = scriptData || (await getScripts().catch(() => ({ scripts: [], groups: [] })));
+async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {}) {
+  const d = (!group && scriptData) || (await getScripts().catch(() => ({ scripts: [], groups: [] })));
   const one = hosts.length === 1 && !scriptId ? hosts[0] : null;
   const f = await formModal(`<h3>Run a script${one ? ` on ${esc(one)}` : ""}</h3>
     <label>Script <select name="sid"><option value="">A one-off command (type it below)</option>
@@ -525,7 +529,7 @@ async function runScriptDialog({ scriptId = null, hosts = [] } = {}) {
     ${one ? "" : `<label>On <select name="on">
         <option value="sel" ${hosts.length ? "selected" : ""}>the ${hosts.length} computer${hosts.length === 1 ? "" : "s"} selected in Computers</option>
         <option value="group" ${hosts.length ? "" : "selected"}>every computer in a group</option><option value="list">these computers</option></select></label>
-      <label id="sc-group">Group <select name="group">${(d.groups || []).map((g) => `<option>${esc(g)}</option>`).join("") || "<option value=''>(no groups yet)</option>"}</select></label>
+      <label id="sc-group">Group <select name="group">${(d.groups || []).map((g) => `<option ${g === group ? "selected" : ""}>${esc(g)}</option>`).join("") || "<option value=''>(no groups yet)</option>"}</select></label>
       <label id="sc-list">Computer names (one per line, or separated by commas) <textarea name="list" rows="4">${esc(hosts.join("\n"))}</textarea></label>`}
     ${SCRIPT_HELP}<p class="muted small">Offline PCs get it when they come back online. Follow it in Software &gt; Deployments.</p>`, true, (form) => {
     const sync = () => {
@@ -554,12 +558,13 @@ async function runScriptDialog({ scriptId = null, hosts = [] } = {}) {
 }
 $("#runscript").onclick = () => runScriptDialog({ hosts: [current] });
 // ------------------------------------------------------------ push the NetInventory Agent over WinRM (agentpush.py)
-async function pushAgentDialog(hosts) {
+async function pushAgentDialog(hosts, group = null) {
   let d;
   try { d = await api("/api/agents/push"); } catch (e) { return toast(errText(e), true); }
   if (!d.https) return toast("This server isn't on HTTPS yet. Agents only talk HTTPS: set up the certificate in Settings first.", true);
-  const one = hosts.length === 1 ? hosts[0] : null;
-  const f = await formModal(`<h3>Push the agent to ${one ? esc(one) : `${hosts.length} computers`}</h3>
+  const one = !group && hosts.length === 1 ? hosts[0] : null;
+  const who = group ? `every computer in the group ${group}` : one || `${hosts.length} computers`;
+  const f = await formModal(`<h3>Push the agent to ${esc(who)}</h3>
     <p class="muted small">Installs (or updates) the NetInventory Agent over WinRM with the scan credential, the same way as other
       deployments: no download on the PC and no enrollment token needed. Each PC gets a one-time ticket, is approved
       automatically, and only counts as done once its agent has reported to this server.</p>
@@ -573,11 +578,11 @@ async function pushAgentDialog(hosts) {
       Offline PCs get it when they come back online. Follow it in Software &gt; Deployments or the Agent column.</p>`, true);
   if (!f) return;
   const what = f.remove ? "Remove the agent from" : "Install the agent on";
-  if (!(await confirmBox(`${what} ${one || `${hosts.length} computers`}?`))) return;
+  if (!(await confirmBox(`${what} ${who}?`))) return;
   try {
-    const r = await post("/api/agents/push", { hostnames: hosts, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
+    const r = await post("/api/agents/push", { hostnames: hosts, group, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
     toast(r.output, !r.ok);
-    if (one && current === one) openDevice(one); else loaders.computers();
+    if (one && current === one) openDevice(one); else if (!group) loaders.computers();
   } catch (e) { toast(errText(e), true); }
 }
 $("#pushagent").onclick = () => pushAgentDialog([current]);
@@ -1412,6 +1417,9 @@ async function editJob(j = null) {
       <div class="days">${DAYS.map((d, i) => `<label class="check"><input type="checkbox" data-multi="1" name="d" value="${i}" ${v.days.includes(String(i)) ? "checked" : ""}> ${d}</label>`).join("")}</div>
       <label class="m-every">Only between <input name="window_start" type="number" min="0" max="23" placeholder="any" value="${v.window_start ?? ""}" style="width:4em">:00 and
         <input name="window_end" type="number" min="0" max="23" placeholder="any" value="${v.window_end ?? ""}" style="width:4em">:00 <span class="muted small">(server time; 18 and 6 means overnight)</span></label></fieldset>
+    <label>Only PCs in this group <select name="group_name"><option value="">(any: what the targets above cover)</option>
+      ${(jobData.groups || []).map((g) => `<option ${g === v.group_name ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
+      <span class="muted small">Limits PC inventory and Windows update scans to the group's computers. Credentials still come from the targets.</span></label>
     <label>PCs scanned at once over WinRM <input name="max_parallel" type="number" min="1" max="64" placeholder="16" value="${v.max_parallel ?? ""}" style="width:5em"></label>
     <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? "checked" : ""}> Enabled</label>`, true, (form) => {
       const sync = () => { const m = form.mode.value; form.querySelectorAll(".m-every").forEach((e) => e.hidden = m !== "every"); form.querySelectorAll(".m-daily").forEach((e) => e.hidden = m !== "daily"); };
@@ -1421,7 +1429,7 @@ async function editJob(j = null) {
   const num = (x) => (x === "" || x == null ? null : +x);
   const body = { name: f.name, enabled: f.enabled, target_ids: f.t.map(Number), collectors: f.c, days: f.d.join(""),
     every_min: f.mode === "every" ? (+f.every_n) * (+f.every_u) : null, at_time: f.mode === "daily" ? f.at_time : null,
-    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel), ip_methods: f.ipm };
+    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel), ip_methods: f.ipm, group_name: f.group_name || null };
   try { await post(`/api/jobs${j ? `?jid=${j.id}` : ""}`, body); toast("Scan job saved."); loadJobs(); }
   catch (e) { toast(errText(e), true); }
 }
@@ -1645,3 +1653,90 @@ try { start = localStorage.getItem("tab") || start; } catch {}
 route(start);
 pollStatus();
 loadUpdate();
+
+// ------------------------------------------------------------ groups (by hand, or rule-based: IP range, model, host name, OU...)
+let grpData = { groups: [], fields: {}, hints: {} };
+loaders.groups = async () => {
+  grpData = await api("/api/groups");
+  table($("#grptable"), grpData.groups.map((g) => ({ ...g, act: g.name })), ["name", "kind", "rule", "members", "scan_jobs", "act"], {
+    sort: "name", filterEl: $("#grpfilter"),
+    labels: { kind: "type", rule: "conditions", scan_jobs: "scan jobs", act: "" },
+    cell: {
+      name: (v, r) => `<a class="link" data-gmem="${esc(v)}">${esc(v)}</a>${r.description ? `<div class="muted small">${esc(r.description)}</div>` : ""}`,
+      kind: (v, r) => v === "rules" ? `<span class="pill good">rules</span>${r.manual ? ` <span class="muted small">+${r.manual} by hand</span>` : ""}` : `<span class="pill mute">by hand</span>`,
+      rule: (v) => `<span class="longtext">${esc(v)}</span>`,
+      scan_jobs: (v) => esc((v || []).join(", ")),
+      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
+    } });
+  const el = $("#grptable"), byName = (n) => grpData.groups.find((g) => g.name === n);
+  el.querySelectorAll("[data-gmem]").forEach((a) => a.onclick = () => groupMembers(a.dataset.gmem));
+  el.querySelectorAll("[data-gshow]").forEach((a) => a.onclick = async () => {
+    const m = (await api(`/api/groups/${encodeURIComponent(a.dataset.gshow)}/members`)).members.map((x) => x.hostname);
+    if (!m.length) return toast("This group has no computers yet.", true);
+    showComputers([{ field: "hostname", op: "in", value: m }], `Group ${a.dataset.gshow}`);
+  });
+  el.querySelectorAll("[data-gscript]").forEach((a) => a.onclick = () => runScriptDialog({ group: a.dataset.gscript }));
+  el.querySelectorAll("[data-gpush]").forEach((a) => a.onclick = () => pushAgentDialog([], a.dataset.gpush));
+  el.querySelectorAll("[data-gedit]").forEach((a) => a.onclick = () => editGroup(byName(a.dataset.gedit)));
+  el.querySelectorAll("[data-gdel]").forEach((a) => a.onclick = async () => {
+    const g = byName(a.dataset.gdel);
+    if (!(await confirmBox(`Delete the group "${g.name}"? Its ${g.members} computer${g.members === 1 ? "" : "s"} stay in the inventory; only the grouping goes.`))) return;
+    try { await api(`/api/groups/${encodeURIComponent(g.name)}`, { method: "DELETE" }); toast("Group deleted."); loaders.groups(); } catch (e) { toast(errText(e), true); }
+  });
+};
+async function groupMembers(name) {
+  const r = await api(`/api/groups/${encodeURIComponent(name)}/members`), g = grpData.groups.find((x) => x.name === name) || {};
+  drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Computers where ${esc(g.rule)}` : "Computers added by hand"}</p><div id="gmemtab"></div>`);
+  table($("#gmemtab"), r.members, ["hostname", "how"], { sort: "hostname", cell: { hostname: hostLink } });
+}
+const condRow = (i, c = { field: "hostname", value: "", not: false }) => `<div class="row gcond" data-i="${i}">
+  <select name="cf_${i}">${Object.entries(grpData.fields).map(([k, l]) => `<option value="${k}" ${k === c.field ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+  <select name="cn_${i}"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
+  <input name="cv_${i}" value="${esc(c.value)}" placeholder="${esc(grpData.hints[c.field] || "")}" style="flex:1">
+  <a class="link" data-rmcond="${i}" title="Remove this condition">×</a></div>`;
+const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => {
+  const i = r.dataset.i; return { field: form[`cf_${i}`].value, not: !!form[`cn_${i}`].value, value: form[`cv_${i}`].value };
+}).filter((c) => c.value.trim());
+async function editGroup(g = null, draft = null) {
+  if (!Object.keys(grpData.fields).length) grpData = await api("/api/groups");
+  const v = draft || g || { name: "", description: "", match: "all", conditions: [{ field: "ip", value: "", not: false }], kind: "rules" };
+  let members = draft ? draft.hostnames : [];
+  if (g && !draft) members = (await api(`/api/groups/${encodeURIComponent(g.name)}/members`)).members.filter((m) => m.how !== "rules").map((m) => m.hostname);
+  let n = 0;
+  const f = await formModal(`<h3>${g ? "Edit" : "New"} group</h3>
+    <label>Name <input name="name" value="${esc(v.name)}" placeholder="Lab PCs, 2nd floor, OptiPlex 7010" required></label>
+    <label>Description (optional) <input name="description" value="${esc(v.description || "")}"></label>
+    <fieldset><legend>Computers where <select name="match"><option value="all" ${v.match !== "any" ? "selected" : ""}>all of these match</option>
+        <option value="any" ${v.match === "any" ? "selected" : ""}>any of these matches</option></select></legend>
+      <div id="gconds">${(v.conditions.length ? v.conditions : [{ field: "hostname", value: "" }]).map((c) => condRow(n++, c)).join("")}</div>
+      <a class="link small" id="gaddcond">+ Add a condition</a>
+      <p class="muted small">Several values in one box, separated by commas, mean "any of these". Text matches anywhere in the name unless you use the wildcards * and ?.
+        An OU includes the OUs under it. Members follow the inventory: a PC that moves OU, changes IP or is renamed joins or leaves after the next scan.</p></fieldset>
+    <label>Always include these computers (optional; one per line or separated by commas)
+      <textarea name="hosts" rows="3" placeholder="PC-0142">${esc(members.join("\n"))}</textarea></label>
+    <div id="gprev" class="hint muted">Checking...</div>`, true, (form) => {
+    let t;
+    const preview = () => { clearTimeout(t); t = setTimeout(async () => {
+      if (!form.isConnected) return;
+      try {
+        const r = await post("/api/groups/preview", { name: "x", match: form.match.value, conditions: readConds(form), hostnames: splitHosts(form.hosts.value) });
+        if (form.isConnected) $("#gprev").innerHTML = `<b>${r.count} computer${r.count === 1 ? "" : "s"}</b> right now${r.hostnames.length ? `: ${esc(r.hostnames.slice(0, 40).join(", "))}${r.count > 40 ? ", ..." : ""}` : ""}`;
+      } catch (e) { if (form.isConnected) $("#gprev").textContent = errText(e); }
+    }, 350); };
+    const wire = () => {
+      form.querySelectorAll("[data-rmcond]").forEach((a) => a.onclick = () => { a.closest(".gcond").remove(); preview(); });
+      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; preview(); });
+    };
+    form.querySelector("#gaddcond").onclick = () => { form.querySelector("#gconds").insertAdjacentHTML("beforeend", condRow(n++)); wire(); };
+    form.addEventListener("input", preview); form.addEventListener("change", preview);
+    wire(); preview();
+  });
+  if (!f) return;
+  const body = { name: f.name, description: f.description, match: f.match, conditions: [], hostnames: splitHosts(f.hosts) };
+  for (const k of Object.keys(f)) if (k.startsWith("cf_")) { const i = k.slice(3); if ((f[`cv_${i}`] || "").trim()) body.conditions.push({ field: f[k], not: !!f[`cn_${i}`], value: f[`cv_${i}`] }); }
+  try {
+    const r = await post(`/api/groups${g ? `?old=${encodeURIComponent(g.name)}` : ""}`, body);
+    toast(`Group saved: ${r.members} computer${r.members === 1 ? "" : "s"}.`); loaders.groups(); scriptData = null;
+  } catch (e) { toast(errText(e), true); editGroup(g, body); }
+}
+$("#grpnew").onclick = () => editGroup();
