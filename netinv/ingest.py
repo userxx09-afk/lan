@@ -217,11 +217,13 @@ def add_logons(db: Session, logons: list[LogonIn]) -> int:
             continue
         if excl.host(l.hostname) or excl.ip(l.ip):
             continue
-        rows.append(dict(time=_naive(l.time), username=user, hostname=norm_host(l.hostname),
-                         ip=l.ip, logon_type=l.logon_type, source=l.source))
+        rows.append(dict(time=_naive(l.time), username=user[:128], hostname=(norm_host(l.hostname) or None) and norm_host(l.hostname)[:64],
+                         ip=(l.ip or None) and l.ip[:64], logon_type=l.logon_type, source=(l.source or None) and l.source[:64]))
     if not rows:
         return 0
     dialect = db.get_bind().dialect.name
     ins = pg_insert if dialect == "postgresql" else sqlite_insert
-    db.execute(ins(LogonEvent).values(rows).on_conflict_do_nothing())
+    # One INSERT per 1,000 rows: PostgreSQL allows at most 65,535 parameters per statement (a DC can return 50,000 events).
+    for i in range(0, len(rows), 1000):
+        db.execute(ins(LogonEvent).values(rows[i:i + 1000]).on_conflict_do_nothing())
     return len(rows)

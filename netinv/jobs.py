@@ -25,6 +25,9 @@ ALL_ORDER = ["ad", "snmp", "pcs", "dc_logons"]
 DEFAULT_INTERVALS = {"ad": 60, "snmp": 15, "pcs": 240, "pcs_updates": 1440, "dc_logons": 30}
 
 
+short_error = scanning.short_error
+
+
 def run_job(name: str) -> CollectorRun:
     RUNNING[name] = time.time()
     run = progress.start(f"manual:{name}:{threading.get_ident()}", name, steps=[name], who="Scan now")
@@ -52,7 +55,7 @@ def _run_job(name: str) -> CollectorRun:
         except Exception as exc:
             db.rollback()
             log.exception("job %s failed", name)
-            run.ok, run.message = False, f"{type(exc).__name__}: {exc}"
+            run.ok, run.message = False, short_error(exc)
         run.finished = utcnow()
         db.add(run)
         db.commit()
@@ -237,7 +240,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
                         db.rollback()
                         log.exception("scan job %s, %s failed", name, c)
                         ok = False
-                        parts.append(f"{c}: failed ({type(exc).__name__}: {exc})")
+                        parts.append(f"{c}: failed ({short_error(exc)})")
             msg = ("; ".join(parts) or "nothing to do") + ("" if who == "schedule" else f" (started by {who})")
             if prog.stop.is_set():
                 ok = False

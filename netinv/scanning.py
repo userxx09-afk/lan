@@ -50,6 +50,13 @@ def _creds(db: Session, targets: list[ScanTarget], kinds: tuple[str, ...]) -> li
     return out
 
 
+def short_error(exc: Exception) -> str:
+    """Database errors carry the whole SQL statement and its parameters (thousands of lines): keep the reason only."""
+    orig = getattr(exc, "orig", None)
+    msg = str(orig if orig is not None else exc).strip().split("\n")[0]
+    return f"{type(orig if orig is not None else exc).__name__}: {msg}"[:500]
+
+
 # A scheduled scan job narrows every scan in its thread to its own targets (see jobs.py).
 SCOPE = threading.local()
 
@@ -203,8 +210,8 @@ def run_ad(db: Session) -> str:
                 db.rollback()
                 err = exc
         if err:
-            _finish(db, ts, False, str(err))
-            msgs.append(f"{dom}: failed ({err})")
+            _finish(db, ts, False, short_error(err))
+            msgs.append(f"{dom}: failed ({short_error(err)})")
     return "; ".join(msgs)
 
 
@@ -309,8 +316,8 @@ def run_ip(db: Session) -> str:
             msgs.append(f"{t.value}: {msg}")
         except Exception as exc:
             db.rollback()
-            _finish(db, [t], False, str(exc))
-            msgs.append(f"{t.value}: failed ({exc})")
+            _finish(db, [t], False, short_error(exc))
+            msgs.append(f"{t.value}: failed ({short_error(exc)})")
     moved = track_port_moves(db)
     return ("; ".join(msgs) or "No IP range targets configured.") + (f" {moved} PCs moved port." if moved else "")
 

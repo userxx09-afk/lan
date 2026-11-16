@@ -274,7 +274,7 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
     prog = progress.current()
     if prog:
         prog.hosts(len(dcs))
-    total = 0
+    total, errors = 0, []
     for dc in dcs:
         if prog and prog.stop.is_set():
             break
@@ -293,8 +293,16 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
             continue
         if isinstance(rows, dict):
             rows = [rows]
-        total += add_logons(db, [LogonIn(source=f"dc:{dc.hostname}", **r) for r in rows])
-        db.commit()
+        try:
+            total += add_logons(db, [LogonIn(source=f"dc:{dc.hostname}", **r) for r in rows])
+            db.commit()
+        except Exception as exc:
+            from ..scanning import short_error
+            db.rollback()
+            errors.append(f"{dc.hostname}: {short_error(exc)}")
+            if prog:
+                prog.host_end(dc.hostname, False)
+            continue
         if prog:
             prog.host_end(dc.hostname, True)
-    return f"{total} logon events from {len(dcs)} DCs"
+    return f"{total} logon events from {len(dcs)} DCs" + (f"; failed: {'; '.join(errors)}" if errors else "")
