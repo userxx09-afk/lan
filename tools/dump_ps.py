@@ -43,6 +43,13 @@ for name in ("WU_SCRIPT", "WINGET_SCRIPT", "REMOVE_SCRIPT", "LAUNCH", "RESULT", 
         s = s.replace(k, v)          # filled in the same way before a script is sent
     seen.append(s)
 
+from netinv import agentpush  # noqa: E402
+for s in (agentpush.INSTALL, agentpush.REMOVE):
+    for k, v in {"__NAME__": "agent-install", "__SERVER__": "https://netinv.corp.local:8080", "__TOKEN__": "nip_x",
+                 "__PIN__": "AB" * 32, "__RUNAS__": "LOCALSERVICE", "__KIND__": "msi", "__BITS__": ""}.items():
+        s = s.replace(k, v)
+    seen.append(s)
+
 for i, s in enumerate(seen):
     (out / f"script{i:02d}.ps1").write_text(s, encoding="utf-8-sig")
 print(f"{len(seen)} scripts written to {out}")

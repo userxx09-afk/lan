@@ -199,7 +199,7 @@ def test_auth(body: LoginIn, request: Request, actor=Depends(ui_auth), db=Depend
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
-from . import agentapi  # noqa: E402
+from . import agentapi, agentpush  # noqa: E402
 app.include_router(agentapi.router)
 
 
@@ -1441,7 +1441,7 @@ def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_sess
 
 
 # ----------------------------------------------------------------- NetInventory Agent (see agentapi.py)
-AGENT_MSI = "https://github.com/userxx09-afk/Prod/releases/download/lan-latest/NetInventory-Agent.msi"
+AGENT_MSI = "https://github.com/userxx09-afk/prod/releases/download/lan-latest/NetInventory-Agent.msi"
 
 
 def _agent_out(a) -> dict:
@@ -1460,7 +1460,8 @@ def agents_list(request: Request, db=Depends(db_session)):
                       "hint": get_setting(db, "agent:token_hint", None)},
             "approve": agentapi.approve_mode(db), "inventory_hours": agentapi.inventory_hours(db),
             "pin": tls.get("sha256"), "https": tls.get("https", False), "server": str(request.base_url).rstrip("/"),
-            "msi_url": AGENT_MSI,
+            "msi_url": "/api/agents/msi" if agentpush.msi_path() else AGENT_MSI, "msi_local": bool(agentpush.msi_path()),
+            "msi_folder": str(agentpush.msi_path().parent) if agentpush.msi_path() else None,
             "agents": [_agent_out(a) for a in db.scalars(select(Agent).order_by(Agent.status != "pending", Agent.hostname))]}
 
 
@@ -1517,6 +1518,63 @@ def agents_action(aid: int, what: str, actor=Depends(ui_auth), db=Depends(db_ses
     db.commit()
     return {"ok": True, "output": {"approve": f"{a.hostname} approved.", "revoke": f"{a.hostname}'s agent revoked: it can't report any more.",
                                    "inventory": f"{a.hostname} sends its inventory within 5 minutes.", "delete": "Removed."}[what]}
+
+
+@app.get("/api/agents/msi", dependencies=UI)
+def agents_msi():
+    """The agent MSI that came with this server, so nobody has to fetch it from the internet."""
+    p = agentpush.msi_path()
+    if not p:
+        raise HTTPException(404, "This server has no agent MSI; download it from the prod release.")
+    return FileResponse(p, media_type="application/x-msi", filename="NetInventory-Agent.msi",
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/agents/push", dependencies=UI)
+def agents_push_info(request: Request, db=Depends(db_session)):
+    return agentpush.status(db, str(request.base_url))
+
+
+class AgentPushIn(BaseModel):
+    hostnames: list[str] = []
+    group: str | None = None
+    run_as: str = "LOCALSERVICE"
+    server_url: str
+    remove: bool = False
+
+
+@app.post("/api/agents/push")
+def agents_push(body: AgentPushIn, user=Depends(ui_auth)):
+    """Install (or remove) the agent on PCs over WinRM through the deployment queue (agentpush.py)."""
+    with SessionLocal() as db:
+        if not body.remove:
+            try:
+                url = agentpush.check_url(body.server_url)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            if not agentpush.pin():
+                raise HTTPException(400, "This server isn't on HTTPS. Agents only talk HTTPS: set up the certificate in Settings first.")
+            if body.run_as not in agentpush.RUN_AS:
+                raise HTTPException(400, "bad account")
+            if get_setting(db, "agent:server_url", None) != url:
+                set_setting(db, "agent:server_url", url)
+                db.add(AuditLog(actor=user, action="agent.settings", target="agent", result=f"server address for pushes: {url}"))
+            db.commit()
+        hosts = list(body.hostnames)
+        if body.group:
+            hosts += list(db.scalars(select(Device.hostname).join(DeviceGroup, DeviceGroup.device_id == Device.id)
+                                     .where(DeviceGroup.name == body.group)))
+    if not hosts:
+        raise HTTPException(400, "pick at least one computer")
+    if len(set(hosts)) > 2000:
+        raise HTTPException(400, "at most 2,000 computers at a time")
+    try:
+        n = fixes.run_many(hosts, "agent_remove" if body.remove else "agent_install", user, None if body.remove else body.run_as)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, "count": n, "output": f"{'Removal' if body.remove else 'Agent install'} queued for {n} computer{'s' if n != 1 else ''}. "
+                                               "Each PC's result shows in Software > Deployments and in the Agent column; "
+                                               "offline PCs get it when they come back online."}
 
 
 # ----------------------------------------------------------------- software updates (see updater.py)

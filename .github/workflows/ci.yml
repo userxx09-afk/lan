@@ -41,6 +41,7 @@ jobs:
           python tests/test_catalog.py
           python tests/test_scripts.py
           python tests/test_pctools.py
+          python tests/test_agentpush.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
       - name: Agent inventory script matches the WinRM one
@@ -52,6 +53,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # Built before the server installer, which ships it so the server can serve and push it.
+      - name: Build agent MSI
+        continue-on-error: true      # never let the optional agent block the server release
+        shell: powershell
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
+          .\installer\agent\build-agent.ps1 -Version $v
       - name: Build installer
         shell: powershell
         env:
@@ -82,12 +90,6 @@ jobs:
             if ($err) { $bad++; Write-Host (Get-Content $f.FullName -TotalCount 3 | Out-String); $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
           }
           if ($bad) { exit 1 }
-      - name: Build agent MSI
-        continue-on-error: true      # never let the optional agent block the server release
-        shell: powershell
-        run: |
-          $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
-          .\installer\agent\build-agent.ps1 -Version $v
       # Published straight from this job: no Actions artifact, so the account's artifact storage
       # quota (shared with the other apps) can't block a release.
       # Installable builds live in the public, releases-only prod repo (this source repo is private):
