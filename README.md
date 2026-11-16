@@ -162,7 +162,18 @@ Over WinRM, live, on demand:
   uninstaller; anything else is refused rather than left half-removed) and **Repair** (MSI). These go through the
   deployment queue, so they wait for an offline PC and their result lands in the deployment log.
 
-Every change is confirmed first and written to the audit log and the PC's History.
+- **Registry**: browse HKLM, HKU (each user's hive by SID) and HKCR; create, edit (String, Expandable string,
+  DWORD, QWORD, Multi-string) and delete values, create keys, delete keys (three or more levels deep). The old value
+  is recorded with every change. SAM, SECURITY and the Lsa key are read-only here.
+- **Printers & drives**: the PC's printers (status, waiting jobs, driver, port, shared); print a test page, clear a
+  queue, remove a printer, and add a shared printer for every user of the PC (`printui /ga`, appears at their next
+  sign-in). Below: the mapped drives and recently used shares of each signed-in user.
+- **Local accounts**: members of the local Administrators group (add a DOMAIN\user or group, remove one) and the
+  local user accounts (enabled, admin, last sign-in; enable/disable). The built-in Administrator, Domain Admins and
+  the account NetInventory signs in with can't be removed or disabled from here.
+
+Every change is confirmed first and written to the audit log and the PC's History. Text typed in the browser is
+sent to the PC as data (base64-encoded), never pasted into the script as code.
 
 ## Scripts (Software > Scripts)
 

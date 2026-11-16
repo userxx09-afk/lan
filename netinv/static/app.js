@@ -365,6 +365,12 @@ function renderAssetTab(d, tab) {
     loadProcesses(el);
   } else if (tab === "services") {
     loadServices(el);
+  } else if (tab === "registry") {
+    loadRegistry(el);
+  } else if (tab === "printers") {
+    loadPrinters(el);
+  } else if (tab === "accounts") {
+    loadAccounts(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -586,6 +592,108 @@ async function loadServices(el) {
     catch (er) { toast(errText(er), true); }
     loadServices(el);
   });
+}
+
+// ------------------------------------------------------------ registry, printers and drives, local accounts (live, over WinRM)
+const asking = () => `<p class="muted"><span class="spinner tiny"></span> Asking ${esc(current)}…</p>`;
+const toolErr = (el, e) => { el.innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; };
+const hostApi = (p) => `/api/devices/${encodeURIComponent(current)}/${p}`;
+let regPath = "HKLM\\SOFTWARE";
+const REG_KIND = { String: "String (REG_SZ)", ExpandString: "Expandable string (REG_EXPAND_SZ)", DWord: "DWORD (32-bit number)", QWord: "QWORD (64-bit number)", MultiString: "Multi-string (one per line)" };
+async function regChange(el, body, ask) {
+  if (ask && !(await confirmBox(ask))) return;
+  try { const r = await post(hostApi("registry"), { path: regPath, ...body }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+  loadRegistry(el);
+}
+async function regEdit(el, v = {}) {
+  const f = await formModal(`<h3>${v.name !== undefined ? "Edit value" : "New value"} in ${esc(regPath)}</h3>
+    <label>Name <input name="name" value="${esc(v.name ?? "")}" placeholder="empty = (Default)" ${v.name !== undefined ? "readonly" : ""}></label>
+    <label>Type <select name="kind">${Object.entries(REG_KIND).filter(([k]) => !v.type || v.type === k || !REG_KIND[v.type]).map(([k, l]) => `<option value="${k}" ${v.type === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label>Data <textarea name="data" class="code" rows="4" spellcheck="false">${esc(v.type === "DWord" ? String(v.data || "").split(" ")[0] : v.data ?? "")}</textarea></label>
+    <p class="muted small">Numbers can be decimal or hex (0x1F). The old value is kept in the PC's History and the audit log.</p>`, true);
+  if (!f) return;
+  regChange(el, { op: "set", name: f.name, kind: f.kind, data: f.data }, `Set ${regPath}\\${f.name || "(Default)"} on ${current}?`);
+}
+async function loadRegistry(el) {
+  el.innerHTML = `<div class="toolbar"><input id="regpath" class="wide" value="${esc(regPath)}" spellcheck="false"><button id="reggo">Open</button>
+    <button class="ghost" id="regup">Up</button><button class="ghost" id="regnewk">New key</button><button class="ghost" id="regnewv">New value</button>
+    <button class="ghost danger" id="regdelk">Delete this key</button></div>
+    <p class="muted small">HKLM, HKU (each user by SID) and HKCR, live from ${esc(current)}. Every change is confirmed and logged with the old value. Account and security-policy keys (SAM, SECURITY, Lsa) are read-only here.</p>
+    <div class="regcols"><div id="regkeys">${asking()}</div><div id="regvals"></div></div>`;
+  const go = (p) => { regPath = p; loadRegistry(el); };
+  $("#reggo").onclick = () => go($("#regpath").value.trim());
+  $("#regpath").onkeydown = (e) => { if (e.key === "Enter") go($("#regpath").value.trim()); };
+  $("#regup").onclick = () => regPath.includes("\\") && go(regPath.slice(0, regPath.lastIndexOf("\\")));
+  $("#regnewv").onclick = () => regEdit(el);
+  $("#regnewk").onclick = async () => { const n = await ask(`New key under ${regPath}`); if (n) regChange(el, { op: "new_key", name: n }); };
+  $("#regdelk").onclick = () => regChange(el, { op: "delete_key" }, `Delete ${regPath} and everything under it on ${current}? This can't be undone from here.`);
+  let d;
+  try { d = await api(hostApi(`registry?path=${encodeURIComponent(regPath)}`)); } catch (e) { return toolErr($("#regkeys"), e); }
+  regPath = d.path; $("#regpath").value = d.path;
+  $("#regkeys").innerHTML = `<div class="regkeys">${d.subkeys.map((k) => `<a class="link" data-rk="${esc(k)}">${esc(k)}</a>`).join("") || `<span class="muted">No subkeys</span>`}</div>`;
+  $("#regkeys").querySelectorAll("[data-rk]").forEach((a) => a.onclick = () => go(`${regPath}\\${a.dataset.rk}`));
+  table($("#regvals"), d.values.map((v) => ({ ...v, act: v.name })), ["name", "type", "data", "act"], {
+    labels: { act: "" },
+    cell: { name: (v) => esc(v || "(Default)"), data: (v) => `<span class="longtext small code">${esc(v)}</span>`,
+      act: (n, r) => `${REG_KIND[r.type] ? `<a class="link" data-rv="${esc(n)}">Edit</a> &nbsp; ` : ""}<a class="link" data-rdel="${esc(n)}">Delete</a>` } });
+  $("#regvals").querySelectorAll("[data-rv]").forEach((a) => a.onclick = () => regEdit(el, d.values.find((v) => v.name === a.dataset.rv)));
+  $("#regvals").querySelectorAll("[data-rdel]").forEach((a) => a.onclick = () => regChange(el, { op: "delete_value", name: a.dataset.rdel }, `Delete the value ${a.dataset.rdel || "(Default)"} in ${regPath} on ${current}?`));
+}
+async function loadPrinters(el) {
+  el.innerHTML = `<div class="toolbar"><button id="pradd">Add a shared printer for every user</button><button class="ghost" id="prref2">Refresh</button></div>
+    <h2>Printers</h2><div id="prtab">${asking()}</div>
+    <h2>Mapped drives of users who are signed in</h2><p class="muted small">Persistent drive mappings (and shares used recently) from the registry of each signed-in user.</p><div id="drtab"></div>`;
+  $("#prref2").onclick = () => loadPrinters(el);
+  $("#pradd").onclick = async () => {
+    const n = await ask("Shared printer, as \\\\server\\printer. It's added for every user of this PC (at their next sign-in).");
+    if (!n) return;
+    try { const r = await post(hostApi("printers"), { op: "add", name: n.trim() }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    loadPrinters(el);
+  };
+  let d;
+  try { d = await api(hostApi("printers")); } catch (e) { return toolErr($("#prtab"), e); }
+  table($("#prtab"), d.printers.map((p) => ({ ...p, act: p.name })), ["name", "status", "jobs", "driver", "port", "shared", "location", "act"], {
+    labels: { act: "" },
+    cell: { name: (v, r) => esc(v) + (r.machine_wide ? ` <span class="pill mute small">every user</span>` : r.network ? ` <span class="pill mute small">network</span>` : ""),
+      shared: (v, r) => (v ? `yes (${esc(r.share || "")})` : ""), status: (v) => `<span class="pill ${v === "ready" ? "good" : v === "offline" || v === "stopped" ? "bad" : "mute"}">${esc(v || "")}</span>`,
+      act: (n, r) => [!r.machine_wide && `<a class="link" data-pr="test" data-n="${esc(n)}">Test page</a>`, r.jobs && `<a class="link" data-pr="clear" data-n="${esc(n)}">Clear queue</a>`,
+        `<a class="link" data-pr="remove" data-n="${esc(n)}">Remove</a>`].filter(Boolean).join(" &nbsp; ") } });
+  $("#prtab").querySelectorAll("[data-pr]").forEach((a) => a.onclick = async () => {
+    const op = a.dataset.pr, n = a.dataset.n;
+    const q = { test: `Print a test page on ${n}?`, clear: `Delete every job waiting in the ${n} queue?`, remove: `Remove the printer ${n} from ${current}?` }[op];
+    if (!(await confirmBox(q))) return;
+    try { const r = await post(hostApi("printers"), { op, name: n }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    loadPrinters(el);
+  });
+  table($("#drtab"), d.drives, ["user", "drive", "path", "kind"], { cell: { user: (v) => esc(v || "") } });
+}
+async function loadAccounts(el) {
+  el.innerHTML = `<div class="toolbar"><button id="admadd">Add to Administrators</button><button class="ghost" id="accref">Refresh</button></div>
+    <h2>Members of the local Administrators group</h2><div id="admtab">${asking()}</div><h2>Local user accounts</h2><div id="lutab"></div>`;
+  $("#accref").onclick = () => loadAccounts(el);
+  const act = async (op, name, q) => {
+    if (!(await confirmBox(q))) return;
+    try { const r = await post(hostApi("accounts"), { op, name }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    loadAccounts(el);
+  };
+  $("#admadd").onclick = async () => {
+    const n = await ask("User or group to add, as DOMAIN\\name (for example CORP\\Helpdesk)");
+    if (n) act("add_admin", n.trim(), `Make ${n.trim()} a local administrator of ${current}?`);
+  };
+  let d;
+  try { d = await api(hostApi("accounts")); } catch (e) { return toolErr($("#admtab"), e); }
+  table($("#admtab"), d.members.map((m) => ({ ...m, act: m.name })), ["name", "type", "sid", "act"], {
+    labels: { act: "" },
+    cell: { name: (v, r) => esc(v) + (r.builtin ? ` <span class="pill mute small">built-in</span>` : r.local ? ` <span class="pill mute small">local</span>` : ""),
+      sid: (v) => `<span class="muted small">${esc(v || "")}</span>`,
+      act: (n, r) => (r.builtin ? "" : `<a class="link" data-rmadm="${esc(n)}">Remove</a>`) } });
+  $("#admtab").querySelectorAll("[data-rmadm]").forEach((a) => a.onclick = () => act("remove_admin", a.dataset.rmadm, `Remove ${a.dataset.rmadm} from the local Administrators of ${current}? It takes effect at their next sign-in.`));
+  table($("#lutab"), d.users.map((u) => ({ ...u, act: u.name })), ["name", "full_name", "enabled", "admin", "last_logon", "description", "act"], {
+    labels: { act: "", last_logon: "last sign-in" },
+    cell: { enabled: (v, r) => `<span class="pill ${v ? "good" : "mute"}">${v ? "enabled" : "disabled"}</span>` + (r.locked ? ` <span class="pill bad">locked</span>` : ""),
+      admin: (v) => (v ? "yes" : ""), last_logon: (v) => esc(v ? fmtDate(utcLocal(v)) : "never"), description: (v) => `<span class="small muted">${esc(v || "")}</span>`,
+      act: (n, r) => `<a class="link" data-lu="${r.enabled ? "disable" : "enable"}" data-n="${esc(n)}">${r.enabled ? "Disable" : "Enable"}</a>` } });
+  $("#lutab").querySelectorAll("[data-lu]").forEach((a) => a.onclick = () => act(a.dataset.lu, a.dataset.n, `${a.dataset.lu === "disable" ? "Disable" : "Enable"} the local account ${a.dataset.n} on ${current}?`));
 }
 
 // ------------------------------------------------------------ deployment queue and log

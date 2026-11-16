@@ -432,6 +432,68 @@ class AdhocIn(BaseModel):
     timeout: int = 10
 
 
+@app.get("/api/devices/{hostname}/registry", dependencies=UI)
+def device_registry(hostname: str, path: str = "HKLM\\SOFTWARE", db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    try:
+        pctools.reg_split(path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _tool(lambda: pctools.registry(db, dev, path))
+
+
+class RegIn(BaseModel):
+    op: str
+    path: str
+    name: str = ""
+    kind: str = "String"
+    data: str = ""
+
+
+@app.post("/api/devices/{hostname}/registry")
+def device_registry_change(hostname: str, body: RegIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    try:
+        return _tool(lambda: pctools.reg_change(db, dev, user, body.op, body.path, body.name, body.kind, body.data))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/devices/{hostname}/printers", dependencies=UI)
+def device_printers(hostname: str, db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return {"printers": _tool(lambda: pctools.printers(db, dev)), "drives": _tool(lambda: pctools.drives(db, dev))}
+
+
+class NameOpIn(BaseModel):
+    op: str
+    name: str
+
+
+@app.post("/api/devices/{hostname}/printers")
+def device_printer_change(hostname: str, body: NameOpIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.printer_change(db, dev, user, body.op, body.name))
+
+
+@app.get("/api/devices/{hostname}/accounts", dependencies=UI)
+def device_accounts(hostname: str, db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.local_accounts(db, dev))
+
+
+@app.post("/api/devices/{hostname}/accounts")
+def device_account_change(hostname: str, body: NameOpIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import pctools
+    dev = _device(db, hostname)
+    return _tool(lambda: pctools.local_change(db, dev, user, body.op, body.name))
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None

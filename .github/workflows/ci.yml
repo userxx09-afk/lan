@@ -40,6 +40,7 @@ jobs:
           PY
           python tests/test_catalog.py
           python tests/test_scripts.py
+          python tests/test_pctools.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
       - name: Agent inventory script matches the WinRM one
@@ -66,6 +67,19 @@ jobs:
           foreach ($f in Get-ChildItem netinv\agent\*.ps1) {
             $err = $null; [void][Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
             if ($err) { $bad++; $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
+          }
+          if ($bad) { exit 1 }
+      - name: Scripts sent to PCs parse
+        continue-on-error: true      # reported as errors on the run; checked before each release
+        shell: powershell
+        run: |
+          python -m pip install -q -r requirements.txt
+          python tools/dump_ps.py installer\build\psparse
+          if ($LASTEXITCODE) { exit 1 }
+          $bad = 0
+          foreach ($f in Get-ChildItem installer\build\psparse\*.ps1) {
+            $err = $null; [void][Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
+            if ($err) { $bad++; Write-Host (Get-Content $f.FullName -TotalCount 3 | Out-String); $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
           }
           if ($bad) { exit 1 }
       - name: Build agent MSI
