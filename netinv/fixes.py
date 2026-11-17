@@ -77,13 +77,21 @@ try {
   $wg = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue |
         Sort-Object { [version]($_.Directory.Name -split '_')[1] } | Select-Object -Last 1
   if (-not $wg) { throw 'winget (App Installer) is not installed on this PC' }
+  # Installed programs before and after, so the server can confirm the new version is really there
+  $snap = { @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -and -not $_.SystemComponent -and -not $_.ParentKeyName } |
+    ForEach-Object { @{ name = "$($_.DisplayName)"; version = "$($_.DisplayVersion)"; publisher = "$($_.Publisher)"; product_code = $_.PSChildName } }) }
+  $res.before = & $snap
   $out = & $wg.FullName upgrade --id '__PKG__' --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
   $res.exit = $LASTEXITCODE
   $res.output = ($out -replace '[^\x20-\x7E\r\n]', '').Trim()
   if ($res.output.Length -gt 1500) { $res.output = $res.output.Substring($res.output.Length - 1500) }
   # 0 = updated; 0x8A15002B = no newer version applies to this install
   $res.ok = ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189)
-  $res.message = if ($LASTEXITCODE -eq 0) { 'Updated' } elseif ($LASTEXITCODE -eq -1978335189) { 'Already up to date for this install' } else { "winget exit code $LASTEXITCODE" }
+  $res.message = if ($LASTEXITCODE -eq 0) { 'winget finished' } elseif ($LASTEXITCODE -eq -1978335189) { 'winget found no applicable upgrade' } else { "winget exit code $LASTEXITCODE" }
+  Start-Sleep -Seconds 5          # some installers return before they finish writing their uninstall entry
+  $res.after = & $snap
 } catch { $res.message = "$_" }
 $res
 '''
@@ -119,6 +127,11 @@ try {
   }
   $res.exit = $code
   $res.ok = ($code -in 0, 1641, 3010)
+  if ('__MODE__' -eq 'remove') {
+    Start-Sleep -Seconds 5
+    $res.still_installed = [bool](@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') |
+      Where-Object { Test-Path "$_\__KEY__" })
+  }
   $res.message = switch ($code) { 0 { 'Done' } 1641 { 'Done, the PC is restarting' } 3010 { 'Done, needs a restart' } 1605 { 'Not installed' } 1618 { 'Another installation is running; try again later' } default { "Exit code $code" } }
 } catch { $res.message = "$_" }
 $res
@@ -498,6 +511,62 @@ def _send(dep_id: int) -> None:
             _inflight.discard(dep_id)
 
 
+RESCAN_AFTER = {"app_update", "app_uninstall", "app_repair", "windows_updates"}
+WINGET_CODES = {
+    -1978335189: "winget found no applicable upgrade for this install. Common causes: it was installed for one user only, "
+                 "with a different installer type than the catalog's, or the newest version doesn't support this PC",
+    -1978335212: "winget couldn't find this program installed on the PC",
+    -1978334967: "the update needs a restart of the PC to finish",            # 0x8A150109
+    -1978334966: "the PC has to restart before this update can install",     # 0x8A15010A
+    -1978334975: "the app is in use; close it and try again",                 # 0x8A150101
+    -1978334974: "another installation is running; try again later",         # 0x8A150102
+    -1978334973: "a file the installer needs is in use; close the app and try again",   # 0x8A150103
+}
+
+
+def verify_update(db, pkg: str, res: dict) -> tuple[bool, str]:
+    """Success only if the PC now has the catalog's version (or newer) of pkg, whatever winget's exit code said."""
+    from . import catalog
+    code = res.get("exit")
+    if code is None:                       # the script failed before winget ran
+        return False, res.get("message") or "winget didn't run"
+    have_after = catalog.installed_versions(db, pkg, res.get("after") or [])
+    have_before = catalog.installed_versions(db, pkg, res.get("before") or [])
+    target = catalog.target_version(pkg)
+    why = WINGET_CODES.get(code) or (f"winget exit code {code} (0x{code & 0xFFFFFFFF:08X})" if code else "")
+    out = (res.get("output") or "").strip()
+    tail = f"\nwinget output:\n{out[-800:]}" if out else ""
+    if not have_after:
+        return False, (f"{pkg} isn't in the PC's installed programs after the update" + (f"; {why}" if why else "")
+                       + ". It may be installed for one user only." + tail)
+    now = max(have_after, key=catalog.vt)
+    was = max(have_before, key=catalog.vt) if have_before else None
+    if target and catalog.vt(now) >= catalog.vt(target):
+        return True, f"Updated {pkg}: {was or '?'} -> {now} (confirmed on the PC)"
+    if not target and was and catalog.vt(now) > catalog.vt(was):
+        return True, f"Updated {pkg}: {was} -> {now} (confirmed on the PC)"
+    still = f"still {now}" + (f", latest is {target}" if target else "")
+    if code == 0:
+        why = "winget reported success, but the new version isn't installed. The app may have been running, or the update finishes after a restart"
+    return False, f"Not updated ({still}): {why}." + tail
+
+
+_rescan_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rescan")
+
+
+def _rescan_later(hostname: str, check_pending: bool = False) -> None:
+    """Refresh the PC's inventory so the Software tab shows the version that is really installed now
+    (four at a time, so a deployment to many PCs doesn't start hundreds of scans at once)."""
+    from .actions import rescan
+
+    def go():
+        try:
+            rescan(hostname, wait=True, check_pending=check_pending)
+        except Exception:
+            log.exception("rescan after deployment on %s", hostname)
+    _rescan_pool.submit(go)
+
+
 def _check_running(db, dep) -> None:
     from .db import utcnow, norm_host
     from datetime import timedelta
@@ -535,8 +604,14 @@ def _check_running(db, dep) -> None:
             from .db import Agent
             for a in db.scalars(select(Agent).where(Agent.hostname == dev.hostname, Agent.status != "revoked")):
                 a.status, a.note = "revoked", f"agent removed by {dep.who}"
+        elif dep.action == "app_update" and r.get("done"):
+            ok, msg = verify_update(db, dep.value, res)
+        elif dep.action == "app_uninstall" and ok and res.get("still_installed") and res.get("exit") not in (1641, 3010):
+            ok, msg = False, "The uninstaller finished but the program is still installed"
         elif res.get("output") and not ok:
             msg += f": {str(res['output'])[-500:]}"
+        if dep.action in RESCAN_AFTER:
+            _rescan_later(dev.hostname, check_pending=dep.action == "windows_updates")
         dep.status, dep.finished, dep.message = ("success" if ok else "failed"), now, msg[:4000]
         log_change(db, dev, "fix", f"{dep.label}: {msg.splitlines()[0] if msg else ''} ({'ok' if ok else 'problem'})")
     else:

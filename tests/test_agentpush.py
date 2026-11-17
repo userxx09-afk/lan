@@ -50,7 +50,7 @@ with TestClient(m.app) as c:
     assert c.get("/api/agents/push").json()["server"] == "https://netinv.corp.local:8080"
     rows = c.post("/api/query", json={"dataset": "v_devices", "fields": ["hostname", "agent_status"],
                                      "filters": [{"field": "hostname", "op": "in", "value": hosts}]}).json()["rows"]
-    assert all(x["agent_status"] == "installing" for x in rows), rows
+    assert all(x["agent_status"] in ("waiting", "installing") for x in rows), rows      # the dispatcher may already be sending
 
     fixes.poll_once(); time.sleep(1.5)
     assert len(sent) == 2, sent
@@ -81,6 +81,22 @@ with TestClient(m.app) as c:
     fixes.poll_once(); time.sleep(1); due_now(); fixes.poll_once()
     last = [d for d in c.get(f"/api/deployments?host={host}").json()["rows"] if d["action"] == "agent_install"][0]
     assert last["status"] == "failed" and "pin mismatch" in last["message"], last
+    # pushed, but installed by hand before the push ran: the queued push is settled, the column shows the real state
+    other = next(h for h in hosts if h != host)
+    par, fixes.parallel = fixes.parallel, (lambda db: 0)     # keep it in the queue, as for an unreachable PC
+    c.post("/api/agents/push", json={"hostnames": [other], "server_url": "https://netinv.corp.local:8080"})
+    col = lambda h: c.post("/api/query", json={"dataset": "v_devices", "fields": ["agent_status", "agent_note"],  # noqa: E731
+                                               "filters": [{"field": "hostname", "op": "eq", "value": h}]}).json()["rows"][0]
+    assert col(other)["agent_status"] == "waiting", col(other)
+    site = c.post("/api/agents/token").json()["token"]
+    e = c.post("/api/agent/enroll", json={"token": site, "hostname": other, "machine_guid": "g2"}).json()
+    assert e["status"] == "pending", e          # approval mode is manual
+    row = col(other)
+    assert row["agent_status"] == "pending" and row["agent_note"], row
+    q = [d for d in c.get(f"/api/deployments?host={other}").json()["rows"] if d["action"] == "agent_install"][0]
+    assert q["status"] == "success" and "Not needed" in q["message"], q
+    fixes.parallel = par
+
     result = {"ok": True, "message": "Agent uninstalled (MSI)"}
     c.post("/api/agents/push", json={"hostnames": [host], "server_url": "https://netinv.corp.local:8080", "remove": True})
     fixes.poll_once(); time.sleep(1); due_now(); fixes.poll_once()

@@ -200,6 +200,7 @@ Make groups without picking PCs in the Computers list. A group is defined by con
 | Hardware model / Manufacturer | `OptiPlex 70*`, `HP*` | contains, or wildcards |
 | AD OU | `corp.example.com/Sites/Office/PCs` or a DN | that OU and the OUs under it |
 | Operating system / State | `Windows 11`, `Stock` | |
+| Other field... | `av_name` is `*Defender*`, `ram_gb` less than `8`, `warranty_end` less than `2027-01-01`, `model` is empty | any column of the Computers list (the report builder's fields): is, is not, less / more than (numbers, dates), empty, not empty |
 
 Combine them with *all of these match* or *any of these matches*; commas in one box mean "any of these", and each
 condition can be *is not* (handy to leave one PC out). The editor shows how many PCs match as you type.
@@ -207,7 +208,8 @@ condition can be *is not* (handy to leave one PC out). The editor shows how many
 Members follow the inventory: rule-based membership is recalculated after every scan, every 5 minutes (agent
 reports, edits) and whenever the group is saved or used. *Always include these computers* keeps named PCs in the group
 whatever the rules say. A PC in a group only because of its rules shows a "rules" chip on its page instead of ×.
-Groups tagged by hand from the Computers list still work and show as "by hand".
+Groups tagged by hand from the Computers list still work and show as "by hand". Click a group's name to see its
+computers with OS, IP address, model, OU and last user.
 
 Use a group as a target: *Run script* and *Push agent* on the Groups tab (or the group choice in the script dialog),
 *Show in Computers* to act on its PCs with the usual buttons, and in a scan job (Settings > Scan schedule) *Only PCs

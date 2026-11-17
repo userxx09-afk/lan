@@ -264,6 +264,7 @@ class CollectorRun(Base):
     finished: Mapped[datetime | None] = mapped_column(DateTime)
     ok: Mapped[bool | None] = mapped_column(Boolean)
     message: Mapped[str | None] = mapped_column(Text)
+    ran_by: Mapped[str | None] = mapped_column(String(200))       # "0.12.70 on SRV01, pid 1234" (see instance.py)
 
 
 class DeviceGroup(Base):
@@ -401,6 +402,8 @@ class ScanJob(Base):
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_result: Mapped[str | None] = mapped_column(Text)
     last_seconds: Mapped[int | None] = mapped_column(Integer)
+    ran_by: Mapped[str | None] = mapped_column(String(200))       # which NetInventory process wrote last_result,
+    ran_at: Mapped[datetime | None] = mapped_column(DateTime)      # and when (UTC); older versions set neither
 
 
 class Agent(Base):
@@ -470,6 +473,19 @@ class ScanExclusion(Base):
     note: Mapped[str | None] = mapped_column(String(255))
     created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     created_by: Mapped[str | None] = mapped_column(String(64))
+
+
+class ServerInstance(Base):
+    """Every running NetInventory server process, with a heartbeat (see instance.py). Shows in Settings, so a
+    second or leftover process (an old version still running against the same database) can't hide."""
+    __tablename__ = "server_instances"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    version: Mapped[str] = mapped_column(String(32))
+    host: Mapped[str] = mapped_column(String(128))
+    pid: Mapped[int] = mapped_column(Integer)
+    code_path: Mapped[str | None] = mapped_column(String(512))
+    started: Mapped[datetime] = mapped_column(DateTime)            # UTC
+    last_seen: Mapped[datetime] = mapped_column(DateTime, index=True)
 
 
 class Setting(Base):

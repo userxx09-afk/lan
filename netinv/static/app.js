@@ -147,7 +147,7 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version"],
+  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version", "agent_note"],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
   sort: grid.sort, desc: grid.desc, ...extra,
@@ -196,9 +196,11 @@ function agentPill(row) {
     const quiet = row.agent_last_seen && Date.now() - utc(row.agent_last_seen) > 3600e3;
     return `<span class="pill ${quiet ? "warn" : "good"}" title="${esc(`Agent ${row.agent_version || ""}, ${seen}`)}">${quiet ? "silent" : "active"}</span>`;
   }
-  const map = { installing: ["", "installing", "Push in progress or waiting for the PC: see Software > Deployments"],
-    pending: ["warn", "pending", "Enrolled, waiting for approval in Settings > Agent"],
-    failed: ["bad", "push failed", "The last push failed: see the PC's deployments for why"],
+  const note = row.agent_note ? `: ${row.agent_note}` : "";
+  const map = { installing: ["", "installing", `Being installed on the PC now${note}`],
+    waiting: ["warn", "waiting for PC", `Push queued; the PC isn't reachable over WinRM yet${note}. See Software > Deployments.`],
+    pending: ["warn", "needs approval", `The agent enrolled and waits for approval in Settings > Agent${note}`],
+    failed: ["bad", "push failed", `The last push failed${note}`],
     revoked: ["", "removed", "Revoked or removed"] };
   const [cls, label, tip] = map[st] || ["", st, ""];
   return `<span class="pill ${cls}" title="${esc(tip)}">${label}</span>`;
@@ -325,7 +327,7 @@ function renderAssetTab(d, tab) {
         ${kvRow("AD enabled", v.ad_enabled === null ? "" : v.ad_enabled ? "Yes" : "No")}${kvRow("AD last logon", fmtDate(v.ad_last_logon))}
         ${kvRow("OU", esc(v.ou))}
         <h3>Lifecycle</h3>
-        ${kvRow("Agent", v.agent_status ? `${agentPill(v)} <span class="muted small">${v.agent_version ? `v${esc(v.agent_version)} · ` : ""}${v.agent_last_seen ? `last report ${agoUtc(v.agent_last_seen)}` : ""}</span>` : `<span class="muted">not installed</span>`)}
+        ${kvRow("Agent", v.agent_status ? `${agentPill(v)}${v.agent_note && v.agent_status !== "active" ? ` <span class="small">${esc(v.agent_note.split("\n")[0])}</span>` : ""} <span class="muted small">${v.agent_version ? `v${esc(v.agent_version)} · ` : ""}${v.agent_last_seen ? `last report ${agoUtc(v.agent_last_seen)}` : ""}</span>` : `<span class="muted">not installed</span>`)}
         ${kvRow("First seen", fmtDate(v.first_seen))}${kvRow("Last seen", fmtDate(v.last_seen))}${kvRow("Last scan", `${fmtDate(v.inventory_last_collected)} <span class="muted">${ago(v.inventory_last_collected)}</span>`)}
         <form id="lifeform" class="lifeform">
           <label>State <select name="state">${["Active", "Stock", "In repair", "Retired"].map((s) => `<option ${v.state === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>
@@ -1412,7 +1414,7 @@ async function loadJobs(targets) {
     ["name", "scope", "what", "schedule", "next", "last_run", "last_result", "act"], {
       labels: { what: "scans", next: "next run", last_result: "result", act: "" },
       cell: { next: stateCell, last_run: (v, r) => v ? `${fmtDate(v)}${r.last_seconds != null ? ` <span class="muted small">(${Math.round(r.last_seconds / 60)} min)</span>` : ""}` : "never",
-        last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}">${esc(v)}</span>` : "",
+        last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}" title="${esc(r.ran_by ? `Ran on NetInventory ${r.ran_by}` : "Written by an older NetInventory version")}">${esc(v)}</span>` : "",
         act: (id) => `<a class="link" data-jrun="${id}">Run now</a> · <a class="link" data-jhist="${id}">History</a> · <a class="link" data-jedit="${id}">Edit</a> · <a class="link" data-jdel="${id}">Delete</a>` } });
   const byId = (a, k) => jobData.jobs.find((j) => j.id === +a.dataset[k]);
   $("#jobtable").querySelectorAll("[data-jrun]").forEach((a) => a.onclick = async () => {
@@ -1488,7 +1490,14 @@ async function loadUpdate(force = false) {
   $("#updbadge").hidden = !u.available;
   $("#updbadge").title = u.available ? `Version ${u.latest} is available (you have ${u.current})` : "";
   const when = u.checked ? `Last checked ${fmtDate(u.checked)}.` : "Not checked yet.";
+  const ins = u.instances || { running: [], old_process_results: [] };
+  const others = ins.running.filter((r) => !r.this);
+  const procs = ins.running.map((r) => `<div>${esc(r.version)} on ${esc(r.host)}, pid ${r.pid}${r.this ? ` <span class="muted">(this page)</span>` : ""}
+      <span class="muted small">since ${fmtDate(r.started)} · ${esc(r.path || "")}</span></div>`).join("");
+  const warn = (others.length ? `<p class="pill bad longtext">${others.length + 1} NetInventory server processes are running against this database. Each one runs the scan schedule, so results can come from the other one. Stop the extra one (see the list above), or reinstall to stop leftover processes on this server.</p>` : "")
+    + (ins.old_process_results.length ? `<p class="pill bad longtext">A NetInventory process from an older version is still running against this database: it wrote the last result of ${esc(ins.old_process_results.join(", "))} after this version started. Reinstall (repair) on this server stops leftover processes; if it keeps happening, another server is using this database.</p>` : "");
   $("#updinfo").innerHTML = `<div class="kvr"><span>This version</span><div><b>${esc(u.current)}</b></div></div>
+    <div class="kvr"><span>Running</span><div>${procs}</div></div>${warn}
     ${u.latest ? `<div class="kvr"><span>Newest</span><div>${esc(u.latest)} ${u.published ? `<span class="muted">published ${fmtDate(u.published)}</span>` : ""}
       ${u.available ? `<span class="pill warn">update available</span>` : `<span class="pill good">up to date</span>`}</div></div>` : ""}
     ${u.available && u.notes ? `<div class="kvr"><span>What's new</span><div class="longtext">${esc(u.notes)}</div></div>` : ""}
@@ -1723,16 +1732,33 @@ loaders.groups = async () => {
 async function groupMembers(name) {
   const r = await api(`/api/groups/${encodeURIComponent(name)}/members`), g = grpData.groups.find((x) => x.name === name) || {};
   drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Computers where ${esc(g.rule)}` : "Computers added by hand"}</p><div id="gmemtab"></div>`);
-  table($("#gmemtab"), r.members, ["hostname", "how"], { sort: "hostname", cell: { hostname: hostLink } });
+  table($("#gmemtab"), r.members, ["hostname", "os", "ip", "model", "ou", "last_user", "how"], { sort: "hostname",
+    labels: { hostname: "name", os: "OS", ip: "IP address", last_user: "last user", ou: "OU" },
+    cell: { hostname: hostLink, last_user: userLink, os: (v) => esc((v || "").replace("Microsoft ", "")),
+      ou: (v) => `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>` } });
 }
 const condRow = (i, c = { field: "hostname", value: "", not: false }) => `<div class="row gcond" data-i="${i}">
   <select name="cf_${i}">${Object.entries(grpData.fields).map(([k, l]) => `<option value="${k}" ${k === c.field ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-  <select name="cn_${i}"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
+  <select name="co_${i}" class="g-other" title="Any field of the Computers list">${(grpData.columns || []).map((k) => `<option ${k === c.column ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
+  <select name="cn_${i}" class="g-std"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
+  <select name="cop_${i}" class="g-other">${Object.entries(grpData.other_ops || {}).map(([k, l]) => `<option value="${k}" ${k === (c.op || "is") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
   <input name="cv_${i}" value="${esc(c.value)}" placeholder="${esc(grpData.hints[c.field] || "")}" style="flex:1">
   <a class="link" data-rmcond="${i}" title="Remove this condition">×</a></div>`;
-const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => {
-  const i = r.dataset.i; return { field: form[`cf_${i}`].value, not: !!form[`cn_${i}`].value, value: form[`cv_${i}`].value };
-}).filter((c) => c.value.trim());
+// One condition from a row; "Other field" rows carry a column and a comparison.
+function condOf(form, i) {
+  const field = form[`cf_${i}`].value, value = form[`cv_${i}`].value;
+  if (field !== "other") return { field, not: !!form[`cn_${i}`].value, value };
+  const op = form[`cop_${i}`].value;
+  return { field, column: form[`co_${i}`].value, op, not: op === "not", value: ["empty", "not_empty"].includes(op) ? "" : value };
+}
+const condUsed = (c) => c.value.trim() || ["empty", "not_empty"].includes(c.op);
+const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => condOf(form, r.dataset.i)).filter(condUsed);
+function syncCond(row) {
+  const other = row.querySelector("[name^=cf_]").value === "other", op = row.querySelector("[name^=cop_]").value;
+  row.querySelectorAll(".g-other").forEach((e) => e.hidden = !other);
+  row.querySelector(".g-std").hidden = other;
+  row.querySelector("[name^=cv_]").hidden = other && ["empty", "not_empty"].includes(op);
+}
 async function editGroup(g = null, draft = null) {
   if (!Object.keys(grpData.fields).length) grpData = await api("/api/groups");
   const v = draft || g || { name: "", description: "", match: "all", conditions: [{ field: "ip", value: "", not: false }], kind: "rules" };
@@ -1747,6 +1773,7 @@ async function editGroup(g = null, draft = null) {
       <div id="gconds">${(v.conditions.length ? v.conditions : [{ field: "hostname", value: "" }]).map((c) => condRow(n++, c)).join("")}</div>
       <a class="link small" id="gaddcond">+ Add a condition</a>
       <p class="muted small">Several values in one box, separated by commas, mean "any of these". Text matches anywhere in the name unless you use the wildcards * and ?.
+        <i>Other field...</i> filters on any column of the Computers list (the same fields as the report builder), for example av_name, ram_gb less than 8, or warranty_end less than 2027-01-01.
         An OU includes the OUs under it. Members follow the inventory: a PC that moves OU, changes IP or is renamed joins or leaves after the next scan.</p></fieldset>
     <label>Always include these computers (optional; one per line or separated by commas)
       <textarea name="hosts" rows="3" placeholder="PC-0142">${esc(members.join("\n"))}</textarea></label>
@@ -1761,7 +1788,9 @@ async function editGroup(g = null, draft = null) {
     }, 350); };
     const wire = () => {
       form.querySelectorAll("[data-rmcond]").forEach((a) => a.onclick = () => { a.closest(".gcond").remove(); preview(); });
-      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; preview(); });
+      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond select[name^=cop_]").forEach((s) => s.onchange = () => { syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond").forEach(syncCond);
     };
     form.querySelector("#gaddcond").onclick = () => { form.querySelector("#gconds").insertAdjacentHTML("beforeend", condRow(n++)); wire(); };
     form.addEventListener("input", preview); form.addEventListener("change", preview);
@@ -1769,7 +1798,12 @@ async function editGroup(g = null, draft = null) {
   });
   if (!f) return;
   const body = { name: f.name, description: f.description, match: f.match, conditions: [], hostnames: splitHosts(f.hosts) };
-  for (const k of Object.keys(f)) if (k.startsWith("cf_")) { const i = k.slice(3); if ((f[`cv_${i}`] || "").trim()) body.conditions.push({ field: f[k], not: !!f[`cn_${i}`], value: f[`cv_${i}`] }); }
+  for (const k of Object.keys(f)) if (k.startsWith("cf_")) {
+    const i = k.slice(3), op = f[`cop_${i}`];
+    const c = f[k] === "other" ? { field: "other", column: f[`co_${i}`], op, not: op === "not", value: ["empty", "not_empty"].includes(op) ? "" : f[`cv_${i}`] }
+      : { field: f[k], not: !!f[`cn_${i}`], value: f[`cv_${i}`] };
+    if (condUsed(c)) body.conditions.push(c);
+  }
   try {
     const r = await post(`/api/groups${g ? `?old=${encodeURIComponent(g.name)}` : ""}`, body);
     toast(`Group saved: ${r.members} computer${r.members === 1 ? "" : "s"}.`); loaders.groups(); scriptData = null;

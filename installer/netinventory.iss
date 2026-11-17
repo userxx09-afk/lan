@@ -51,6 +51,12 @@ Source: "..\tools\dameware\Open-DameWare.ps1"; DestDir: "{commonappdata}\{#AppNa
 Source: "{#Build}\redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Check: NeedsVcRedist
 ; Wizard helper that checks whether a port is free; extracted to {tmp} when needed, never installed.
 Source: "portcheck.ps1"; Flags: dontcopy
+; Run before files are copied, to stop leftover server processes (see PrepareToInstall).
+Source: "scripts\stop-processes.ps1"; Flags: dontcopy
+
+; The app code is replaced as a whole on every install: no file or Python cache from an older version stays.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\app\netinv"
 
 [Dirs]
 Name: "{code:GetDataDir}"
@@ -293,14 +299,18 @@ begin
   end;
 end;
 
-{ Stop the running services so their files can be replaced. }
+{ Stop the running services, and any NetInventory server process the service lost track of, so their files
+  can be replaced and no old version keeps running (stop-processes.ps1 explains). }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
 begin
   Result := '';
+  ExtractTemporaryFile('stop-processes.ps1');
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\stop-processes.ps1') +
+       '" -InstallDir "' + ExpandConstant('{app}') + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
   if IsUpgrade then
-    Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -Command "Stop-Service NetInventory -Force -ErrorAction SilentlyContinue; ' +
+    Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -Command "' +
          'Stop-Service NetInventory-PostgreSQL -Force -ErrorAction SilentlyContinue; Start-Sleep 2"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 

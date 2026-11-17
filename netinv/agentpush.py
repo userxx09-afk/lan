@@ -255,3 +255,12 @@ def agent_state(db, host: str) -> str | None:
     if not a:
         return None
     return "active" if a.status == "active" else f"waiting for approval in Settings > Agent ({a.note or 'pending'})"
+
+
+def settle(db, host: str, how: str) -> None:
+    """The agent reported: pushes still waiting in the queue for this PC aren't needed any more."""
+    from sqlalchemy import select
+    from .db import Deployment
+    for d in db.scalars(select(Deployment).where(Deployment.hostname == norm_host(host), Deployment.action == "agent_install",
+                                                 Deployment.status == "queued")):
+        d.status, d.finished, d.message = "success", utcnow(), f"Not needed: the agent is already reporting ({how})."
