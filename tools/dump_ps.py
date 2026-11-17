@@ -56,6 +56,16 @@ remote.command(None, dev, "t", "ipconfig /all", "cmd")
 remote.wmi_browse(None, dev, "root\\cimv2")
 remote.wmi_class(None, dev, "root\\cimv2", "Win32_BIOS")
 remote.wmi_query(None, dev, "root\\cimv2", "SELECT * FROM Win32_BIOS")
+for name in remote.VIEWS:
+    remote.view(None, dev, name, log="System", levels="error", all=1)
+for kind, op, a in (("share", "add", {"name": "Scans", "path": r"D:\Scans", "access": "Read", "account": "Everyone"}),
+                    ("share", "remove", {"name": "Scans"}), ("env", "set", {"name": "X", "value": "1"}), ("env", "delete", {"name": "X"}),
+                    ("startup", "remove", {"name": "x", "kind": "registry", "location": r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"}),
+                    ("startup", "remove", {"name": "x.lnk", "kind": "folder", "location": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"}),
+                    ("task", "run", {"path": "\\Vendor\\", "name": "x"}), ("net", "flushdns", {}), ("net", "registerdns", {}),
+                    ("net", "renew", {}), ("net", "gpupdate", {})):
+    r = remote.change(None, dev, "t", kind, op, a)
+    assert r["ok"], (kind, op, r)
 
 from netinv import agentpush  # noqa: E402
 for s in (agentpush.INSTALL, agentpush.REMOVE):

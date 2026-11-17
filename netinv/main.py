@@ -759,6 +759,29 @@ def device_wql(hostname: str, body: WqlIn, user=Depends(ui_auth), db=Depends(db_
     return _remote(lambda: remote.wmi_query(db, dev, body.ns, body.query, body.limit))
 
 
+@app.get("/api/devices/{hostname}/view/{name}", dependencies=UI)
+def device_view(hostname: str, name: str, request: Request, db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    if name not in remote.VIEWS:
+        raise HTTPException(404)
+    p = {k: v for k, v in request.query_params.items() if k not in ("name", "db", "dev")}
+    return _remote(lambda: remote.view(db, dev, name, **p))
+
+
+class ChangeIn(BaseModel):
+    kind: str
+    op: str
+    args: dict = {}
+
+
+@app.post("/api/devices/{hostname}/change")
+def device_change(hostname: str, body: ChangeIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.change(db, dev, user, body.kind, body.op, body.args))
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None

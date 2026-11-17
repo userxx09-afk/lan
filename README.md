@@ -177,6 +177,19 @@ Over WinRM, live, on demand:
 - **Command**: run one PowerShell or cmd command and see its output (not interactive; stopped after 30–100 s).
 - **WMI**: browse namespaces and classes and see a class's instances and properties, or run a WQL query
   (SELECT / ASSOCIATORS OF / REFERENCES OF only, so it can't change anything). Examples and copy-as-CSV included.
+- **Performance**: CPU, memory, disk activity, free space per drive, busiest processes and network throughput,
+  refreshed every 10 s while the tab is open.
+- **Event logs**: any log (System, Application, Security, …) filtered by level, time span, source, event ID and
+  text; click a row for the whole message, a source or ID to filter on it.
+- **Tasks & startup**: scheduled tasks (yours, or Windows' too) with last result and next run; run, end, enable,
+  disable (Windows' own tasks can't be stopped or disabled). Startup programs from the Run keys and Startup folders;
+  remove one (a removed shortcut is kept in ProgramData\NetInventory\startup-removed).
+- **Shares & variables**: shared folders with their share permissions; share a folder (Read/Change/Full for an
+  account) or stop sharing (admin shares, NETLOGON and SYSVOL are left alone). System and per-user environment
+  variables; add, edit, delete (Path, ComSpec, windir and the like can't be deleted, and a Path without System32 is refused).
+- **Network**: adapters (IP, gateway, DNS, DHCP, speed, MAC), TCP/UDP connections and listening ports with the
+  program behind each; flush DNS, register in DNS, release and renew DHCP, Group Policy update.
+- **Devices**: Device Manager's list with driver version, date and provider; devices with a problem code first.
 - **Power** (left side): restart or shut down now or after a delay with a notice to the user, cancel a pending
   shutdown, hibernate, sleep, lock the screen, log off everyone. **Send a pop-up message** to everyone on the PC, one
   session, or (from a user's page) that user on their last PC; one way, shown with `msg.exe`.

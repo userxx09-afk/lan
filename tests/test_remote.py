@@ -81,6 +81,39 @@ with TestClient(m.app) as c:
     assert len(sent) == n
     assert len(c.post(f"{u}/wmi", json={"query": "SELECT * FROM Win32_Service", "ns": "root/cimv2"}).json()["rows"]) == 2
 
+    # read-only views
+    for name in ("shares", "env", "startup", "tasks", "eventlogs", "devices", "network", "connections", "performance"):
+        assert c.get(f"{u}/view/{name}").status_code == 200, name
+    assert c.get(f"{u}/view/bogus").status_code == 404
+    c.get(f"{u}/view/events", params={"log": "System", "levels": "error,warning", "hours": 48, "text": "disk*", "id": 7, "name": "x"})
+    assert "Level = @(2,3)" in sent[-1] and ".AddHours(-48)" in sent[-1] and "disk" in decoded(sent[-1]) and "Id = 7" in sent[-1]
+    assert c.get(f"{u}/view/events", params={"log": "Sys'tem"}).status_code == 400
+    c.get(f"{u}/view/tasks", params={"all": 1})
+    assert "$true -or" in sent[-1]
+
+    # changes: refused ones never reach the PC
+    n = len(sent)
+    for kind, op, args in (("share", "add", {"name": "a/b", "path": "D:\\x", "access": "Read", "account": "Everyone"}),
+                           ("share", "add", {"name": "Scans", "path": "\\\\srv\\x", "access": "Read", "account": "Everyone"}),
+                           ("share", "add", {"name": "Scans", "path": "D:\\Scans", "access": "Owner", "account": "Everyone"}),
+                           ("share", "remove", {"name": "ADMIN$"}), ("env", "delete", {"name": "Path"}),
+                           ("env", "set", {"name": "Path", "value": "C:\\Tools"}), ("env", "set", {"name": "1bad", "value": "x"}),
+                           ("startup", "remove", {"name": "x", "kind": "registry", "location": "HKLM\\SOFTWARE\\Evil"}),
+                           ("task", "disable", {"path": "\\Microsoft\\Windows\\Defrag\\", "name": "ScheduledDefrag"}),
+                           ("task", "run", {"path": "no-slash", "name": "x"}), ("net", "format", {}), ("disk", "wipe", {})):
+        assert not c.post(f"{u}/change", json={"kind": kind, "op": op, "args": args}).json()["ok"], (kind, op, args)
+    assert len(sent) == n
+    ok = lambda kind, op, args: c.post(f"{u}/change", json={"kind": kind, "op": op, "args": args}).json()["ok"]  # noqa: E731
+    assert ok("share", "add", {"name": "Scans", "path": "D:\\Scans", "desc": "'; calc '", "access": "Change", "account": "CORP\\Scanner Users"})
+    assert "'; calc '" in decoded(sent[-1]) and "'; calc '" not in sent[-1] and "New-SmbShare" in sent[-1]
+    assert ok("env", "set", {"name": "JAVA_HOME", "value": "C:\\Java\\jdk$(calc)"}) and "C:\\Java\\jdk$(calc)" in decoded(sent[-1])
+    assert ok("env", "delete", {"name": "OLDVAR", "sid": "S-1-5-21-1-2-3-1001"}) and "HKEY_USERS\\S-1-5-21-1-2-3-1001" in sent[-1]
+    assert ok("startup", "remove", {"name": "Updater", "kind": "registry", "location": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"})
+    assert ok("startup", "remove", {"name": "App.lnk", "kind": "folder", "location": "C:\\Users\\alee\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"})
+    assert ok("task", "run", {"path": "\\Vendor\\", "name": "Nightly sync"}) and "Start-ScheduledTask" in sent[-1]
+    for op in ("flushdns", "registerdns", "renew", "gpupdate"):
+        assert ok("net", op, {}), op
+
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []
     assert any("Command (powershell)" in (x.get("detail") or x.get("text") or str(x)) for x in hist), hist[:3]

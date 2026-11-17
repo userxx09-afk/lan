@@ -405,6 +405,18 @@ function renderAssetTab(d, tab) {
     loadCommand(el);
   } else if (tab === "wmi") {
     loadWmi(el);
+  } else if (tab === "perf") {
+    loadPerf(el);
+  } else if (tab === "events") {
+    loadEvents(el);
+  } else if (tab === "tasks") {
+    loadTasks(el);
+  } else if (tab === "shares") {
+    loadShares(el);
+  } else if (tab === "network") {
+    loadNetwork(el);
+  } else if (tab === "devices") {
+    loadDevices(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -915,6 +927,174 @@ async function loadWmi(el) {
     draw();
   };
   browse(wmiNs);
+}
+
+// ------------------------------------------------------------ more live tabs: performance, event logs, tasks & startup, shares & variables, network, devices
+const view = (name, q = {}) => api(hostApi(`view/${name}?${new URLSearchParams(q)}`));
+async function pcChange(kind, op, args, q, after) {
+  if (q && !(await confirmBox(q))) return;
+  try { const r = await post(hostApi("change"), { kind, op, args }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+  after && after();
+}
+const localTime = (v) => esc(v ? fmtDate(utcLocal(v)) : "");
+let perfTimer;
+async function loadPerf(el, again = false) {
+  clearTimeout(perfTimer);
+  if (!again) el.innerHTML = `<div class="toolbar"><label class="chk muted"><input type="checkbox" id="perfauto" checked> Refresh every 10 s while this tab is open</label></div><div id="perfbody">${asking()}</div>`;
+  const host = current;
+  let d;
+  try { d = await view("performance"); } catch (e) { return toolErr($("#perfbody"), e); }
+  if (current !== host || !$("#perfbody")) return;
+  const used = d.mem_total_mb - d.mem_free_mb, memPct = d.mem_total_mb ? Math.round(used * 100 / d.mem_total_mb) : 0;
+  const bar = (pct, label) => `<div class="perfbar"><div class="perffill ${pct > 90 ? "bad" : pct > 75 ? "warn" : ""}" style="width:${Math.min(100, pct)}%"></div><span>${label}</span></div>`;
+  $("#perfbody").innerHTML = `<div class="perfgrid">
+      <div><h3>CPU</h3>${bar(d.cpu_pct, `${d.cpu_pct}%`)}</div>
+      <div><h3>Memory</h3>${bar(memPct, `${memPct}% · ${(used / 1024).toFixed(1)} of ${(d.mem_total_mb / 1024).toFixed(1)} GB`)}</div>
+      <div><h3>Disk activity</h3>${d.disk_busy_pct == null ? `<span class="muted">n/a</span>` : bar(d.disk_busy_pct, `${d.disk_busy_pct}% busy · queue ${d.disk_queue}`)}</div>
+      <div><h3>Up</h3><b>${d.uptime_h} h</b> · ${d.processes} processes</div></div>
+    <h2>Drives</h2>${d.disks.map((x) => { const p = x.size_gb ? Math.round((x.size_gb - x.free_gb) * 100 / x.size_gb) : 0; return `<div class="perfrow"><b>${esc(x.drive)}</b> ${bar(p, `${x.free_gb} GB free of ${x.size_gb} GB`)}</div>`; }).join("")}
+    <h2>Busiest processes</h2><div id="perftop"></div><h2>Network</h2><div id="perfnet"></div>
+    <p class="muted small">Updated ${new Date().toLocaleTimeString()}</p>`;
+  table($("#perftop"), d.top, ["name", "pid", "cpu_pct", "mem_mb"], { labels: { cpu_pct: "CPU %", mem_mb: "private MB" } });
+  table($("#perfnet"), d.net, ["name", "in_kbps", "out_kbps"], { labels: { in_kbps: "in (kbit/s)", out_kbps: "out (kbit/s)" } });
+  if ($("#perfauto")?.checked) perfTimer = setTimeout(() => {
+    if ($("#assettabs .active")?.dataset.atab === "perf" && document.querySelector(".tab.active")?.id === "asset" && current === host) loadPerf(el, true);
+  }, 10000);
+}
+
+let evq = { log: "System", levels: "critical,error,warning", hours: 24, source: "", id: "", text: "", max: 500 };
+async function loadEvents(el) {
+  el.innerHTML = `<form id="evform" class="toolbar wrap">
+      <label class="muted">Log <input name="log" list="evlogs" value="${esc(evq.log)}"></label><datalist id="evlogs"><option>System</option><option>Application</option><option>Security</option><option>Setup</option></datalist>
+      <label class="muted">Levels <select name="levels"><option value="critical,error">Critical and errors</option><option value="critical,error,warning">Errors and warnings</option>
+        <option value="">Everything</option><option value="information">Information only</option></select></label>
+      <label class="muted">Last <select name="hours"><option value="1">hour</option><option value="24">24 hours</option><option value="168">7 days</option><option value="720">30 days</option></select></label>
+      <input name="source" placeholder="Source" value="${esc(evq.source)}" size="14"><input name="id" placeholder="Event ID" value="${esc(evq.id)}" size="7">
+      <input name="text" placeholder="Text in message" value="${esc(evq.text)}" size="16"><button type="submit">Show</button>
+      <a class="link small" id="evall">All logs on this PC…</a></form><div id="evt">${asking()}</div>`;
+  const f = $("#evform");
+  f.levels.value = evq.levels; f.hours.value = String(evq.hours);
+  f.onsubmit = (e) => { e.preventDefault(); evq = { ...evq, log: f.log.value.trim() || "System", levels: f.levels.value, hours: +f.hours.value, source: f.source.value.trim(), id: f.id.value.trim(), text: f.text.value.trim() }; loadEvents(el); };
+  $("#evall").onclick = async () => {
+    try { const logs = await view("eventlogs"); $("#evlogs").innerHTML = logs.map((l) => `<option value="${esc(l.name)}">${l.records} events</option>`).join(""); toast(`${logs.length} logs with events: pick one in the Log box.`); }
+    catch (er) { toast(errText(er), true); }
+  };
+  let rows;
+  try { rows = await view("events", evq); } catch (e) { return toolErr($("#evt"), e); }
+  const LV = { 1: "bad", 2: "bad", 3: "warn" };
+  table($("#evt"), rows, ["time", "level", "source", "id", "message"], {
+    cell: { time: localTime, level: (v, r) => `<span class="pill ${LV[r.level_n] || "mute"}">${esc(v || "")}</span>`,
+      source: (v) => `<a class="link" data-evsrc="${esc(v)}">${esc(v)}</a>`, id: (v) => `<a class="link" data-evid="${v}">${v}</a>`,
+      message: (v) => `<span class="longtext small" title="${esc(v)}">${esc(String(v || "").split("\n")[0].slice(0, 300))}</span>` },
+    rowClick: (r) => formModal(`<h3>${esc(r.source)} · event ${r.id}</h3><p class="muted">${esc(fmtDate(utcLocal(r.time)))} · ${esc(r.level)}${r.user ? ` · ${esc(r.user)}` : ""}</p><pre class="code small">${esc(r.message)}</pre>`, true),
+    rowTitle: "Show the whole message" });
+  $("#evt").addEventListener("click", (e) => {
+    const s = e.target.closest("[data-evsrc]"), i = e.target.closest("[data-evid]");
+    if (s) { e.stopPropagation(); evq.source = s.dataset.evsrc; loadEvents(el); }
+    if (i) { e.stopPropagation(); evq.id = i.dataset.evid; loadEvents(el); }
+  }, true);
+}
+
+let tasksAll = false;
+async function loadTasks(el) {
+  el.innerHTML = `<h2>Scheduled tasks</h2><div class="toolbar"><input id="tkf" placeholder="Filter tasks"><label class="chk muted"><input type="checkbox" id="tkall" ${tasksAll ? "checked" : ""}> Include Windows' own tasks</label>
+    <button class="ghost" id="tkref">Refresh</button></div><div id="tkt">${asking()}</div>
+    <h2>Startup programs</h2><p class="muted small">Run keys (all users, and each signed-in user) and Startup folders. Removing a registry entry logs its command in History; a removed shortcut is kept in ProgramData\\NetInventory\\startup-removed.</p><div id="sut"></div>`;
+  $("#tkref").onclick = () => loadTasks(el);
+  $("#tkall").onchange = (e) => { tasksAll = e.target.checked; loadTasks(el); };
+  const again = () => loadTasks(el);
+  view("tasks", tasksAll ? { all: 1 } : {}).then((rows) => {
+    table($("#tkt"), rows.map((r) => ({ ...r, act: r.name })), ["path", "name", "state", "runs_as", "triggers", "last_run", "last_result", "next_run", "action", "act"], { filterEl: $("#tkf"),
+      labels: { last_result: "result", act: "" },
+      cell: { last_run: localTime, next_run: localTime, state: (v) => `<span class="pill ${v === "Ready" ? "good" : v === "Running" ? "warn" : "mute"}">${esc(v)}</span>`,
+        last_result: (v) => `<span class="${v && v !== "0x0" && v !== "0x41301" && v !== "0x41303" ? "pill bad" : "muted small"}">${esc(v)}</span>`,
+        action: (v) => `<span class="small muted longtext">${esc(v)}</span>`,
+        act: (n, r) => [`<a class="link" data-tk="run">Run</a>`, r.state === "Running" && `<a class="link" data-tk="end">End</a>`,
+          r.state === "Disabled" ? `<a class="link" data-tk="enable">Enable</a>` : `<a class="link" data-tk="disable">Disable</a>`].filter(Boolean)
+          .map((x) => x.replace("<a ", `<a data-p="${esc(r.path)}" data-n="${esc(n)}" `)).join(" &nbsp; ") } });
+    $("#tkt").onclick = (e) => {
+      const a = e.target.closest("[data-tk]"); if (!a) return;
+      pcChange("task", a.dataset.tk, { path: a.dataset.p, name: a.dataset.n }, `${a.dataset.tk[0].toUpperCase() + a.dataset.tk.slice(1)} the task ${a.dataset.p}${a.dataset.n} on ${current}?`, again);
+    };
+  }).catch((e) => toolErr($("#tkt"), e));
+  view("startup").then((rows) => {
+    table($("#sut"), rows.map((r, i) => ({ ...r, act: i })), ["name", "where", "command", "act"], {
+      labels: { where: "for", act: "" }, cell: { command: (v) => `<span class="small code longtext">${esc(v)}</span>`, act: () => `<a class="link" data-su>Remove</a>` } });
+    $("#sut").querySelectorAll("[data-su]").forEach((a, i) => a.onclick = () => {
+      const r = rows[i];
+      pcChange("startup", "remove", { name: r.name, kind: r.kind, location: r.location }, `Stop ${r.name} from starting at sign-in (${r.where}) on ${current}?`, again);
+    });
+  }).catch((e) => toolErr($("#sut"), e));
+}
+
+async function loadShares(el) {
+  el.innerHTML = `<h2>Shared folders</h2><div class="toolbar"><button id="shadd">Share a folder</button><button class="ghost" id="shref">Refresh</button></div><div id="sht">${asking()}</div>
+    <h2>Environment variables</h2><div class="toolbar"><input id="evf" placeholder="Filter variables"><button id="envadd">New system variable</button></div><div id="envt"></div>`;
+  const again = () => loadShares(el);
+  $("#shref").onclick = again;
+  $("#shadd").onclick = async () => {
+    const f = await formModal(`<h3>Share a folder on ${esc(current)}</h3><label>Folder <input name="path" placeholder="D:\\Shares\\Scans" required></label>
+      <label>Share name <input name="name" required></label><label>Description <input name="desc"></label>
+      <label>Who gets access <input name="account" value="Everyone" required></label>
+      <label>Access <select name="access"><option>Read</option><option>Change</option><option>Full</option></select></label>
+      <p class="muted small">This sets the share permission; the folder's NTFS permissions still apply. A missing folder is created.</p>`);
+    if (f) pcChange("share", "add", f, null, again);
+  };
+  view("shares").then((rows) => {
+    table($("#sht"), rows.map((r) => ({ ...r, act: r.name })), ["name", "path", "description", "access", "act"], { labels: { access: "share permissions", act: "" },
+      cell: { name: (v, r) => esc(v) + (r.special ? ` <span class="pill mute small">admin</span>` : ""), access: (v) => `<span class="small">${esc(v)}</span>`,
+        act: (n, r) => (r.special ? "" : `<a class="link" data-shrm="${esc(n)}">Stop sharing</a>`) } });
+    $("#sht").querySelectorAll("[data-shrm]").forEach((a) => a.onclick = () => pcChange("share", "remove", { name: a.dataset.shrm }, `Stop sharing ${a.dataset.shrm} on ${current}? Anyone using it is disconnected; the files stay.`, again));
+  }).catch((e) => toolErr($("#sht"), e));
+  const envEdit = async (r = {}) => {
+    const f = await formModal(`<h3>${r.name ? `Edit ${esc(r.name)}` : "New system variable"}${r.user ? ` for ${esc(r.user)}` : ""}</h3>
+      <label>Name <input name="name" value="${esc(r.name || "")}" ${r.name ? "readonly" : ""} required></label>
+      <label>Value <textarea name="value" class="code" rows="3" spellcheck="false">${esc(r.value || "")}</textarea></label>
+      <p class="muted small">New programs see it right away; signed-in users get it at their next sign-in. The old value goes to History.</p>`, true);
+    if (f) pcChange("env", "set", { name: f.name, value: f.value, sid: r.sid || "" }, null, again);
+  };
+  $("#envadd").onclick = () => envEdit();
+  view("env").then((rows) => {
+    table($("#envt"), rows.map((r, i) => ({ ...r, act: i })), ["scope", "user", "name", "value", "act"], { filterEl: $("#evf"),
+      labels: { act: "" }, cell: { value: (v) => `<span class="small code longtext">${esc(v)}</span>`, act: () => `<a class="link" data-enved>Edit</a> &nbsp; <a class="link" data-envdel>Delete</a>` } });
+    $("#envt").onclick = (e) => {
+      const a = e.target.closest("[data-enved],[data-envdel]"); if (!a) return;
+      const tr = a.closest("tr"), r = rows.find((x) => x.name === tr.children[2].textContent && (x.user || "") === tr.children[1].textContent);
+      if (!r) return;
+      if (a.hasAttribute("data-enved")) envEdit(r);
+      else pcChange("env", "delete", { name: r.name, sid: r.sid }, `Delete the ${r.scope.toLowerCase()} variable ${r.name}${r.user ? ` of ${r.user}` : ""} on ${current}?`, again);
+    };
+  }).catch((e) => toolErr($("#envt"), e));
+}
+
+async function loadNetwork(el) {
+  el.innerHTML = `<div class="toolbar"><button class="ghost" data-net="flushdns">Flush DNS cache</button><button class="ghost" data-net="registerdns">Register in DNS</button>
+    <button class="ghost" data-net="renew">Release and renew DHCP</button><button class="ghost" data-net="gpupdate">Group Policy update</button><button class="ghost" id="netref">Refresh</button></div>
+    <h2>Adapters</h2><div id="nat">${asking()}</div><h2>Connections and listening ports</h2><div class="toolbar"><input id="ncf" placeholder="Filter by address, port or program">
+    <label class="chk muted"><input type="checkbox" id="nclisten"> Listening only</label></div><div id="nct"></div>`;
+  $("#netref").onclick = () => loadNetwork(el);
+  const asks = { flushdns: `Clear the DNS cache on ${current}?`, registerdns: `Re-register ${current} in DNS?`,
+    renew: `Release and renew the DHCP lease on ${current}? It drops off the network for a few seconds (and may get a new IP).`, gpupdate: `Run gpupdate /force on ${current}? Takes up to a minute and a half.` };
+  el.querySelectorAll("[data-net]").forEach((b) => b.onclick = () => pcChange("net", b.dataset.net, {}, asks[b.dataset.net]));
+  view("network").then((rows) => table($("#nat"), rows, ["name", "status", "speed", "ip", "gateway", "dns", "dhcp", "suffix", "mac", "description"], {
+    cell: { status: (v) => `<span class="pill ${v === "Up" ? "good" : "mute"}">${esc(v)}</span>`, dhcp: (v) => (v ? "DHCP" : v === false ? "static" : ""),
+      description: (v) => `<span class="small muted">${esc(v)}</span>` } })).catch((e) => toolErr($("#nat"), e));
+  let conns = [];
+  const draw = () => table($("#nct"), conns.filter((c) => !$("#nclisten").checked || /listen/i.test(c.state)), ["proto", "local", "remote", "state", "process", "pid"], { filterEl: $("#ncf") });
+  $("#nclisten").onchange = draw;
+  view("connections").then((rows) => { conns = rows; draw(); }).catch((e) => toolErr($("#nct"), e));
+}
+
+async function loadDevices(el) {
+  el.innerHTML = `<div class="toolbar"><input id="dvf" placeholder="Filter devices"><label class="chk muted"><input type="checkbox" id="dvprob"> Problems only</label><button class="ghost" id="dvref">Refresh</button></div><div id="dvt">${asking()}</div>`;
+  $("#dvref").onclick = () => loadDevices(el);
+  let rows;
+  try { rows = await view("devices"); } catch (e) { return toolErr($("#dvt"), e); }
+  rows.sort((a, b) => (b.problem > 0) - (a.problem > 0) || String(a.class).localeCompare(String(b.class)) || String(a.name).localeCompare(String(b.name)));
+  const draw = () => table($("#dvt"), rows.filter((r) => !$("#dvprob").checked || r.problem > 0), ["class", "name", "status", "manufacturer", "driver", "driver_date", "provider"], { filterEl: $("#dvf"),
+    labels: { driver: "driver version" }, cell: { status: (v, r) => r.problem > 0 ? `<span class="pill bad" title="Device Manager error code ${r.problem}">${esc(v || "problem")} (code ${r.problem})</span>` : `<span class="muted small">${esc(v)}</span>` } });
+  $("#dvprob").onchange = draw;
+  draw();
 }
 
 // ------------------------------------------------------------ deployment queue and log
