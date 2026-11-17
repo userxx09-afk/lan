@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import os
 import secrets
 import threading
 from contextlib import asynccontextmanager
@@ -780,6 +781,71 @@ def device_change(hostname: str, body: ChangeIn, user=Depends(ui_auth), db=Depen
     from . import remote
     dev = _device(db, hostname)
     return _remote(lambda: remote.change(db, dev, user, body.kind, body.op, body.args))
+
+
+@app.get("/api/devices/{hostname}/files", dependencies=UI)
+def device_files(hostname: str, path: str = "C:\\", db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.files(db, dev, path))
+
+
+@app.get("/api/devices/{hostname}/files/text", dependencies=UI)
+def device_file_text(hostname: str, path: str, tail: bool = False, db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.file_text(db, dev, path, tail))
+
+
+class FileOpIn(BaseModel):
+    op: str
+    path: str
+    name: str = ""
+
+
+@app.post("/api/devices/{hostname}/files")
+def device_file_op(hostname: str, body: FileOpIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.file_op(db, dev, user, body.op, body.path, body.name))
+
+
+@app.get("/api/devices/{hostname}/files/download")
+def device_file_download(hostname: str, path: str, user=Depends(ui_auth), db=Depends(db_session)):
+    import tempfile
+    from starlette.background import BackgroundTask
+    from . import remote
+    dev = _device(db, hostname)
+    fd, tmp = tempfile.mkstemp(prefix="netinv-dl-")
+    os.close(fd)
+    try:
+        info = _remote(lambda: remote.download(db, dev, user, path, tmp))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    return FileResponse(tmp, filename=info["name"], media_type="application/octet-stream",
+                        background=BackgroundTask(lambda: os.path.exists(tmp) and os.unlink(tmp)))
+
+
+@app.put("/api/devices/{hostname}/files/upload")
+async def device_file_upload(hostname: str, path: str, name: str, request: Request, user=Depends(ui_auth), db=Depends(db_session)):
+    import tempfile
+    from starlette.concurrency import run_in_threadpool
+    from . import remote
+    dev = _device(db, hostname)
+    fd, tmp = tempfile.mkstemp(prefix="netinv-ul-")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > remote.MAX_TRANSFER:
+                    return {"ok": False, "output": f"Files over {remote.MAX_TRANSFER // 1048576} MB aren't copied from here."}
+                f.write(chunk)
+        return await run_in_threadpool(lambda: _remote(lambda: remote.upload(db, dev, user, path, name, tmp, size)))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 class FixIn(BaseModel):

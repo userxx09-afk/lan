@@ -66,6 +66,11 @@ for kind, op, a in (("share", "add", {"name": "Scans", "path": r"D:\Scans", "acc
                     ("net", "renew", {}), ("net", "gpupdate", {})):
     r = remote.change(None, dev, "t", kind, op, a)
     assert r["ok"], (kind, op, r)
+remote.files(None, dev, "C:\\Users")
+remote.file_text(None, dev, "C:\\Windows\\Logs\\x.log", True)
+seen.append(pctools.D + remote.FILE_INFO.replace("__PATH__", ""))
+for op in remote.FILE_OPS:
+    remote.file_op(None, dev, "t", op, "C:\\Temp\\x", "y")
 
 from netinv import agentpush  # noqa: E402
 for s in (agentpush.INSTALL, agentpush.REMOVE):

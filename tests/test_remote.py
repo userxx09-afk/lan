@@ -114,6 +114,41 @@ with TestClient(m.app) as c:
     for op in ("flushdns", "registerdns", "renew", "gpupdate"):
         assert ok("net", op, {}), op
 
+    # files
+    n = len(sent)
+    for bad in ("..\\x", "C:\\a\\..\\Windows", "\\\\srv\\c$", "C:relative", "C:\\a|b"):
+        assert c.get(f"{u}/files", params={"path": bad}).status_code == 400, bad
+    for body in ({"op": "delete", "path": "C:\\Windows"}, {"op": "delete", "path": "C:\\"}, {"op": "rename", "path": "C:\\Program Files", "name": "x"},
+                 {"op": "delete", "path": "C:\\Windows\\System32\\drivers"}, {"op": "mkdir", "path": "C:\\Temp", "name": "a/b"}, {"op": "format", "path": "C:\\Temp"}):
+        assert not c.post(f"{u}/files", json=body).json()["ok"], body
+    assert len(sent) == n
+    c.get(f"{u}/files", params={"path": "C:"})
+    assert "C:\\" in decoded(sent[-1])
+    assert c.post(f"{u}/files", json={"op": "delete", "path": "C:\\Users\\Public\\x.txt"}).json()["ok"]
+    assert c.post(f"{u}/files", json={"op": "mkdir", "path": "C:\\Temp", "name": "new $(calc)"}).json()["ok"] and "new $(calc)" in decoded(sent[-1])
+    from netinv import remote
+    calls = []
+
+    class FakeClient:
+        def execute_ps(self, s): return "ok", None, False
+        def fetch(self, src, dest): calls.append(("fetch", src)); Path(dest).write_bytes(b"hello")
+        def copy(self, src, dest): calls.append(("copy", dest, Path(src).read_bytes()))
+    winrm._client = lambda host, cfg: FakeClient()
+    real = sent.append
+    r = c.put(f"{u}/files/upload", params={"path": "C:\\Temp", "name": "a.txt"}, content=b"data123")
+    assert r.json()["ok"] and calls[-1] == ("copy", "C:\\Temp\\a.txt", b"data123"), (r.text, calls)
+    assert not c.put(f"{u}/files/upload", params={"path": "C:\\Windows", "name": "a.txt"}, content=b"x").json()["ok"]
+    assert not c.put(f"{u}/files/upload", params={"path": "C:\\Temp", "name": "..\\a.txt"}, content=b"x").json()["ok"]
+    remote.MAX_TRANSFER = 4
+    assert not c.put(f"{u}/files/upload", params={"path": "C:\\Temp", "name": "a.txt"}, content=b"too long").json()["ok"]
+    remote.MAX_TRANSFER = 200 * 1024 * 1024
+    winrm.run_ps = lambda a, cfg, s: {"size": 5, "name": "x.log"} if "Get-Item -LiteralPath $p" in s and "ReadAllBytes" not in s else fake(a, cfg, s)
+    r = c.get(f"{u}/files/download", params={"path": "C:\\Temp\\x.log"})
+    assert r.status_code == 200 and r.content == b"hello" and "x.log" in r.headers["content-disposition"], r.text
+    winrm.run_ps = lambda a, cfg, s: {"size": 300 * 1024 * 1024, "name": "big.iso"}
+    assert c.get(f"{u}/files/download", params={"path": "C:\\Temp\\big.iso"}).status_code == 400
+    winrm.run_ps = fake
+
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []
     assert any("Command (powershell)" in (x.get("detail") or x.get("text") or str(x)) for x in hist), hist[:3]

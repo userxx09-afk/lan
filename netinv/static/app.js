@@ -417,6 +417,8 @@ function renderAssetTab(d, tab) {
     loadNetwork(el);
   } else if (tab === "devices") {
     loadDevices(el);
+  } else if (tab === "files") {
+    loadFiles(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -1095,6 +1097,85 @@ async function loadDevices(el) {
     labels: { driver: "driver version" }, cell: { status: (v, r) => r.problem > 0 ? `<span class="pill bad" title="Device Manager error code ${r.problem}">${esc(v || "problem")} (code ${r.problem})</span>` : `<span class="muted small">${esc(v)}</span>` } });
   $("#dvprob").onchange = draw;
   draw();
+}
+
+// ------------------------------------------------------------ remote files: browse, view, download, upload (remote.py)
+let filePath = "C:\\Users";
+const fmtSize = (n) => (n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`);
+const joinPath = (a, b) => `${a.replace(/\\$/, "")}\\${b}`;
+const TEXT_EXT = /^\.(txt|log|ini|cfg|conf|xml|json|csv|ps1|psm1|bat|cmd|reg|htm|html|md|yml|yaml|config|inf|vbs|js|tmp)$/i;
+async function loadFiles(el) {
+  const host = current;
+  el.innerHTML = `<div class="toolbar wrap"><select id="fdrive"></select><input id="fpath" class="wide" value="${esc(filePath)}" spellcheck="false"><button id="fgo">Open</button>
+    <button class="ghost" id="fup">Up</button><button class="ghost" id="fmk">New folder</button>
+    <label class="btnlike ghost">Upload files<input type="file" id="fupload" multiple hidden></label><button class="ghost" id="fref">Refresh</button></div>
+    <div id="fxfer"></div><div id="ftable">${asking()}</div>`;
+  const go = (p) => { filePath = p; loadFiles(el); };
+  $("#fgo").onclick = () => go($("#fpath").value.trim());
+  $("#fpath").onkeydown = (e) => { if (e.key === "Enter") go($("#fpath").value.trim()); };
+  $("#fref").onclick = () => go(filePath);
+  $("#fup").onclick = () => { const i = filePath.replace(/\\$/, "").lastIndexOf("\\"); if (i >= 2) go(i === 2 ? filePath.slice(0, 3) : filePath.slice(0, i)); };
+  const op = async (body, q) => {
+    if (q && !(await confirmBox(q))) return;
+    try { const r = await post(hostApi("files"), body); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    if (current === host) go(filePath);
+  };
+  $("#fmk").onclick = async () => { const n = await ask(`New folder in ${filePath}`); if (n) op({ op: "mkdir", path: filePath, name: n.trim() }); };
+  let d;
+  try { d = await api(hostApi(`files?path=${encodeURIComponent(filePath)}`)); } catch (e) { return toolErr($("#ftable"), e); }
+  filePath = d.path; $("#fpath").value = d.path;
+  $("#fdrive").innerHTML = d.drives.map((x) => `<option value="${esc(x.name)}" ${d.path.toUpperCase().startsWith(x.name.toUpperCase()) ? "selected" : ""}>${esc(x.name)} (${x.free_gb} GB free)</option>`).join("");
+  $("#fdrive").onchange = (e) => go(e.target.value);
+  $("#fupload").onchange = (e) => uploadFiles([...e.target.files], d.path, d.max_mb, () => current === host && go(filePath));
+  const rows = d.items.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name)).map((x) => ({ ...x, act: x.name }));
+  table($("#ftable"), rows, ["name", "size", "modified", "act"], {
+    labels: { act: "" },
+    cell: { name: (v, r) => r.dir ? `<a class="link" data-fdir="${esc(v)}">📁 ${esc(v)}</a>` : `<span class="${r.hidden ? "muted" : ""}">${esc(v)}</span>`,
+      size: (v) => esc(fmtSize(v)), modified: localTime,
+      act: (n, r) => [!r.dir && TEXT_EXT.test(r.ext || "") && `<a class="link" data-fview="${esc(n)}">View</a>`,
+        !r.dir && (r.size <= d.max_mb * 1048576 ? `<a class="link" data-fdl="${esc(n)}">Download</a>` : `<span class="muted small" title="Over ${d.max_mb} MB">too big</span>`),
+        `<a class="link" data-fren="${esc(n)}">Rename</a>`, `<a class="link" data-fdel="${esc(n)}" data-isdir="${r.dir ? 1 : ""}">Delete</a>`].filter(Boolean).join(" &nbsp; ") } });
+  const t = $("#ftable");
+  t.querySelectorAll("[data-fdir]").forEach((a) => a.onclick = () => go(joinPath(d.path, a.dataset.fdir)));
+  t.querySelectorAll("[data-fdl]").forEach((a) => a.onclick = () => {
+    toast(`Copying ${a.dataset.fdl} from ${host}… The download starts when it has arrived (large files take a while).`);
+    location.href = hostApi(`files/download?path=${encodeURIComponent(joinPath(d.path, a.dataset.fdl))}`);
+  });
+  t.querySelectorAll("[data-fview]").forEach((a) => a.onclick = () => viewFile(joinPath(d.path, a.dataset.fview)));
+  t.querySelectorAll("[data-fren]").forEach((a) => a.onclick = async () => {
+    const f = await formModal(`<h3>Rename ${esc(a.dataset.fren)}</h3><label>New name <input name="n" value="${esc(a.dataset.fren)}"></label>`);
+    if (f && f.n.trim() && f.n.trim() !== a.dataset.fren) op({ op: "rename", path: joinPath(d.path, a.dataset.fren), name: f.n.trim() });
+  });
+  t.querySelectorAll("[data-fdel]").forEach((a) => a.onclick = () => op({ op: "delete", path: joinPath(d.path, a.dataset.fdel) },
+    `Delete ${a.dataset.isdir ? "the folder" : ""} ${joinPath(d.path, a.dataset.fdel)}${a.dataset.isdir ? " and everything in it" : ""} on ${host}? It doesn't go to the Recycle Bin.`));
+}
+async function viewFile(path, tail = true) {
+  let r;
+  try { r = await api(hostApi(`files/text?path=${encodeURIComponent(path)}&tail=${tail}`)); } catch (e) { return toast(errText(e), true); }
+  const note = r.binary ? "This looks like a binary file; download it instead." : r.shown < r.size ? `Showing the ${r.tail ? "last" : "first"} ${fmtSize(r.shown)} of ${fmtSize(r.size)}.` : fmtSize(r.size);
+  formModal(`<h3>${esc(path)}</h3><p class="muted small">${esc(note)}</p>${r.binary ? "" : `<pre class="code small" style="max-height:60vh">${esc(r.text)}</pre>`}`, true,
+    (form) => { const pre = form.querySelector("pre"); if (pre && r.tail) pre.scrollTop = pre.scrollHeight; });
+}
+function uploadFiles(list, folder, maxMb, done) {
+  const box = $("#fxfer");
+  let left = list.length;
+  for (const f of list) {
+    const row = document.createElement("div"); row.className = "xfer small";
+    if (f.size > maxMb * 1048576) { row.innerHTML = `<span class="pill bad">too big</span> ${esc(f.name)} is ${fmtSize(f.size)} (limit ${maxMb} MB)`; box.appendChild(row); if (!--left) done(); continue; }
+    row.innerHTML = `<span class="pill warn">uploading</span> ${esc(f.name)} <progress max="100" value="0"></progress> <span class="muted"></span>`;
+    box.appendChild(row);
+    const x = new XMLHttpRequest();
+    x.open("PUT", hostApi(`files/upload?path=${encodeURIComponent(folder)}&name=${encodeURIComponent(f.name)}`));
+    x.upload.onprogress = (e) => { if (e.lengthComputable) { row.querySelector("progress").value = Math.round(e.loaded * 100 / e.total); if (e.loaded === e.total) row.querySelector(".muted").textContent = "sending to the PC…"; } };
+    x.onload = () => {
+      let r; try { r = JSON.parse(x.responseText); } catch { r = { ok: false, output: x.responseText }; }
+      const ok = x.status < 300 && r.ok;
+      row.innerHTML = `<span class="pill ${ok ? "good" : "bad"}">${ok ? "done" : "failed"}</span> ${esc(f.name)}: ${esc(r.output || r.detail || "")}`;
+      if (!--left) done();
+    };
+    x.onerror = () => { row.innerHTML = `<span class="pill bad">failed</span> ${esc(f.name)}: connection lost`; if (!--left) done(); };
+    x.send(f);
+  }
 }
 
 // ------------------------------------------------------------ deployment queue and log

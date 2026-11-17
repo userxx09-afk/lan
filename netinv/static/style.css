@@ -292,3 +292,6 @@ span.code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; whit
 .perfrow { display: grid; grid-template-columns: 40px 1fr; gap: 8px; align-items: center; margin: 4px 0; }
 .toolbar label.chk { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .toolbar label.chk input { width: auto; }
+label.btnlike { display: inline-block; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+.xfer { margin: 4px 0; display: flex; gap: 8px; align-items: center; }
+.xfer progress { width: 160px; }
