@@ -523,3 +523,145 @@ $t = Get-ScheduledTask -TaskPath $path -TaskName $name
         return fail("Unknown change.")
     head = "".join(f"${k} = D '{_b(a.get(k, ''))}'\n" for k in ("name", "path", "desc", "access", "account", "value", "location"))
     return _go(db, dev, who, key, detail, head + body)
+
+
+# ------------------------------------------------------------------ remote files (browse, view, download, upload)
+MAX_TRANSFER = 200 * 1024 * 1024      # per file, either way
+MAX_PARALLEL = 4                       # transfers at once (they share the server's bandwidth)
+FPATH_RE = re.compile(r"^[A-Za-z]:\\([^\x00-\x1f*?\"<>|:]{0,1000})$")
+FNAME_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,255}$")
+# never deleted, renamed or written from here (a typo here would break the PC)
+FILE_LOCKED = re.compile(r"^[A-Za-z]:\\(windows|program files|program files \(x86\)|programdata|users|boot|recovery|system volume information)?\\?$|"
+                         r"^[A-Za-z]:\\windows\\(system32|syswow64|winsxs)(\\|$)", re.I)
+
+FILES = r'''
+$p = D '__PATH__'
+$drives = @(Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -in 2, 3 } | ForEach-Object { [pscustomobject]@{ name = $_.DeviceID + '\'; free_gb = [math]::Round($_.FreeSpace / 1GB, 1); size_gb = [math]::Round($_.Size / 1GB, 1) } })
+if (-not (Test-Path -LiteralPath $p -PathType Container)) { throw "That folder doesn't exist on this PC." }
+$items = @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Select-Object -First 5000 | ForEach-Object {
+  [pscustomobject]@{ name = $_.Name; dir = $_.PSIsContainer; size = if ($_.PSIsContainer) { $null } else { [int64]$_.Length }
+    modified = $_.LastWriteTimeUtc.ToString('s'); hidden = [bool]($_.Attributes -band [IO.FileAttributes]::Hidden); ext = $_.Extension } })
+@{ path = (Get-Item -LiteralPath $p -Force).FullName; items = $items; drives = $drives } | ConvertTo-Json -Compress -Depth 3
+'''
+FILE_INFO = r'''
+$p = D '__PATH__'
+$f = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+if ($f.PSIsContainer) { throw 'That is a folder.' }
+@{ size = [int64]$f.Length; name = $f.Name } | ConvertTo-Json -Compress
+'''
+FILE_TEXT = r'''
+$p = D '__PATH__'
+$f = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+if ($f.PSIsContainer) { throw 'That is a folder.' }
+$n = [Math]::Min([int64]$f.Length, __MAX__)
+$fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite, Delete')       # also opens logs another program is writing
+try { if (__TAIL__ -and $f.Length -gt $n) { [void]$fs.Seek(-$n, 'End') }; $buf = New-Object byte[] $n; $got = $fs.Read($buf, 0, $n) } finally { $fs.Close() }
+$bin = ($buf[0..([Math]::Min($got, 4000) - 1)] | Where-Object { $_ -eq 0 }).Count -gt 0 -and -not ($got -ge 2 -and $buf[0] -eq 0xFF -and $buf[1] -eq 0xFE)
+$enc = if ($got -ge 2 -and $buf[0] -eq 0xFF -and $buf[1] -eq 0xFE) { [Text.Encoding]::Unicode } else { [Text.Encoding]::UTF8 }
+@{ size = [int64]$f.Length; shown = $got; binary = $bin; tail = [bool](__TAIL__ -and $f.Length -gt $n); text = $(if ($bin) { '' } else { $enc.GetString($buf, 0, $got) }) } | ConvertTo-Json -Compress
+'''
+FILE_OPS = {
+    "mkdir": ("New folder", "New-Item -ItemType Directory -Path (Join-Path $p $name) -ErrorAction Stop | Out-Null\n$m = 'folder created'"),
+    "rename": ("Rename", "Rename-Item -LiteralPath $p -NewName $name -ErrorAction Stop\n$m = \"renamed to $name\""),
+    "delete": ("Delete", r'''$i = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+if ($i.PSIsContainer) { $c = @(Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue).Count; Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; $m = "folder deleted with $c item(s)" }
+else { $s = $i.Length; Remove-Item -LiteralPath $p -Force -ErrorAction Stop; $m = "deleted ($s bytes)" }'''),
+}
+
+
+def fpath(path: str) -> str:
+    p = (path or "").strip().replace("/", "\\")
+    if re.match(r"^[A-Za-z]:$", p):
+        p += "\\"
+    if not FPATH_RE.match(p) or "\\..\\" in p + "\\" or "\\\\" in p[2:]:
+        raise ValueError("Give a local path like C:\\Users\\Public (no ..).")
+    return p
+
+
+def files(db, dev: Device, path: str) -> dict:
+    p = fpath(path or "C:\\")
+    r = _run(db, dev, FILES.replace("__PATH__", _b(p)))
+    return {"path": r.get("path") or p, "items": _list(r.get("items")), "drives": _list(r.get("drives")), "max_mb": MAX_TRANSFER // 1048576}
+
+
+def file_text(db, dev: Device, path: str, tail: bool = False) -> dict:
+    p = fpath(path)
+    return _run(db, dev, FILE_TEXT.replace("__PATH__", _b(p)).replace("__MAX__", str(512 * 1024)).replace("__TAIL__", "$true" if tail else "$false"))
+
+
+def file_op(db, dev: Device, who: str, op: str, path: str, name: str = "") -> dict:
+    p = fpath(path)
+    if op not in FILE_OPS:
+        return {"ok": False, "output": "Unknown action."}
+    if op in ("mkdir", "rename") and not FNAME_RE.match(name or ""):
+        return {"ok": False, "output": "A name can't contain \\ / : * ? \" < > |."}
+    if op in ("rename", "delete") and (FILE_LOCKED.match(p) or p.count("\\") < 2 and len(p) <= 3):
+        return {"ok": False, "output": f"{p} is part of Windows; it isn't renamed or deleted from here."}
+    label, body = FILE_OPS[op]
+    return _go(db, dev, who, f"file.{op}", f"{label} {p}" + (f" → {name}" if name and op != "delete" else ""),
+               f"$p = D '{_b(p)}'\n$name = D '{_b(name)}'\n{body}\n@{{ ok = $true; message = $m }} | ConvertTo-Json -Compress")
+
+
+import threading  # noqa: E402
+_transfers = threading.BoundedSemaphore(MAX_PARALLEL)
+
+
+def _client(db, dev: Device):
+    """A pypsrp Client for this PC with the first credential the PC accepts (file transfer needs the Client itself)."""
+    from .actions import _addr
+    from .collectors import winrm
+    from .pctools import _cfg
+    cfg = _cfg(db)
+    last = None
+    for c in cfg.get("creds") or [{"user": cfg.get("user"), "password": cfg.get("password")}]:
+        cl = winrm._client(_addr(dev), {**cfg, **c, "timeout": 900})
+        try:
+            cl.execute_ps("'ok'")
+            return cl
+        except Exception as exc:
+            last = exc
+            if winrm.classify_error(exc) != "access_denied":
+                break
+    raise last
+
+
+def download(db, dev: Device, who: str, path: str, dest: str) -> dict:
+    """Copy one file from the PC to dest (a temp file on this server). Raises on failure."""
+    p = fpath(path)
+    info = _run(db, dev, FILE_INFO.replace("__PATH__", _b(p)))
+    size = int(info.get("size") or 0)
+    if size > MAX_TRANSFER:
+        raise PermissionError(f"{info.get('name')} is {size // 1048576} MB; files over {MAX_TRANSFER // 1048576} MB aren't copied from here.")
+    if not _transfers.acquire(timeout=1):
+        raise PermissionError(f"{MAX_PARALLEL} file transfers are already running; try again when one finishes.")
+    try:
+        _client(db, dev).fetch(p, dest)
+    except Exception as exc:
+        _record(db, dev, who, "file.download", f"Download {p}: {str(exc)[:200]}", False)
+        raise
+    finally:
+        _transfers.release()
+    _record(db, dev, who, "file.download", f"Download {p} ({size} bytes)", True)
+    return {"name": info.get("name") or p.split("\\")[-1], "size": size}
+
+
+def upload(db, dev: Device, who: str, folder: str, name: str, src: str, size: int) -> dict:
+    p = fpath(folder)
+    if not FNAME_RE.match(name or ""):
+        return {"ok": False, "output": "Bad file name."}
+    if size > MAX_TRANSFER:
+        return {"ok": False, "output": f"Files over {MAX_TRANSFER // 1048576} MB aren't copied from here."}
+    dest = p.rstrip("\\") + "\\" + name
+    if FILE_LOCKED.match(p):
+        return {"ok": False, "output": f"Files aren't copied into {p} from here."}
+    if not _transfers.acquire(timeout=1):
+        return {"ok": False, "output": f"{MAX_PARALLEL} file transfers are already running; try again when one finishes."}
+    try:
+        _client(db, dev).copy(src, dest)
+        ok, msg = True, f"copied to {dest}"
+    except Exception as exc:
+        ok, msg = False, str(exc).split("\n")[0][:300]
+    finally:
+        _transfers.release()
+    _record(db, dev, who, "file.upload", f"Upload {name} ({size} bytes) to {p}: {msg}", ok)
+    return {"ok": ok, "output": msg}

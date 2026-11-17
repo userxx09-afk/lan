@@ -177,6 +177,10 @@ Over WinRM, live, on demand:
 - **Command**: run one PowerShell or cmd command and see its output (not interactive; stopped after 30–100 s).
 - **WMI**: browse namespaces and classes and see a class's instances and properties, or run a WQL query
   (SELECT / ASSOCIATORS OF / REFERENCES OF only, so it can't change anything). Examples and copy-as-CSV included.
+- **Files**: browse any local drive of the PC; view a text file or log (the last 512 KB, even while another
+  program has it open), download a file, upload files (several at once), new folder, rename, delete. Transfers go over
+  WinRM, up to 200 MB per file and 4 at a time (they share the bandwidth). Windows, Program Files and the drive roots
+  can't be renamed, deleted or written to from here.
 - **Performance**: CPU, memory, disk activity, free space per drive, busiest processes and network throughput,
   refreshed every 10 s while the tab is open.
 - **Event logs**: any log (System, Application, Security, …) filtered by level, time span, source, event ID and
