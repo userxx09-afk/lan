@@ -249,7 +249,7 @@ the PC's History. The script's text is copied into each push when it's queued, s
 later never changes what an approved push runs; *Retry* runs the same text again. Saving and running scripts are in
 the audit log, with a fingerprint (SHA-256) of the text.
 
-### Run mode: who a script runs as (0.24)
+### Run mode: who a script runs as (0.26)
 
 Each script has a **Run mode** (edit it in Software > Scripts), like a deployment package's:
 
@@ -258,12 +258,12 @@ Each script has a **Run mode** (edit it in Software > Scripts), like a deploymen
 | **Select on deployment** (default) | asked each time you deploy | the Run as list starts on *Currently logged on user*; you can also pick any saved Windows credential |
 | Currently logged on user | the person signed in, with their own rights (not elevated) | a scheduled task in their session; if nobody is signed in, the push waits (like an offline PC) until someone signs in or the queue deadline passes |
 | Scanning credentials | the account that signs in over WinRM (the scan targets' ticked accounts) | runs with that account's password, so it can reach file shares |
-| System account | the PC's SYSTEM account | full rights on the PC, no network identity except the computer account (how every script ran before 0.24) |
+| System account | the PC's SYSTEM account | full rights on the PC, no network identity except the computer account (how every script ran before 0.26) |
 
 Picking a saved credential when deploying signs in *and* runs as that account. Picking *This server's own account*
 runs it without a stored password (S4U), so it has no access to file shares. The Run as column in Software >
 Deployments, and the deployment's name, show who each push ran as. *Retry* uses the same account again.
-Scripts saved before 0.24 are set to *Select on deployment*.
+Scripts saved before 0.26 are set to *Select on deployment*.
 
 The other deployments (app updates, uninstall/repair, Windows updates, services, reboots, Configure…, Push agent)
 have a **Sign in with** choice in their dialog: the scanning credentials (default), any saved Windows credential, or

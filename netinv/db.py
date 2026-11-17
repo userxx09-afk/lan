@@ -479,7 +479,7 @@ class Deployment(Base):
     cred_id: Mapped[int | None] = mapped_column(Integer)            # sign in with: None = the scan targets' credentials,
                                                                     # 0 = this server's own Windows account, else a credential
     run_mode: Mapped[str | None] = mapped_column(String(16))        # scripts: who it runs as on the PC (fixes.RUN_MODES);
-                                                                    # None = SYSTEM (pushes queued before 0.24)
+                                                                    # None = SYSTEM (pushes queued before 0.26)
 
 
 class Script(Base):
