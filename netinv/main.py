@@ -160,6 +160,46 @@ def me(user=Depends(ui_auth)):
     return {"user": user, "version": __version__}
 
 
+# ----------------------------------------------------------------- per-user view preferences (Computers columns)
+PREF_VIEWS = {"computers"}
+
+
+@app.get("/api/prefs/{view}")
+def get_prefs(view: str, user=Depends(ui_auth), db=Depends(db_session)):
+    if view not in PREF_VIEWS:
+        raise HTTPException(404)
+    raw = get_setting(db, f"prefs:{user.lower()}:{view}")
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+@app.put("/api/prefs/{view}")
+def put_prefs(view: str, body: dict, user=Depends(ui_auth), db=Depends(db_session)):
+    if view not in PREF_VIEWS:
+        raise HTTPException(404)
+    cols = body.get("columns")
+    if cols is not None:
+        known = set(reports.columns(db, "v_devices"))
+        if not isinstance(cols, list) or not all(isinstance(c, str) and c in known for c in cols):
+            raise HTTPException(400, "unknown column")
+    data = json.dumps(body)
+    if len(data) > 8000:
+        raise HTTPException(400, "too large")
+    set_setting(db, f"prefs:{user.lower()}:{view}", data)
+    db.commit()
+    return body
+
+
+@app.get("/api/domains", dependencies=UI)
+def list_domains(db=Depends(db_session)):
+    """AD/DNS domains the computers belong to, for the Computers list's domain filter."""
+    rows = db.execute(text("SELECT domain, COUNT(*) FROM v_devices WHERE domain IS NOT NULL AND domain <> '' "
+                           "GROUP BY domain ORDER BY domain")).all()
+    return [{"domain": d, "computers": n} for d, n in rows]
+
+
 # ----------------------------------------------------------------- sign-in settings (AD group, break-glass)
 class AuthIn(BaseModel):
     ad_domain: str | None = None

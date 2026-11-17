@@ -74,7 +74,11 @@
       </div>
     </div>
     <div class="gridbar">
-      <div class="group"><a class="link small" id="clearfilters">Remove filters</a></div>
+      <div class="group">
+        <label class="muted" id="domainwrap" hidden>Domain <select id="domainsel"><option value="">All domains</option></select></label>
+        <button class="ghost" id="colpick" title="Add, remove or reorder the columns in this list">Columns…</button>
+        <a class="link small" id="clearfilters">Remove filters</a>
+      </div>
       <div class="group">
         <button class="ghost" id="prev">‹ Previous</button><span id="pageinfo" class="muted"></span><button class="ghost" id="next">Next ›</button>
         <label class="muted">Show <select id="pagesize"><option>50</option><option selected>100</option><option>250</option><option>1000</option></select></label>

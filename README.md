@@ -471,7 +471,10 @@ mounted into the container.
   to their last PC, unlock, reset password, must change password, enable and disable.
 - **Computers grid:** a filter box on every column, sorting, paging, and multi-select with bulk actions
   (rescan, Wake on LAN, add to or remove from group, set state). Exports to Excel, CSV or XML cover
-  the selected rows, or every filtered row when nothing is selected.
+  the selected rows, or every filtered row when nothing is selected. A **Domain** drop-down narrows the list to one
+  AD domain (taken from each PC's AD distinguished name, else its DNS suffix). **Columns…** adds, removes and reorders
+  the list's columns from any field of the report builder's computer dataset (serial, RAM, domain, warranty, antivirus...);
+  every column gets its own filter box, and the choice is saved per signed-in user (*Reset to default* undoes it).
 - **Asset page:** an action sidebar (ping, remote desktop .rdp, copy `\\PC\c$` or `admin$` path,
   Wake on LAN, rescan, reboot with confirmation) and tabs for Summary, Software, Updates, Switch location
   history, Logons, History (software, OS, hardware and port changes between scans) and Comments.
