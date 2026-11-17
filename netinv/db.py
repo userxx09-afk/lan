@@ -83,6 +83,7 @@ class Device(Base):
     ad_description: Mapped[str | None] = mapped_column(Text)
     ad_location: Mapped[str | None] = mapped_column(String(255))
     ad_managed_by: Mapped[str | None] = mapped_column(Text)
+    ad_groups: Mapped[str | None] = mapped_column(Text)      # JSON list of memberOf DNs, lower case (direct only)
     # Live status (reach.py, agent heartbeats): None = never checked
     online: Mapped[bool | None] = mapped_column(Boolean)
     online_checked: Mapped[datetime | None] = mapped_column(DateTime)
@@ -277,11 +278,35 @@ class DeviceGroup(Base):
     dynamic: Mapped[bool | None] = mapped_column(Boolean, default=False)   # added by a group's rules (groups.py)
 
 
+class UserGroup(Base):
+    """A user's membership of a NetInventory user group (by hand, or dynamic = added by the group's rules)."""
+    __tablename__ = "user_groups"
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("ad_users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    dynamic: Mapped[bool | None] = mapped_column(Boolean, default=False)
+
+
+class AdGroup(Base):
+    """An AD group from the last AD import: lets group conditions follow nested membership and offer a picker."""
+    __tablename__ = "ad_groups"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dn: Mapped[str] = mapped_column(Text, unique=True)                # lower case
+    name: Mapped[str | None] = mapped_column(String(255))            # cn
+    sam: Mapped[str | None] = mapped_column(String(255))             # sAMAccountName
+    type: Mapped[str | None] = mapped_column(String(64))             # "Security - global"
+    description: Mapped[str | None] = mapped_column(Text)
+    member_of: Mapped[str | None] = mapped_column(Text)              # JSON list of parent group DNs, lower case
+    seen: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class GroupDef(Base):
-    """A rule-based computer group: members are the PCs matching its conditions (groups.py)."""
+    """A rule-based computer or user group: members are the PCs (or AD users) matching its conditions (groups.py)."""
     __tablename__ = "group_defs"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True)
+    kind: Mapped[str | None] = mapped_column(String(16), default="computers")   # computers | users (NULL = computers)
     description: Mapped[str | None] = mapped_column(Text)
     match: Mapped[str] = mapped_column(String(8), default="all")      # all | any
     conditions: Mapped[str] = mapped_column(Text)                     # JSON list of {field, value, not}
@@ -351,6 +376,7 @@ class AdUser(Base):
     created: Mapped[datetime | None] = mapped_column(DateTime)
     changed: Mapped[datetime | None] = mapped_column(DateTime)
     groups: Mapped[str | None] = mapped_column(Text)   # JSON list of {name, type}
+    group_dns: Mapped[str | None] = mapped_column(Text)   # JSON list of memberOf DNs, lower case (direct only)
     last_scanned: Mapped[datetime | None] = mapped_column(DateTime)
 
 

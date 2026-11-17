@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 from datetime import timedelta
 
-from .db import (AdUser, ArpEntry, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
+from .db import (AdGroup, AdUser, ArpEntry, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
 from .ingest import AvIn, PhysDiskIn, DiskIn, EndpointPayload, HotfixIn, LogonIn, Nic, PendingIn, SoftwareIn, add_logons, apply_endpoint
 
 USERS = ["jsmith", "mgarcia", "alee", "pnguyen", "kpatel", "rjohnson", "lchen", "dwilliams", "sbrown", "tmiller",
@@ -29,6 +29,11 @@ SOFTWARE = [("Google Chrome", ["142.0.7444.60", "138.0.7204.101", "131.0.6778.86
 
 def _mac(i: int) -> str:
     return f"00:1a:2b:{(i >> 8) & 255:02x}:{i & 255:02x}:{random.randint(16, 250):02x}"
+
+
+def _gjson(v) -> str:
+    import json
+    return json.dumps(v)
 
 
 def seed(db) -> str:
@@ -102,6 +107,7 @@ def seed(db) -> str:
             dev.online, dev.online_via = i % 6 != 0, random.choice(["ping", "tcp", "winrm"])
             dev.online_checked, dev.online_changed = now - timedelta(minutes=2), now - timedelta(hours=random.randint(1, 72))
         dev.ad_dn = f"CN={host},OU=Workstations,DC=corp,DC=example,DC=com"
+        dev.ad_groups = _gjson(["cn=bitlocker pcs,ou=groups,dc=corp,dc=example,dc=com"] if i % 3 == 0 else [])
         dev.fqdn = f"{host.lower()}.corp.example.com"
         dev.first_seen = dev.ad_created
         dev.purchase_date = dev.ad_created - timedelta(days=7)
@@ -166,7 +172,17 @@ def seed(db) -> str:
                                           {"name": f"{dept} Staff", "type": "Security - global"},
                                           {"name": f"ALL-{dept.upper().replace(' ', '')}", "type": "Distribution - universal"}]
                                          + ([{"name": "VPN Users", "type": "Security - universal"}] if k % 3 == 0 else [])),
+                      group_dns=_json.dumps([f"cn={dept.lower()} staff,ou=groups,dc=corp,dc=example,dc=com",
+                                             f"cn=all-{dept.lower().replace(' ', '')},ou=groups,dc=corp,dc=example,dc=com"]
+                                            + (["cn=vpn users,ou=groups,dc=corp,dc=example,dc=com"] if k % 3 == 0 else [])),
                       last_scanned=now))
+    # AD groups: "<dept> Staff" sit inside "All Staff", so a condition on All Staff finds everyone by nesting
+    gdn = lambda n: f"cn={n.lower()},ou=groups,dc=corp,dc=example,dc=com"
+    for n, t, parents in ([("All Staff", "Security - global", []), ("VPN Users", "Security - universal", []),
+                           ("BitLocker PCs", "Security - global", [])]
+                          + [(f"{d} Staff", "Security - global", [gdn("All Staff")]) for d in depts]
+                          + [(f"ALL-{d.upper().replace(' ', '')}", "Distribution - universal", []) for d in depts]):
+        db.add(AdGroup(dn=gdn(n), name=n, sam=n, type=t, member_of=_json.dumps(parents), seen=now))
     # A couple of devices nobody knows about (printers, a rogue AP...)
     for j, (vendor_mac, ip) in enumerate((("3c:2a:f4:11:22:33", "10.10.0.240"), ("b4:fb:e4:aa:bb:cc", "10.10.0.241"))):
         port = SwitchPort(switch=access[j], ifindex=200 + j, name=f"Gi1/0/{40 + j}", alias="", oper_up=True,

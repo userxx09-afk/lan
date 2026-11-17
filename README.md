@@ -252,6 +252,7 @@ Make groups without picking PCs in the Computers list. A group is defined by con
 | Host name | `LAB-*`, `KIOSK??` | wildcards `*` and `?`; plain text = contains |
 | Hardware model / Manufacturer | `OptiPlex 70*`, `HP*` | contains, or wildcards |
 | AD OU | `corp.example.com/Sites/Office/PCs` or a DN | that OU and the OUs under it |
+| AD group (security group) | `BitLocker PCs`, `IT-*` or a DN | members of that AD group, groups inside it included |
 | Operating system / State | `Windows 11`, `Stock` | |
 | Other field... | `av_name` is `*Defender*`, `ram_gb` less than `8`, `warranty_end` less than `2027-01-01`, `model` is empty | any column of the Computers list (the report builder's fields): is, is not, less / more than (numbers, dates), empty, not empty |
 
@@ -268,6 +269,25 @@ Use a group as a target: *Run script* and *Push agent* on the Groups tab (or the
 *Show in Computers* to act on its PCs with the usual buttons, and in a scan job (Settings > Scan schedule) *Only PCs
 in this group* limits PC inventory and Windows update scans to its members. Renaming a group carries its scan jobs
 along; a group a scan job uses can't be deleted until the job is changed.
+
+### User groups
+
+A group can hold AD users instead of computers (*New group* > *Holds: Users*). Conditions: user name, display name,
+department, job title, office, company, **AD OU** (ADUC path or DN, sub-OUs included), **AD group** (name, wildcard
+or DN; nested groups count, and `Domain Users` matches everyone), account (Enabled / Disabled / Locked) and any
+column of the Users list. *Always include these users* adds people by name. Members follow AD after each import.
+
+What a user group is for:
+- *Show in Users*: the Users list filtered to the group (the Users list also has a Groups column).
+- *Account actions*: unlock, enable, disable or "must change password" for everyone in the group, one by one in AD,
+  each change in the audit log.
+- *Run script on their PCs* / *Configure their PCs*, and scan jobs: a user group used as a computer target means the
+  computers its users signed in to in the last 30 days.
+- **Sign-in access**: Settings > Sign-in > *Or members of this user group* lets that group sign in to NetInventory,
+  alongside (or instead of) the AD group. The group's conditions are checked against the user's live AD entry at each
+  sign-in, so moving someone into the OU or AD group gives access straight away.
+
+AD group conditions use the groups stored by the AD import (0.23 and later), so run the AD import once after updating.
 
 ## Dashboard drill-down
 
