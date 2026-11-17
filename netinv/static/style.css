@@ -279,3 +279,6 @@ span.code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; whit
 .gcond select[name^=cf_] { flex: 0 0 12em; } .gcond select[name^=co_] { flex: 0 1 12em; }
 .gcond input { flex: 1 1 8em !important; }
 .modal fieldset { min-width: 0; }
+.cmdform textarea { margin-top: 6px; }
+.cmdblock { margin: 12px 0; }
+.cmdblock pre.code { margin-top: 4px; }

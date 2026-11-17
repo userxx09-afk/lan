@@ -43,6 +43,20 @@ for name in ("WU_SCRIPT", "WINGET_SCRIPT", "REMOVE_SCRIPT", "LAUNCH", "RESULT", 
         s = s.replace(k, v)          # filled in the same way before a script is sent
     seen.append(s)
 
+from netinv import remote  # noqa: E402
+remote._run = pctools._run
+remote._record = pctools._record
+for op in remote.POWER:
+    remote.power(None, dev, "t", op, 5 if op in ("shutdown", "restart") else 0, "Save your work")
+seen.append(pctools.D + remote.SESSIONS)
+for op in remote.SESSION_OPS:
+    remote.session_op(None, dev, "t", op, 2)
+remote.message(None, dev, "t", "Hello", "IT", "alee")
+remote.command(None, dev, "t", "ipconfig /all", "cmd")
+remote.wmi_browse(None, dev, "root\\cimv2")
+remote.wmi_class(None, dev, "root\\cimv2", "Win32_BIOS")
+remote.wmi_query(None, dev, "root\\cimv2", "SELECT * FROM Win32_BIOS")
+
 from netinv import agentpush  # noqa: E402
 for s in (agentpush.INSTALL, agentpush.REMOVE):
     for k, v in {"__NAME__": "agent-install", "__SERVER__": "https://netinv.corp.local:8080", "__TOKEN__": "nip_x",

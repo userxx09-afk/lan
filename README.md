@@ -172,6 +172,15 @@ Over WinRM, live, on demand:
   local user accounts (enabled, admin, last sign-in; enable/disable). The built-in Administrator, Domain Admins and
   the account NetInventory signs in with can't be removed or disabled from here.
 
+- **Sessions**: everyone signed in (console or Remote Desktop) with state, idle time and sign-in time; send a
+  session a message, disconnect it, or log it off.
+- **Command**: run one PowerShell or cmd command and see its output (not interactive; stopped after 30–100 s).
+- **WMI**: browse namespaces and classes and see a class's instances and properties, or run a WQL query
+  (SELECT / ASSOCIATORS OF / REFERENCES OF only, so it can't change anything). Examples and copy-as-CSV included.
+- **Power** (left side): restart or shut down now or after a delay with a notice to the user, cancel a pending
+  shutdown, hibernate, sleep, lock the screen, log off everyone. **Send a pop-up message** to everyone on the PC, one
+  session, or (from a user's page) that user on their last PC; one way, shown with `msg.exe`.
+
 Every change is confirmed first and written to the audit log and the PC's History. Text typed in the browser is
 sent to the PC as data (base64-encoded), never pasted into the script as code.
 

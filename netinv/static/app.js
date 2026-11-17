@@ -399,6 +399,12 @@ function renderAssetTab(d, tab) {
     loadPrinters(el);
   } else if (tab === "accounts") {
     loadAccounts(el);
+  } else if (tab === "sessions") {
+    loadSessions(el);
+  } else if (tab === "command") {
+    loadCommand(el);
+  } else if (tab === "wmi") {
+    loadWmi(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -754,6 +760,163 @@ async function loadAccounts(el) {
   $("#lutab").querySelectorAll("[data-lu]").forEach((a) => a.onclick = () => act(a.dataset.lu, a.dataset.n, `${a.dataset.lu === "disable" ? "Disable" : "Enable"} the local account ${a.dataset.n} on ${current}?`));
 }
 
+// ------------------------------------------------------------ power, sessions, pop-up messages, remote command, WMI (remote.py)
+const POW_ASK = {
+  shutdown: "Shut down", restart: "Restart", abort: "Cancel a pending shutdown or restart on", hibernate: "Hibernate", sleep: "Put to sleep",
+  lock: "Lock the screen of", logoff_all: "Log off everyone signed in to",
+};
+async function powerDialog(host, op) {
+  let body = { op };
+  if (op === "shutdown" || op === "restart") {
+    const f = await formModal(`<h3>${op === "shutdown" ? "Shut down" : "Restart"} ${esc(host)}</h3>
+      <label>When <select name="minutes"><option value="0">Now</option><option value="1">In 1 minute</option><option value="5" ${op === "restart" ? "selected" : ""}>In 5 minutes</option>
+        <option value="15">In 15 minutes</option><option value="60">In 1 hour</option></select></label>
+      <label>Notice shown to the signed-in user <textarea name="message" rows="2">Your IT department is ${op === "shutdown" ? "shutting down" : "restarting"} this computer. Please save your work.</textarea></label>
+      <p class="muted small">With a delay the user sees the notice and a countdown; Cancel pending shutdown stops it. ${op === "shutdown" ? "A shut-down PC only comes back with Wake on LAN or the power button." : ""}</p>`);
+    if (!f) return;
+    body = { op, minutes: +f.minutes, message: f.message };
+    if (!(await confirmBox(`${POW_ASK[op]} ${host} ${body.minutes ? `in ${body.minutes} minute(s)` : "now"}? Unsaved work is lost.`))) return;
+  } else {
+    const extra = { hibernate: " It stays off until Wake on LAN or the power button.", logoff_all: " Unsaved work in every session is lost.", sleep: " It stays asleep until woken." }[op] || "";
+    if (!(await confirmBox(`${POW_ASK[op]} ${host}?${extra}`))) return;
+  }
+  try { const r = await post(`/api/devices/${encodeURIComponent(host)}/power`, body); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+}
+document.querySelectorAll("[data-pow]").forEach((b) => b.onclick = () => powerDialog(current, b.dataset.pow));
+async function messageDialog(host, opts = {}) {
+  if (!host) return toast("No computer known for this user yet.", true);
+  const to = opts.user ? `${opts.user} on ${host}` : opts.session ? `session ${opts.session} on ${host}` : `everyone signed in to ${host}`;
+  const f = await formModal(`<h3>Pop-up message to ${esc(to)}</h3>
+    <label>Title <input name="title" value="Message from IT" maxlength="120"></label>
+    <label>Message <textarea name="text" rows="4" maxlength="2000" required></textarea></label>
+    <label>Stays on screen for <select name="seconds"><option value="60">1 minute</option><option value="300" selected>5 minutes</option>
+      <option value="3600">1 hour</option><option value="86400">until they close it (24 hours)</option></select></label>
+    <p class="muted small">One way: the user sees it and clicks OK; they can't reply. Logged in the PC's History.</p>`);
+  if (!f || !f.text.trim()) return;
+  try {
+    const r = await post(`/api/devices/${encodeURIComponent(host)}/message`, { text: f.text, title: f.title, seconds: +f.seconds, user: opts.user || "", session: opts.session || 0 });
+    toast(r.output, !r.ok);
+  } catch (e) { toast(errText(e), true); }
+}
+$("#pcmessage").onclick = () => messageDialog(current);
+
+async function loadSessions(el) {
+  el.innerHTML = `<div class="toolbar"><button id="ssmsg">Message everyone</button><button class="ghost" id="ssref">Refresh</button>
+    <span class="muted small">Everyone signed in to ${esc(current)}, at the console or over Remote Desktop.</span></div><div id="sst">${asking()}</div>`;
+  $("#ssref").onclick = () => loadSessions(el);
+  $("#ssmsg").onclick = () => messageDialog(current);
+  let d;
+  try { d = await api(hostApi("sessions")); } catch (e) { return toolErr($("#sst"), e); }
+  table($("#sst"), d.sessions.map((s) => ({ ...s, act: s.id })), ["user", "session", "id", "state", "idle", "logon", "act"], {
+    labels: { session: "type", idle: "idle", logon: "signed in", act: "" },
+    cell: { user: (v) => userLink(String(v || "").toLowerCase()), session: (v) => esc(v ? (/^console$/i.test(v) ? "console" : /^rdp/i.test(v) ? "remote desktop" : v) : "(disconnected)"),
+      state: (v) => `<span class="pill ${/^act/i.test(v) ? "good" : "mute"}">${esc(v)}</span>`, logon: (v) => esc(v),
+      act: (id, r) => `<a class="link" data-ss="message" data-id="${id}" data-u="${esc(r.user)}">Message</a> &nbsp; ${/^disc/i.test(r.state) ? "" : `<a class="link" data-ss="disconnect" data-id="${id}" data-u="${esc(r.user)}">Disconnect</a> &nbsp; `}<a class="link" data-ss="logoff" data-id="${id}" data-u="${esc(r.user)}">Log off</a>` } });
+  $("#sst").querySelectorAll("[data-ss]").forEach((a) => a.onclick = async () => {
+    const op = a.dataset.ss, id = +a.dataset.id, u = a.dataset.u;
+    if (op === "message") return messageDialog(current, { session: id });
+    if (!(await confirmBox(op === "logoff" ? `Log off ${u} (session ${id}) on ${current}? Their unsaved work is lost.` : `Disconnect ${u} (session ${id}) on ${current}? Their programs keep running.`))) return;
+    try { const r = await post(hostApi("sessions"), { op, id }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    loadSessions(el);
+  });
+}
+
+const cmdHistory = [];
+function loadCommand(el) {
+  el.innerHTML = `<p class="muted small">Runs one command on ${esc(current)} as the scan account and shows what it printed (not interactive: no prompts,
+    no windows). Stopped after the time limit. Every command is written to the audit log and the PC's History.</p>
+    <form id="cmdform" class="cmdform"><div class="toolbar"><select name="shell"><option value="powershell">PowerShell</option><option value="cmd">cmd</option></select>
+      <label class="muted">Time limit <select name="timeout"><option value="30">30 s</option><option value="60" selected>60 s</option><option value="100">100 s</option></select></label>
+      <button type="submit" id="cmdrun">Run</button><span class="muted small">Ctrl+Enter runs</span></div>
+      <textarea name="command" class="code" rows="4" spellcheck="false" placeholder="ipconfig /all"></textarea></form>
+    <div id="cmdout">${cmdHistory.filter((h) => h.host === current).map(cmdBlock).join("")}</div>`;
+  const form = $("#cmdform");
+  form.command.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); form.requestSubmit(); } };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const command = form.command.value.trim(); if (!command) return;
+    const btn = $("#cmdrun"); btn.disabled = true; btn.textContent = "Running…";
+    let h;
+    try { const r = await post(hostApi("command"), { command, shell: form.shell.value, timeout: +form.timeout.value }); h = { ...r, command, shell: form.shell.value, host: current }; }
+    catch (er) { h = { ok: false, command, shell: form.shell.value, host: current, status: "failed", output: errText(er) }; }
+    cmdHistory.unshift(h); if (cmdHistory.length > 30) cmdHistory.pop();
+    btn.disabled = false; btn.textContent = "Run";
+    $("#cmdout").insertAdjacentHTML("afterbegin", cmdBlock(h));
+  };
+  form.command.focus();
+}
+const cmdBlock = (h) => `<div class="cmdblock"><div class="small"><span class="pill ${h.ok ? "good" : h.timed_out ? "warn" : "bad"}">${esc(h.status || (h.ok ? "done" : "failed"))}</span>
+  <b class="code">${esc(h.shell === "cmd" ? "C:\\>" : "PS>")} ${esc(h.command)}</b></div><pre class="code small">${esc(h.output || "(no output)")}</pre></div>`;
+
+const WMI_SAMPLES = [
+  ["Installed hotfixes", "SELECT HotFixID, Description, InstalledOn FROM Win32_QuickFixEngineering"],
+  ["Automatic services not running", "SELECT Name, DisplayName, State FROM Win32_Service WHERE StartMode='Auto' AND State<>'Running'"],
+  ["Disks", "SELECT DeviceID, VolumeName, FileSystem, Size, FreeSpace FROM Win32_LogicalDisk WHERE DriveType=3"],
+  ["BIOS", "SELECT Manufacturer, SMBIOSBIOSVersion, SerialNumber, ReleaseDate FROM Win32_BIOS"],
+  ["Startup commands", "SELECT Name, Command, Location, User FROM Win32_StartupCommand"],
+  ["Network adapters with IP", "SELECT Description, IPAddress, DefaultIPGateway, DNSServerSearchOrder, DHCPEnabled, MACAddress FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=True"],
+  ["Monitors", "SELECT InstanceName, ManufacturerName, SerialNumberID FROM WmiMonitorID", "root\\wmi"],
+  ["Antivirus products", "SELECT displayName, productState, pathToSignedProductExe FROM AntiVirusProduct", "root\\SecurityCenter2"],
+];
+let wmiNs = "root\\cimv2";
+function wmiTable(el, rows) {
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))].slice(0, 60);
+  table(el, rows, cols, { cell: Object.fromEntries(cols.map((c) => [c, (v) => `<span class="small">${esc(v)}</span>`])) });
+}
+async function loadWmi(el) {
+  el.innerHTML = `<h2>Query</h2><form id="wqlform"><div class="toolbar"><label class="muted">Namespace <input name="ns" value="${esc(wmiNs)}" spellcheck="false"></label>
+      <select id="wqlsample"><option value="">Examples…</option>${WMI_SAMPLES.map((s, i) => `<option value="${i}">${esc(s[0])}</option>`).join("")}</select>
+      <button type="submit">Run query</button><button type="button" class="ghost" id="wqlcsv">Copy as CSV</button></div>
+    <textarea name="query" class="code" rows="2" spellcheck="false" placeholder="SELECT Name, State FROM Win32_Service WHERE StartMode='Auto'"></textarea></form>
+    <div id="wqlout"></div>
+    <h2>Browse</h2><div class="toolbar"><input id="wmifilter" placeholder="Filter classes (e.g. Win32_)"><span class="muted small" id="wminsl"></span></div>
+    <div class="regcols"><div id="wmicls">${asking()}</div><div id="wmiinst"><p class="muted">Pick a class to see its instances on ${esc(current)}.</p></div></div>`;
+  const form = $("#wqlform");
+  let last = [];
+  $("#wqlsample").onchange = (e) => { const s = WMI_SAMPLES[+e.target.value]; if (!s) return; form.query.value = s[1]; form.ns.value = s[2] || "root\\cimv2"; e.target.value = ""; };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    $("#wqlout").innerHTML = asking();
+    try { const r = await post(hostApi("wmi"), { ns: form.ns.value.trim(), query: form.query.value }); last = r.rows; wmiTable($("#wqlout"), r.rows); }
+    catch (er) { toolErr($("#wqlout"), er); }
+  };
+  $("#wqlcsv").onclick = async () => {
+    if (!last.length) return toast("Run a query first.", true);
+    const cols = [...new Set(last.flatMap((r) => Object.keys(r)))];
+    const q = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    const csv = [cols.map(q).join(","), ...last.map((r) => cols.map((c) => q(r[c])).join(","))].join("\r\n");
+    try { await navigator.clipboard.writeText(csv); toast(`Copied ${last.length} rows.`); } catch { toast("The browser didn't allow copying.", true); }
+  };
+  const browse = async (ns) => {
+    wmiNs = ns; $("#wmicls").innerHTML = asking();
+    let d;
+    try { d = await api(hostApi(`wmi?ns=${encodeURIComponent(ns)}`)); } catch (e) { return toolErr($("#wmicls"), e); }
+    $("#wminsl").textContent = `${d.namespace}: ${d.classes.length} classes`;
+    const draw = () => {
+      const f = $("#wmifilter").value.toLowerCase();
+      const up = d.namespace.includes("\\") ? `<a class="link" data-wns="${esc(d.namespace.slice(0, d.namespace.lastIndexOf("\\")))}">‹ ${esc(d.namespace.slice(0, d.namespace.lastIndexOf("\\")))}</a>` : "";
+      $("#wmicls").innerHTML = `<div class="regkeys">${up}${d.namespaces.map((n) => `<a class="link" data-wns="${esc(n)}">📁 ${esc(n.split("\\").pop())}</a>`).join("")}
+        ${d.classes.filter((c) => !f || c.name.toLowerCase().includes(f)).slice(0, 800).map((c) => `<a class="link ${c.dynamic ? "" : "muted"}" data-wcl="${esc(c.name)}">${esc(c.name)}</a>`).join("")}</div>`;
+      $("#wmicls").querySelectorAll("[data-wns]").forEach((a) => a.onclick = () => browse(a.dataset.wns));
+      $("#wmicls").querySelectorAll("[data-wcl]").forEach((a) => a.onclick = async () => {
+        $("#wmiinst").innerHTML = asking();
+        try {
+          const r = await api(hostApi(`wmi?ns=${encodeURIComponent(d.namespace)}&cls=${encodeURIComponent(a.dataset.wcl)}`));
+          $("#wmiinst").innerHTML = `<h3>${esc(r.class)}</h3><p class="muted small">${r.rows.length} instance(s)${r.methods.length ? ` · methods: ${esc(r.methods.join(", "))}` : ""}</p><div id="wmirows"></div>
+            <details><summary class="muted small">Properties (${r.properties.length})</summary><div id="wmiprops"></div></details>`;
+          wmiTable($("#wmirows"), r.rows);
+          table($("#wmiprops"), r.properties, ["name", "type", "key"], { cell: { key: (v) => (v ? "key" : "") } });
+          form.ns.value = r.namespace;
+          if (!form.query.value.trim()) form.query.value = `SELECT * FROM ${r.class}`;
+        } catch (e) { toolErr($("#wmiinst"), e); }
+      });
+    };
+    $("#wmifilter").oninput = draw;
+    draw();
+  };
+  browse(wmiNs);
+}
+
 // ------------------------------------------------------------ deployment queue and log
 const DEP_PILL = { queued: "warn", sending: "warn", running: "warn", success: "good", failed: "bad", expired: "bad", cancelled: "mute" };
 const depStatus = (v, r) => `<span class="pill ${DEP_PILL[v] || "mute"}">${r.waiting_offline ? "waiting (PC offline)" : v === "sending" ? "sending" : esc(v)}</span>`;
@@ -1102,6 +1265,7 @@ document.querySelectorAll("[data-uact]").forEach((b) => b.onclick = async () => 
   const a = b.dataset.uact, d = userData, u = d.user, last = d.computers[0]?.hostname || u.last_computer;
   if (a === "back") return showTab("users");
   if (a === "remote") return dameware(last);
+  if (a === "message") return messageDialog(last, { user: u.username });
   if (a === "rdp") { if (!last) return toast("No computer known for this user yet.", true); location.href = `/api/devices/${encodeURIComponent(last)}/rdp`; return; }
   if (a === "copy_email" || a === "copy_dn") {
     const v = a === "copy_email" ? u.email : d.dn;

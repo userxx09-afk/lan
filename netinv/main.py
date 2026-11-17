@@ -666,6 +666,99 @@ def device_account_change(hostname: str, body: NameOpIn, user=Depends(ui_auth), 
     return _tool(lambda: pctools.local_change(db, dev, user, body.op, body.name))
 
 
+# ----------------------------------------------------------------- remote tools (see remote.py)
+def _remote(fn):
+    """_tool, plus: a ValueError is a bad request (checked before anything reaches the PC)."""
+    def checked():
+        try:
+            return fn()
+        except ValueError as exc:
+            raise PermissionError(str(exc))
+    return _tool(checked)
+
+
+class PowerIn(BaseModel):
+    op: str
+    minutes: int = 0
+    message: str = ""
+
+
+@app.post("/api/devices/{hostname}/power")
+def device_power(hostname: str, body: PowerIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.power(db, dev, user, body.op, body.minutes, body.message))
+
+
+@app.get("/api/devices/{hostname}/sessions", dependencies=UI)
+def device_sessions(hostname: str, db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.sessions(db, dev))
+
+
+class SessionIn(BaseModel):
+    op: str
+    id: int
+
+
+@app.post("/api/devices/{hostname}/sessions")
+def device_session_op(hostname: str, body: SessionIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.session_op(db, dev, user, body.op, body.id))
+
+
+class MessageIn(BaseModel):
+    text: str
+    title: str = ""
+    user: str = ""
+    session: int = 0
+    seconds: int = 300
+
+
+@app.post("/api/devices/{hostname}/message")
+def device_message(hostname: str, body: MessageIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.message(db, dev, user, body.text, body.title, body.user, body.session, body.seconds))
+
+
+class CommandIn(BaseModel):
+    command: str
+    shell: str = "powershell"
+    timeout: int = 60
+
+
+@app.post("/api/devices/{hostname}/command")
+def device_command(hostname: str, body: CommandIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.command(db, dev, user, body.command, body.shell, body.timeout))
+
+
+@app.get("/api/devices/{hostname}/wmi", dependencies=UI)
+def device_wmi(hostname: str, ns: str = "root\\cimv2", cls: str = "", limit: int = 500, db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    if cls:
+        return _remote(lambda: remote.wmi_class(db, dev, ns, cls, limit))
+    return _remote(lambda: remote.wmi_browse(db, dev, ns))
+
+
+class WqlIn(BaseModel):
+    ns: str = "root\\cimv2"
+    query: str
+    limit: int = 1000
+
+
+@app.post("/api/devices/{hostname}/wmi")
+def device_wql(hostname: str, body: WqlIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.wmi_query(db, dev, body.ns, body.query, body.limit))
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None
