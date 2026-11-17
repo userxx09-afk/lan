@@ -144,7 +144,7 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version"],
+  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version", "agent_note"],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
   sort: grid.sort, desc: grid.desc, ...extra,
@@ -193,9 +193,11 @@ function agentPill(row) {
     const quiet = row.agent_last_seen && Date.now() - utc(row.agent_last_seen) > 3600e3;
     return `<span class="pill ${quiet ? "warn" : "good"}" title="${esc(`Agent ${row.agent_version || ""}, ${seen}`)}">${quiet ? "silent" : "active"}</span>`;
   }
-  const map = { installing: ["", "installing", "Push in progress or waiting for the PC: see Software > Deployments"],
-    pending: ["warn", "pending", "Enrolled, waiting for approval in Settings > Agent"],
-    failed: ["bad", "push failed", "The last push failed: see the PC's deployments for why"],
+  const note = row.agent_note ? `: ${row.agent_note}` : "";
+  const map = { installing: ["", "installing", `Being installed on the PC now${note}`],
+    waiting: ["warn", "waiting for PC", `Push queued; the PC isn't reachable over WinRM yet${note}. See Software > Deployments.`],
+    pending: ["warn", "needs approval", `The agent enrolled and waits for approval in Settings > Agent${note}`],
+    failed: ["bad", "push failed", `The last push failed${note}`],
     revoked: ["", "removed", "Revoked or removed"] };
   const [cls, label, tip] = map[st] || ["", st, ""];
   return `<span class="pill ${cls}" title="${esc(tip)}">${label}</span>`;
@@ -322,7 +324,7 @@ function renderAssetTab(d, tab) {
         ${kvRow("AD enabled", v.ad_enabled === null ? "" : v.ad_enabled ? "Yes" : "No")}${kvRow("AD last logon", fmtDate(v.ad_last_logon))}
         ${kvRow("OU", esc(v.ou))}
         <h3>Lifecycle</h3>
-        ${kvRow("Agent", v.agent_status ? `${agentPill(v)} <span class="muted small">${v.agent_version ? `v${esc(v.agent_version)} · ` : ""}${v.agent_last_seen ? `last report ${agoUtc(v.agent_last_seen)}` : ""}</span>` : `<span class="muted">not installed</span>`)}
+        ${kvRow("Agent", v.agent_status ? `${agentPill(v)}${v.agent_note && v.agent_status !== "active" ? ` <span class="small">${esc(v.agent_note.split("\n")[0])}</span>` : ""} <span class="muted small">${v.agent_version ? `v${esc(v.agent_version)} · ` : ""}${v.agent_last_seen ? `last report ${agoUtc(v.agent_last_seen)}` : ""}</span>` : `<span class="muted">not installed</span>`)}
         ${kvRow("First seen", fmtDate(v.first_seen))}${kvRow("Last seen", fmtDate(v.last_seen))}${kvRow("Last scan", `${fmtDate(v.inventory_last_collected)} <span class="muted">${ago(v.inventory_last_collected)}</span>`)}
         <form id="lifeform" class="lifeform">
           <label>State <select name="state">${["Active", "Stock", "In repair", "Retired"].map((s) => `<option ${v.state === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>
