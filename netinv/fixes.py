@@ -64,6 +64,14 @@ try {
     $res.reboot_required = [bool]$r.RebootRequired
     $res.ok = ($res.failed -eq 0)
     $res.message = "$($res.installed) installed, $($res.failed) failed" + $(if ($res.reboot_required) { ', reboot needed' } else { '' })
+    # what to do when a restart is needed: 'none' (just report it), 'restart' (in 5 minutes, with a notice), 'notify' (ask the user)
+    if ($res.reboot_required -and '__AFTER__' -eq 'restart') {
+      & shutdown.exe /r /t 300 /d p:2:17 /c 'Windows updates were installed. This PC restarts in 5 minutes: please save your work.' 2>&1 | Out-Null
+      $res.message += '; restarting in 5 minutes'
+    } elseif ($res.reboot_required -and '__AFTER__' -eq 'notify') {
+      & msg.exe * /time:86400 'Windows updates were installed on this PC. Please save your work and restart it when you can.' 2>&1 | Out-Null
+      $res.message += '; the user was asked to restart'
+    }
   }
 } catch { $res.message = "$_" }
 $res
@@ -262,13 +270,17 @@ def _digest(payload: str) -> str:
     return f"{LANGS[p['language']]}, sha256 {hashlib.sha256(p['body'].encode()).hexdigest()[:12]}"
 
 
+WU_AFTER = {"none": "", "restart": ", then restart if needed", "notify": ", then ask the user to restart"}
+
+
 def _validate(action: str, value: str | None) -> tuple[str, str | None]:
     """(label, value) or ValueError."""
     from . import catalog
     if action not in ACTIONS:
         raise ValueError("Unknown fix.")
     if action == "windows_updates":
-        return "Install pending Windows updates", None
+        v = value if value in WU_AFTER else "none"
+        return "Install pending Windows updates" + WU_AFTER[v], (None if v == "none" else v)
     if action == "app_update":
         pkg = (value or "").strip()
         if not catalog.package_exists(pkg):
@@ -333,7 +345,7 @@ def _execute(db, dev: Device, dep) -> str:
     addr = _addr(dev)
     action, value = dep.action, dep.value
     if action == "windows_updates":
-        _launch(addr, cfg, _task_name(action), WU_SCRIPT)
+        _launch(addr, cfg, _task_name(action), WU_SCRIPT.replace("__AFTER__", value if value in WU_AFTER else "none"))
         return "Started. Windows is downloading and installing the updates."
     if action == "app_update":
         _launch(addr, cfg, _task_name(action, value), WINGET_SCRIPT.replace("__PKG__", value))

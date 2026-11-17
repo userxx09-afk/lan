@@ -281,3 +281,22 @@ def user_action(cfg: dict, dn: str, action: str, new_password: str | None = None
         return "done"
     finally:
         conn.unbind()
+
+
+# ------------------------------------------------------------------ computer objects
+def bitlocker_keys(cfg: dict, computer_dn: str) -> list[dict]:
+    """BitLocker recovery passwords stored in AD under the computer object (needs read access to msFVE-RecoveryPassword)."""
+    conn = connect(cfg)
+    try:
+        conn.search(computer_dn, "(objectClass=msFVE-RecoveryInformation)", SUBTREE,
+                    attributes=["msFVE-RecoveryPassword", "msFVE-VolumeGuid", "whenCreated", "name"])
+        out = []
+        for e in conn.entries:
+            d = e.entry_attributes_as_dict
+            pw = (d.get("msFVE-RecoveryPassword") or [None])[0]
+            name = (d.get("name") or [""])[0]
+            out.append({"created": str((d.get("whenCreated") or [""])[0])[:19], "key_id": name.split("{")[-1].rstrip("}") if "{" in name else name,
+                        "password": pw, "readable": bool(pw)})
+        return sorted(out, key=lambda x: x["created"], reverse=True)
+    finally:
+        conn.unbind()

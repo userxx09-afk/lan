@@ -419,6 +419,8 @@ function renderAssetTab(d, tab) {
     loadDevices(el);
   } else if (tab === "files") {
     loadFiles(el);
+  } else if (tab === "security") {
+    loadSecurity(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -470,13 +472,18 @@ async function appUpdate(hosts, pkg, name) {
     toast(r.output, !r.ok);
   } catch (e) { toast(errText(e), true); }
 }
+const WU_AFTER_FIELD = `<label>If an update needs a restart <select name="after"><option value="notify">Ask the user to restart (pop-up message)</option>
+    <option value="restart">Restart the PC 5 minutes after installing (the user sees a countdown)</option><option value="none">Do nothing (the PC shows “reboot pending”)</option></select></label>
+  <p class="muted small">Installs everything Windows Update (or your WSUS) offers. Runs in the background; offline PCs get it when they come back.</p>`;
 const SERVICES = { WinDefend: "Microsoft Defender Antivirus", wuauserv: "Windows Update", BITS: "Background Intelligent Transfer (BITS)" };
 async function runFix(action) {
   const host = current;
   let value = null, ask = "";
-  if (action === "windows_updates") ask = `Install all pending Windows updates on ${host} now? It does not restart the PC; if an update needs a restart, the PC shows “reboot pending”.`;
   if (action === "cancel_reboot") ask = `Cancel a reboot scheduled on ${host}?`;
-  if (action === "start_service") {
+  if (action === "windows_updates") {
+    const f = await formModal(`<h3>Install Windows updates on ${esc(host)}</h3>${WU_AFTER_FIELD}`);
+    if (!f) return; value = f.after;
+  } else if (action === "start_service") {
     const f = await formModal(`<h3>Start a service on ${esc(host)}</h3><label>Service <select name="svc">${Object.entries(SERVICES).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
       <p class="muted">Only starts it if it is stopped. A service disabled by policy is left alone.</p>`);
     if (!f) return; value = f.svc;
@@ -1176,6 +1183,52 @@ function uploadFiles(list, folder, maxMb, done) {
     x.onerror = () => { row.innerHTML = `<span class="pill bad">failed</span> ${esc(f.name)}: connection lost`; if (!--left) done(); };
     x.send(f);
   }
+}
+
+// ------------------------------------------------------------ security: BitLocker, TPM, firewall, Defender; group policy results
+const secYN = (v, good = true) => (v == null ? `<span class="pill mute">unknown</span>` : `<span class="pill ${!!v === good ? "good" : "bad"}">${v ? "yes" : "no"}</span>`);
+async function loadSecurity(el) {
+  el.innerHTML = `<div class="toolbar wrap"><button class="ghost" data-def="quickscan">Defender quick scan</button><button class="ghost" data-def="fullscan">Defender full scan</button>
+    <button class="ghost" data-def="signatures">Update Defender signatures</button><button class="ghost" id="blkeys">Show BitLocker recovery keys (from AD)</button>
+    <button class="ghost" id="secref">Refresh</button></div><div id="blk"></div><div id="secbody">${asking()}</div>
+    <h2>Group Policy results</h2><div class="toolbar"><button class="ghost" id="gprun">Show applied policies (gpresult)</button><button class="ghost" id="gpupd">Group Policy update</button></div><div id="gpout"></div>`;
+  $("#secref").onclick = () => loadSecurity(el);
+  el.querySelectorAll("[data-def]").forEach((b) => b.onclick = () => pcChange("defender", b.dataset.def, {},
+    { quickscan: `Start a Defender quick scan on ${current}?`, fullscan: `Start a Defender full scan on ${current}? It slows the PC for an hour or more.`, signatures: `Update Defender signatures on ${current}?` }[b.dataset.def]));
+  $("#gpupd").onclick = () => pcChange("net", "gpupdate", {}, `Run gpupdate /force on ${current}?`);
+  $("#gprun").onclick = async () => {
+    $("#gpout").innerHTML = asking();
+    try { const r = await view("gpresult"); $("#gpout").innerHTML = `<h3>Computer</h3><pre class="code small">${esc(r.computer)}</pre>${r.signed_in ? `<h3>User ${esc(r.signed_in)}</h3><pre class="code small">${esc(r.user)}</pre>` : `<p class="muted">Nobody is signed in, so there are no user policies to show.</p>`}`; }
+    catch (e) { toolErr($("#gpout"), e); }
+  };
+  $("#blkeys").onclick = async () => {
+    if (!(await confirmBox(`Show the BitLocker recovery keys of ${current} stored in Active Directory? This is written to the audit log.`))) return;
+    try {
+      const keys = await api(hostApi("bitlocker-keys"));
+      $("#blk").innerHTML = `<h2>BitLocker recovery keys in AD</h2><div id="blkt"></div>`;
+      if (!keys.length) $("#blkt").innerHTML = `<p class="muted">No recovery keys are stored in AD for this computer (BitLocker off, or keys not backed up to AD).</p>`;
+      else table($("#blkt"), keys, ["created", "key_id", "password"], { labels: { key_id: "key ID (first part shown on the PC's recovery screen)", password: "recovery password" },
+        cell: { password: (v) => (v ? `<b class="code">${esc(v)}</b>` : `<span class="pill bad">no permission to read it</span>`) } });
+    } catch (e) { toast(errText(e), true); }
+  };
+  let d;
+  try { d = await view("security"); } catch (e) { return toolErr($("#secbody"), e); }
+  const df = d.defender;
+  $("#secbody").innerHTML = `<div class="perfgrid">
+      <div><h3>TPM</h3>${d.tpm ? `present ${secYN(d.tpm.present)} ready ${secYN(d.tpm.ready)}` : `<span class="muted">not found</span>`}</div>
+      <div><h3>Secure Boot</h3>${secYN(d.secure_boot)}</div><div><h3>UAC</h3>${secYN(d.uac === 1)}</div>
+      <div><h3>Network</h3><span class="small">${esc(d.active_profile || "")}</span></div></div>
+    <h2>BitLocker</h2><div id="secbl"></div><h2>Firewall</h2><div id="secfw"></div>
+    <h2>Microsoft Defender</h2>${df ? `<div class="perfgrid"><div>Running ${secYN(df.running)} · real-time ${secYN(df.realtime)} · tamper protection ${secYN(df.tamper)}</div>
+      <div>Mode <b>${esc(df.mode)}</b> · signatures ${esc(df.signature)} <span class="pill ${df.signature_age_days > 3 ? "warn" : "good"}">${df.signature_age_days} day(s) old</span></div>
+      <div>Last quick scan ${localTime(df.quick_scan) || "never"} · full scan ${localTime(df.full_scan) || "never"}</div></div><h3>Recent detections</h3><div id="secthr"></div>`
+      : `<p class="muted">Defender isn't available on this PC.</p>`}
+    <h2>Antivirus registered with Windows</h2><div id="secav"></div>`;
+  table($("#secbl"), d.bitlocker, ["volume", "status", "protection", "percent", "method", "protectors"], { labels: { percent: "encrypted %" },
+    cell: { protection: (v) => `<span class="pill ${v === "On" ? "good" : "bad"}">${esc(v)}</span>` } });
+  table($("#secfw"), d.firewall, ["profile", "enabled", "inbound", "outbound"], { cell: { enabled: (v) => secYN(v) } });
+  if (df) table($("#secthr"), df.threats || [], ["time", "id", "resources", "action"], { cell: { time: localTime, action: (v) => (v ? "handled" : `<span class="pill bad">not handled</span>`) } });
+  table($("#secav"), d.antivirus, ["name", "state"]);
 }
 
 // ------------------------------------------------------------ deployment queue and log

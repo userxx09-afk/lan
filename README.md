@@ -181,6 +181,13 @@ Over WinRM, live, on demand:
   program has it open), download a file, upload files (several at once), new folder, rename, delete. Transfers go over
   WinRM, up to 200 MB per file and 4 at a time (they share the bandwidth). Windows, Program Files and the drive roots
   can't be renamed, deleted or written to from here.
+- **Security**: BitLocker per volume, TPM, Secure Boot, UAC, firewall profiles, Microsoft Defender (real-time,
+  tamper protection, signature age, last scans, recent detections) and the antivirus registered with Windows. Start a
+  Defender quick or full scan, update signatures. **Show BitLocker recovery keys** reads them from AD with the saved
+  Windows credential (each look is audit-logged). **Group Policy results** shows `gpresult /r` for the computer and
+  the signed-in user; **Group Policy update** runs `gpupdate /force`.
+- **Install Windows updates** asks what to do if an update needs a restart: ask the user to restart (pop-up),
+  restart 5 minutes after installing (with a countdown), or nothing (the PC shows "reboot pending").
 - **Performance**: CPU, memory, disk activity, free space per drive, busiest processes and network throughput,
   refreshed every 10 s while the tab is open.
 - **Event logs**: any log (System, Application, Security, …) filtered by level, time span, source, event ID and
