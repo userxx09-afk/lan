@@ -294,7 +294,15 @@ the defaults below are the jobs an upgrade from 0.6 starts with.
 | `snmp` | SNMP to switches and routers | 15 min | Ports, MAC table, LLDP/CDP neighbours, ARP (IP to MAC) |
 | `pcs` | WinRM to each PC | 4 h | OS build, hardware, serial, disks, NICs, installed software, hotfixes, pending reboot, local logons |
 | `pcs_updates` | WinRM to each PC | daily | Same as `pcs` plus the Windows Update search for pending updates (slow) |
-| `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, matched to PCs by IP |
+| `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, with the computer each came from (see below) |
+
+**Which computer a DC logon came from.** A DC's events name the DC, not the user's PC: network logons (4624) often
+put the DC's own name in *Workstation name*, and Kerberos (4768) has only the client IP. NetInventory ignores the
+DC's own name and works out the PC from the event: its workstation name when that is a real PC, otherwise the IP,
+matched to a PC's adapter in the Computers list, then to the routers' ARP tables (IP to MAC to PC), then reverse
+DNS. A user's **Logons** tab shows that PC as *computer* (linked to its page when it's in the inventory) and the DC
+as *domain controller*; the PC's own Logons tab and the user's Computers tab use the same match. The IP match uses
+today's addresses, so a DHCP address that has since moved to another PC can point at the wrong one.
 
 Run any collector by hand with `python -m netinv collect <job|all>`, or from the Collectors buttons on the Overview page.
 

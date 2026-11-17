@@ -42,6 +42,11 @@ function table(el, rows, cols, opts = {}) {
   render();
 }
 const hostLink = (v) => (v ? `<a class="link" data-host="${esc(v)}">${esc(v)}</a>` : `<span class="pill mute">unknown</span>`);
+const logonType = (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t));
+// Computer a logon came from: linked when it is in the Computers list, plain text when only DNS knew it.
+const logonHost = (v, r) => (!v ? `<span class="pill mute">unknown</span>` : r.in_inventory ? hostLink(v)
+  : `${esc(v)} <span class="small muted">not in inventory</span>`);
+const dcCell = (v, r) => (v ? esc(v) : `<span class="small muted">${esc(r.source && r.source.startsWith("local:") ? "PC's own log" : r.source || "")}</span>`);
 const userLink = (v) => (v ? `<a class="link" data-user="${esc(v)}">${esc(v)}</a>` : "");
 const diskPill = (v) => (v === null || v === undefined ? "" : `<span class="pill ${v < 10 ? "bad" : v < 20 ? "warn" : "good"}">${v}%</span>`);
 
@@ -387,8 +392,8 @@ function renderAssetTab(d, tab) {
   } else if (tab === "logons") {
     el.innerHTML = `<h2>Users on this PC</h2><div id="lg1"></div><h2>Logon events</h2><div id="lg2"></div>`;
     table($("#lg1"), d.users, ["username", "last_logon", "first_logon", "logon_count"], { cell: { username: userLink } });
-    table($("#lg2"), d.logons, ["time", "username", "logon_type", "ip", "source"], { cell: { username: userLink,
-      logon_type: (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t)) } });
+    table($("#lg2"), d.logons, ["time", "username", "logon_type", "ip", "dc"], { labels: { dc: "domain controller" },
+      cell: { username: userLink, logon_type: logonType, dc: dcCell } });
   } else if (tab === "processes") {
     loadProcesses(el);
   } else if (tab === "services") {
@@ -1678,9 +1683,10 @@ function renderUserTab(tab) {
     el.innerHTML = `<div id="ugroups"></div>`;
     table($("#ugroups"), d.groups, ["name", "type"], { sort: "name" });
   } else if (tab === "logons") {
-    el.innerHTML = `<div id="ulogons"></div>`;
-    table($("#ulogons"), d.logons, ["time", "hostname", "logon_type", "ip", "source"], { cell: { hostname: hostLink,
-      logon_type: (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t)) } });
+    el.innerHTML = `<p class="muted">Computer is the PC the user was on, found from the event's workstation name or IP address
+      (matched to the Computers list, the switches' ARP tables, then DNS). Domain controller is the DC that checked the sign-in.</p><div id="ulogons"></div>`;
+    table($("#ulogons"), d.logons, ["time", "hostname", "logon_type", "ip", "dc"], { labels: { hostname: "computer", dc: "domain controller" },
+      cell: { hostname: logonHost, logon_type: logonType, dc: dcCell } });
   } else if (tab === "audit") {
     el.innerHTML = `<p class="muted">Actions taken on this account from NetInventory.</p><div id="uaudit"></div>`;
     table($("#uaudit"), d.audit, ["time", "actor", "action", "result"], { cell: { result: (v) => `<span class="longtext ${/^Failed/.test(v || "") ? "pill bad" : ""}">${esc(v)}</span>` } });

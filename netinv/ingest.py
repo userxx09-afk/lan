@@ -204,6 +204,22 @@ def apply_endpoint(db: Session, p: EndpointPayload) -> Device:
     return dev
 
 
+LOCAL_IPS = {"", "-", "127.0.0.1", "::1"}
+
+
+def dc_client_host(host: str | None, ip: str | None, source: str) -> str | None:
+    """The computer the user signed in from, for an event read off a DC's Security log.
+
+    4624 often names the DC itself in WorkstationName (Kerberos network logons on newer Windows).
+    That says nothing about the client, so drop it unless the logon really came from the DC
+    (no or loopback address); the IP is then matched to a PC by resolve_logon_hosts."""
+    dc = norm_host(source[3:])
+    local = (ip or "").strip() in LOCAL_IPS
+    if host == dc and not local:
+        return None
+    return host or (dc if local and ip is not None else None)
+
+
 def add_logons(db: Session, logons: list[LogonIn]) -> int:
     from .exclusions import Exclusions
     excl = Exclusions.load(db)
@@ -217,7 +233,10 @@ def add_logons(db: Session, logons: list[LogonIn]) -> int:
             continue
         if excl.host(l.hostname) or excl.ip(l.ip):
             continue
-        rows.append(dict(time=_naive(l.time), username=user[:128], hostname=(norm_host(l.hostname) or None) and norm_host(l.hostname)[:64],
+        host = norm_host(l.hostname)
+        if l.source and l.source.lower().startswith("dc:"):
+            host = dc_client_host(host, l.ip, l.source)
+        rows.append(dict(time=_naive(l.time), username=user[:128], hostname=host and host[:64],
                          ip=(l.ip or None) and l.ip[:64], logon_type=l.logon_type, source=(l.source or None) and l.source[:64]))
     if not rows:
         return 0

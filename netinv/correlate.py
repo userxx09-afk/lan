@@ -45,8 +45,12 @@ VIEWS: dict[str, str] = {
         SELECT d.hostname, u.status, u.kb, u.title, u.severity, u.installed_on
         FROM updates u JOIN devices d ON d.id = u.device_id
     """,
+    # hostname = the computer the user was on; dc = the domain controller that logged it (DC events only).
     "v_logons": """
-        SELECT time, username, hostname, ip, logon_type, source FROM logon_events
+        SELECT l.time, l.username, l.hostname, l.ip, l.logon_type, l.source,
+               CASE WHEN l.source LIKE 'dc:%' THEN SUBSTR(l.source, 4) END AS dc,
+               CASE WHEN EXISTS (SELECT 1 FROM devices d WHERE d.hostname = l.hostname) THEN 1 ELSE 0 END AS in_inventory
+        FROM logon_events l
     """,
     "v_switch_ports": """
         SELECT nd.sysname AS switch_name, nd.ip AS switch_ip, nd.vendor, sp.name AS port, sp.alias,
@@ -181,17 +185,72 @@ def create_views(db: Session) -> None:
     db.commit()
 
 
-def resolve_logon_hosts(db: Session) -> int:
-    """DC Kerberos events only carry the client IP: fill in hostname from NIC / ARP data."""
-    res = db.execute(text("""
+_LOCAL_SQL = "('', '-', '127.0.0.1', '::1')"
+
+
+def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 20.0) -> int:
+    """Fill in the computer for DC logon events, which mostly carry only the client IP.
+
+    Tries, in order: a PC whose NIC has that IP, a PC whose MAC the routers' ARP tables give for
+    that IP, then reverse DNS (PTR) for the IP. The match uses today's IP-to-PC data, so a DHCP
+    address that moved to another PC since the event can point at the wrong one."""
+    from datetime import timedelta
+    from .db import get_setting, set_setting, utcnow
+    n = 0
+    if not get_setting(db, "migr:logon_client_v1"):
+        # Before 0.21, network logons kept the DC's own name from WorkstationName as the computer.
+        db.execute(text(f"""
+            UPDATE logon_events SET hostname = NULL
+            WHERE source LIKE 'dc:%' AND hostname IS NOT NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL}
+              AND (UPPER(source) = 'DC:' || UPPER(hostname) OR UPPER(source) LIKE 'DC:' || UPPER(hostname) || '.%')
+        """))
+        set_setting(db, "migr:logon_client_v1", "1")
+        db.commit()
+    open_ = f"hostname IS NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL}"
+    n += db.execute(text(f"""
         UPDATE logon_events SET hostname = (
           SELECT d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id
           WHERE n.ip = logon_events.ip LIMIT 1)
-        WHERE hostname IS NULL AND ip IS NOT NULL AND ip <> ''
-          AND EXISTS (SELECT 1 FROM device_nics n WHERE n.ip = logon_events.ip)
-    """))
+        WHERE {open_} AND EXISTS (SELECT 1 FROM device_nics n WHERE n.ip = logon_events.ip)
+    """)).rowcount or 0
+    arp = """FROM arp_entries a JOIN device_nics n ON n.mac = a.mac JOIN devices d ON d.id = n.device_id
+             WHERE a.ip = logon_events.ip"""
+    n += db.execute(text(f"""
+        UPDATE logon_events SET hostname = (SELECT d.hostname {arp} ORDER BY a.last_seen DESC LIMIT 1)
+        WHERE {open_} AND EXISTS (SELECT 1 {arp})
+    """)).rowcount or 0
     db.commit()
-    return res.rowcount or 0
+    if dns:
+        since = utcnow() - timedelta(days=30)
+        ips = [r[0] for r in db.execute(text(f"SELECT DISTINCT ip FROM logon_events WHERE {open_} AND time >= :s"),
+                                        {"s": since}).all()][:256]
+        for ip, name in reverse_dns(ips, dns_budget_s).items():
+            n += db.execute(text(f"UPDATE logon_events SET hostname = :h WHERE {open_} AND ip = :ip"),
+                            {"h": name, "ip": ip}).rowcount or 0
+        db.commit()
+    return n
+
+
+def reverse_dns(ips: list[str], budget_s: float = 20.0) -> dict[str, str]:
+    """PTR lookups in parallel, giving up on whatever hasn't answered within budget_s."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor, wait
+    from .db import norm_host
+    if not ips:
+        return {}
+    ex = ThreadPoolExecutor(max_workers=16)
+    futs = {ex.submit(socket.gethostbyaddr, ip): ip for ip in ips}
+    done, _ = wait(futs, timeout=budget_s)
+    ex.shutdown(wait=False, cancel_futures=True)
+    out = {}
+    for f in done:
+        try:
+            name = norm_host(f.result()[0])
+        except Exception:
+            continue
+        if name and not name[0].isdigit():   # skip "10-1-2-3"-style generic PTRs
+            out[futs[f]] = name[:64]
+    return out
 
 
 def track_port_moves(db: Session) -> int:

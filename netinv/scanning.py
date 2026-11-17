@@ -394,4 +394,4 @@ def run_dc_logons(db: Session) -> str:
     if cfg is None:
         return "No Windows credential configured."
     msg = winrm.collect_dc_logons(db, cfg)
-    return msg + f", {resolve_logon_hosts(db)} matched to PCs by IP"
+    return msg + f", {resolve_logon_hosts(db)} matched to the computer they came from"

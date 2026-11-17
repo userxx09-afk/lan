@@ -39,6 +39,12 @@ async def lifespan(app: FastAPI):
         create_views(db)
         exclusions.seed(db)
         scanning.fix_ou_targets(db)
+        try:   # quick SQL-only pass; reverse DNS runs with each DC logon import
+            from .correlate import resolve_logon_hosts
+            resolve_logon_hosts(db, dns=False)
+        except Exception:
+            db.rollback()
+            logging.getLogger(__name__).exception("matching logons to computers")
     if settings.schedule.get("enabled", True):
         threading.Thread(target=jobs.scheduler_loop, args=(_stop,), daemon=True).start()
     from . import reach
