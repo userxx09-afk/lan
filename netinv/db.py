@@ -474,6 +474,8 @@ class Deployment(Base):
     task: Mapped[str | None] = mapped_column(String(128))            # scheduled task name on the PC while running
     check_until: Mapped[datetime | None] = mapped_column(DateTime)
     payload: Mapped[str | None] = mapped_column(Text)               # a script: the exact text that was approved and runs
+    cred_id: Mapped[int | None] = mapped_column(Integer)            # sign in with: None = the scan targets' credentials,
+                                                                    # 0 = this server's own Windows account, else a credential
 
 
 class Script(Base):

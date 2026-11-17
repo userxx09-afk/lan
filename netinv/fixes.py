@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import select
 
 from .db import AuditLog, Device, SessionLocal, get_setting
+from .config import settings
 from .ingest import log_change
 
 log = logging.getLogger(__name__)
@@ -212,9 +213,26 @@ def _task_name(action: str, pkg: str | None = None) -> str:
     return prefix + re.sub(r"[^A-Za-z0-9.\-]", "_", pkg or "")[:80]
 
 
-def _cfg(db):
+def _cfg(db, dep=None):
+    """WinRM settings and credentials for a push. A push made with a chosen account (dep.cred_id) uses only that."""
     from .scanning import winrm_cfg
-    return winrm_cfg(db)
+    base = winrm_cfg(db)
+    cid = getattr(dep, "cred_id", None)
+    if cid is None:
+        return base
+    return {**(base or settings.winrm), "creds": [cred_for_push(db, cid)]}
+
+
+def cred_for_push(db, cid: int) -> dict:
+    """The sign-in for 'Run as' on a push: 0 = this server's own Windows account, else a stored Windows credential."""
+    from .db import Credential
+    from .scanning import SERVICE_CRED_ID, cred_cfg, service_cfg
+    if cid == SERVICE_CRED_ID:
+        return service_cfg()
+    c = db.get(Credential, cid)
+    if not c or c.kind != "windows":
+        raise PermissionError("The account chosen for this push no longer exists (Settings, Credentials).")
+    return cred_cfg(c)
 
 
 def _audit(db, who: str, action: str, host: str, result: str) -> None:
@@ -323,7 +341,7 @@ def _sw_name(db, hostname: str, code: str) -> str | None:
 
 
 def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, adhoc: dict | None = None,
-            snapshot: tuple[str, str] | None = None):
+            snapshot: tuple[str, str] | None = None, cred_id: int | None = None):
     """snapshot = (label, payload) re-runs exactly what an earlier script push ran (Retry)."""
     from .db import Deployment, utcnow
     from datetime import timedelta
@@ -340,7 +358,7 @@ def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, 
         label = f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {name}"
     now = utcnow()
     dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued", payload=payload,
-                     created=now, next_try=now, expires=now + timedelta(days=queue_days(db)))
+                     created=now, next_try=now, expires=now + timedelta(days=queue_days(db)), cred_id=cred_id)
     db.add(dep)
     _audit(db, who, action, hostname, f"queued: {label}" + (f" ({_digest(payload)})" if payload else ""))
     db.commit()
@@ -351,9 +369,10 @@ def _execute(db, dev: Device, dep) -> str:
     """Send the push to the PC. Returns the immediate result; raises on failure."""
     from .actions import _addr
     from .collectors.winrm import run_ps
-    cfg = _cfg(db)
+    cfg = _cfg(db, dep)
     if not cfg:
-        raise PermissionError("No Windows credential is configured (Settings > Credentials).")
+        raise PermissionError("No Windows credential is ticked on any scan target (Settings, Scan targets), "
+                              "and no account was chosen for this push.")
     addr = _addr(dev)
     action, value = dep.action, dep.value
     if action == "tool":
@@ -479,7 +498,7 @@ def run(db, dev: Device, action: str, who: str, value: str | None = None, adhoc:
 
 
 def run_many(hostnames: list[str], action: str, who: str, value: str | None = None, adhoc: dict | None = None,
-             snapshot: tuple[str, str] | None = None) -> int:
+             snapshot: tuple[str, str] | None = None, cred_id: int | None = None) -> int:
     """Queue a push to many PCs; the dispatcher sends them a few at a time. Returns how many were queued."""
     from .db import norm_host
     hosts = list(dict.fromkeys(norm_host(h) for h in hostnames))
@@ -494,7 +513,7 @@ def run_many(hostnames: list[str], action: str, who: str, value: str | None = No
         for h in hosts:
             if h in known:
                 try:
-                    enqueue(db, h, action, who, value, snapshot=snapshot)
+                    enqueue(db, h, action, who, value, snapshot=snapshot, cred_id=cred_id)
                     queued += 1
                 except ValueError:
                     db.rollback()      # e.g. that program isn't on this PC
@@ -509,10 +528,10 @@ def _launch(addr: str, cfg: dict, name: str, body: str) -> None:
     run_ps(addr, cfg, LAUNCH.replace("__NAME__", name).replace("__B64__", b64))
 
 
-def check(db, dev: Device, name: str) -> dict:
+def check(db, dev: Device, name: str, dep=None) -> dict:
     from .actions import _addr
     from .collectors.winrm import run_ps
-    return run_ps(_addr(dev), _cfg(db), RESULT.replace("__NAME__", name))
+    return run_ps(_addr(dev), _cfg(db, dep), RESULT.replace("__NAME__", name))
 
 
 def parallel(db) -> int:
@@ -605,7 +624,7 @@ def _check_running(db, dep) -> None:
         dep.status, dep.finished, dep.message = "failed", now, "Computer no longer exists"
         return
     try:
-        r = check(db, dev, dep.task)
+        r = check(db, dev, dep.task, dep)
     except Exception as exc:
         if dep.check_until and now > dep.check_until:
             dep.status, dep.finished = "failed", now

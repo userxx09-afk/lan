@@ -314,7 +314,22 @@ the defaults below are the jobs an upgrade from 0.6 starts with.
 | `snmp` | SNMP to switches and routers | 15 min | Ports, MAC table, LLDP/CDP neighbours, ARP (IP to MAC) |
 | `pcs` | WinRM to each PC | 4 h | OS build, hardware, serial, disks, NICs, installed software, hotfixes, pending reboot, local logons |
 | `pcs_updates` | WinRM to each PC | daily | Same as `pcs` plus the Windows Update search for pending updates (slow) |
-| `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, matched to PCs by IP |
+| `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, with the computer each came from (see below) |
+
+**Which computer a DC logon came from.** A DC's events name the DC, not the user's PC: network logons (4624) often
+put the DC's own name in *Workstation name*, and Kerberos (4768) has only the client IP. NetInventory ignores the
+DC's own name and works out the PC from the event: its workstation name when that is a real PC, otherwise the IP,
+matched to a PC's adapter in the Computers list, then to the routers' ARP tables (IP to MAC to PC), then reverse
+DNS. A user's **Logons** tab shows that PC as *computer* (linked to its page when it's in the inventory) and the DC
+as *domain controller*; the PC's own Logons tab and the user's Computers tab use the same match. The IP match uses
+today's addresses, so a DHCP address that has since moved to another PC can point at the wrong one.
+
+**How the DC logon scan reads the logs:** over WinRM (TCP 5985, PowerShell remoting) to each domain controller the AD
+import found, with the same Windows credentials as the PC scan. On the DC it runs `Get-WinEvent` on the Security log for
+events 4768 (Kerberos ticket) and 4624 type 3 (network logon) since the last pull (7 days the first time). It does not
+use remote Event Log RPC. The account needs WinRM access to the DC and read access to the Security log: a Domain
+Admin, or a member of the DC's *Remote Management Users* and *Event Log Readers* groups. Each DC's own error (WinRM
+refused, not reachable, or "connected as X but reading the Security log failed") is in the run's result.
 
 Run any collector by hand with `python -m netinv collect <job|all>`, or from the Collectors buttons on the Overview page.
 
@@ -344,6 +359,14 @@ The **Scanning** tab (or the *Scanning…* pill next to the name at the top, sho
   (from the PC rate, or from the job's last run), with **Cancel** (PCs already in progress finish, the rest are skipped);
 - the queue, with an estimated start for each job, **Move to front** and **Remove**;
 - scheduled jobs coming up, and recently finished runs with their counts, errors and whether they were cancelled.
+- while PCs or DCs fail, **why**: the failures grouped by reason (for example *2849 × Access denied: ...*), and the
+  latest failures by computer. Every PC's last error is also on its page and in Reports, *Last scan times*.
+
+A scan with nothing to do (no target of that kind, no Windows credential on its targets, or targets left out of the
+schedule) shows **skipped** with the reason, never *ok*. A scan where every PC or DC failed shows **failed**.
+
+**Server log:** Start menu, NetInventory, *Logs folder* (`<data folder>\logs`): `NetInventory.err.log` has every
+scan's per-host warnings (`WinRM <host> failed: ...`, `DC <host> logon pull failed: ...`).
 
 ## How the port mapping works
 
@@ -361,9 +384,14 @@ Add credentials and scan targets in **Settings** instead of editing `config.toml
 sections are only used while no scan target exists).
 
 - **Credentials:** *Windows / AD* accounts are used for LDAP and for WinRM to PCs and DCs. *SNMP v2c* (community)
-  and *SNMP v3* (user, SHA auth key, AES privacy key) are used for switches and routers. Secrets are encrypted (see
+  and *SNMP v3* (user, SHA auth key, AES privacy key) are used for switches and routers. **This server's own account**
+  is always on the list: the Windows account the NetInventory service runs as, with no password stored (WinRM signs
+  in with Negotiate/Kerberos, LDAP with Kerberos). Run the service as a domain account with admin rights on the PCs
+  (services.msc, NetInventory, Log On) to use it; under SYSTEM, other machines see the server's computer account. Secrets are encrypted (see
   *Sign-in and security*) and are never sent back to the browser. **Test** tries a credential against one DC, PC or switch.
-- **Scan targets**, each with its own list of credentials that are tried in order:
+- **Scan targets**, each with its own list of credentials that are tried in order. A target's *Include in scheduled
+  scans* box only affects scheduled runs: **Scan now** and a job's **Run now** scan every target with its credentials.
+  To pause scanning, untick *Enabled* on the job in Scan schedule.
   - *Whole AD domain* (`corp.example.com`): the computers, the users, or both (tick boxes), plus the DCs.
   - *AD OU of computers*: only computers in that OU and below are imported and scanned; no users.
   - *AD OU of users*: only user accounts in that OU and below are imported; no computers.

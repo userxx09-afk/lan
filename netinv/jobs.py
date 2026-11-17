@@ -52,6 +52,9 @@ def _run_job(name: str) -> CollectorRun:
         try:
             run.message = JOBS[name](db)
             run.ok = True
+        except scanning.NothingToDo as exc:      # nothing to scan: recorded as skipped, never "ok"
+            db.rollback()
+            run.ok, run.message = False, str(exc)
         except Exception as exc:
             db.rollback()
             log.exception("job %s failed", name)
@@ -236,12 +239,13 @@ def _run_scan_job(job_id: int, who: str) -> None:
     prog = progress.start(f"job:{job_id}", name, job_id=job_id, steps=colls,
                           who=None if who == "schedule" else who, expected=expected)
     started, parts, ok = time.time(), [], True
+    skipped = 0
     try:
         with SessionLocal() as db:
             run = CollectorRun(collector=f"job:{job_id}", started=utcnow())
             db.add(run)
             db.commit()
-            with scanning.scoped(ids, par, ipm, grp):
+            with scanning.scoped(ids, par, ipm, grp, scheduled=who == "schedule"):
                 for c in colls:
                     if prog.stop.is_set():
                         break
@@ -249,12 +253,20 @@ def _run_scan_job(job_id: int, who: str) -> None:
                     try:
                         parts.append(f"{c}: {JOBS[c](db)}")
                         db.commit()
+                    except scanning.NothingToDo as exc:
+                        db.rollback()
+                        skipped += 1
+                        parts.append(f"{c}: {exc}")
                     except Exception as exc:
                         db.rollback()
                         log.exception("scan job %s, %s failed", name, c)
                         ok = False
                         parts.append(f"{c}: failed ({short_error(exc)})")
-            msg = ("; ".join(parts) or "nothing to do") + ("" if who == "schedule" else f" (started by {who})")
+            msg = ("; ".join(parts) or "Skipped: this job has no scans ticked") + ("" if who == "schedule" else f" (started by {who})")
+            if not parts or (skipped and skipped == len(parts)):     # nothing scanned at all: not "ok"
+                ok = False
+                if parts:
+                    msg = "Skipped: nothing to scan. " + msg
             if prog.stop.is_set():
                 ok = False
                 msg = f"Cancelled by {prog.cancelled_by or 'someone'}. " + msg

@@ -18,7 +18,7 @@ import logging
 import ssl
 from datetime import datetime, timedelta, timezone
 
-from ldap3 import ALL, MODIFY_REPLACE, NTLM, SUBTREE, Connection, Server, Tls
+from ldap3 import ALL, KERBEROS, MODIFY_REPLACE, NTLM, SASL, SUBTREE, Connection, Server, Tls
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -64,7 +64,24 @@ def connect(cfg: dict) -> Connection:
     raise RuntimeError("; ".join(errors) or "No domain controller to connect to.")
 
 
+def _integrated(host: str, cfg: dict) -> Connection:
+    """Bind as the Windows account this server runs as: Kerberos (SASL GSSAPI) through winkerberos on Windows.
+    LDAPS first, then plain LDAP 389 (refused by DCs that require LDAP signing)."""
+    errors = []
+    for port, use_ssl in ((636, True), (389, False)):
+        try:
+            tls = Tls(validate=ssl.CERT_NONE) if use_ssl else None
+            server = Server(host, port=port, use_ssl=use_ssl, tls=tls, get_info=ALL, connect_timeout=8)
+            return Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True, receive_timeout=60)
+        except Exception as exc:
+            errors.append(f"{'LDAPS' if use_ssl else 'LDAP'} as this server's account (Kerberos): {exc}")
+    raise RuntimeError("; ".join(errors) + ". Kerberos needs the DC's full DNS name (not an IP), and the server "
+                       "must run as a domain account or SYSTEM on a domain-joined machine.")
+
+
 def _connect_one(cfg: dict, host: str) -> Connection:
+    if cfg.get("integrated"):
+        return _integrated(host, cfg)
     user = cfg["user"]
     auth = NTLM if "\\" in user else "SIMPLE"
     errors = []
