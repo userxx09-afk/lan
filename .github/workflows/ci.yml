@@ -117,7 +117,10 @@ jobs:
           if (Test-Path "$out\NetInventory-Agent.msi") { $files += "$out\NetInventory-Agent.msi" } else { Write-Host "::warning::Agent MSI wasn't built; publishing without it." }
           $notes = ("$env:NOTES" -split "`n")[0]; if (-not $notes) { $notes = 'Update' }
           gh release delete "lan-v$v" --repo $prod --yes --cleanup-tag 2>$null
-          gh release create "lan-v$v" @files --repo $prod --target main --title "NetInventory $v" --notes $notes --latest=false
+          # Through a file: Windows PowerShell 5.1 doesn't escape double quotes in arguments to native programs, so a
+          # commit title with "quotes" split into extra arguments and gh took the words as file names.
+          $nf = Join-Path $env:RUNNER_TEMP 'notes.txt'; [IO.File]::WriteAllText($nf, $notes)
+          gh release create "lan-v$v" @files --repo $prod --target main --title "NetInventory $v" --notes-file $nf --latest=false
           if ($LASTEXITCODE) { throw "Publishing lan-v$v failed" }
           gh release delete lan-latest --repo $prod --yes --cleanup-tag 2>$null
           gh release create lan-latest @files --repo $prod --target main --title "NetInventory (latest: $v)" --latest=false `
