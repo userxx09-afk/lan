@@ -95,7 +95,14 @@ auto_install = false    # true installs new versions without waiting for a click
   dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate. To stop that, go to
   Settings > HTTPS certificate: download the certificate and trust it on PCs by GPO (Trusted Root Certification
   Authorities), or create a request for AD CS (`certreq -submit -attrib "CertificateTemplate:WebServer" ...`) and install
-  the certificate it returns, or upload a .pfx. NetInventory never sends HSTS. If Edge or Chrome says a server "uses HSTS"
+  the certificate it returns, or install a certificate you already have. *Format* offers: **Detect from the file**,
+  **PFX / PKCS#12** (.pfx/.p12 with its password), **Certificate for the request made here** (.cer/.crt/.pem in PEM or
+  DER, or a .p7b chain), **Certificate + separate private key** (.crt/.cer/.pem + .key: PKCS#8, RSA or EC, encrypted
+  keys take a password), **One PEM file with certificate and key**, and on Windows **From this server's certificate
+  store** (Local Computer > Personal, key must be exportable). Intermediate/CA certificates can be added as an optional
+  chain file (.pem bundle, .crt or .p7b). *Check* shows the subject, names, validity, chain and whether the key matches
+  (plus warnings: wrong server name, no Server Authentication usage, expiring soon, chain missing) before anything is
+  changed; *Install certificate* checks again, keeps the old files as tls.crt.bak / tls.key.bak, and restarts the service. NetInventory never sends HSTS. If Edge or Chrome says a server "uses HSTS"
   and offers no way past the warning, it remembered HSTS from another site that used the same server name: delete the name
   under `edge://net-internals/#hsts` (or `chrome://net-internals/#hsts`), Delete domain security policies.
 - **Scanning exclusions:** Settings > Scanning exclusions lists IP addresses or ranges, host names (wildcards), AD OUs

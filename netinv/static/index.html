@@ -326,13 +326,35 @@
           <p><b>Or use a certificate from your AD Certificate Services.</b> Click <i>Create request for AD CS</i> to download NetInventory.req (the key stays on this server), then on any domain PC run
             <code>certreq -submit -attrib "CertificateTemplate:WebServer" NetInventory.req NetInventory.cer</code>
             (or paste the request into your CA's <code>/certsrv</code> page), and install the .cer it returns with <i>Install certificate</i>. Domain PCs already trust your CA, so no GPO is needed.</p>
-          <p><b>Or upload a .pfx</b> exported with its private key from any CA.</p>
+          <p><b>Or install a certificate you already have</b> in any of the formats below.</p>
         </details>
         <div class="row"><a class="button ghost" href="/api/tls/cert.cer" id="tlsdl">Download certificate</a><button class="ghost" id="tlscsr">Create request for AD CS</button></div>
-        <form id="tlsform" class="inline tlsform">
-          <input type="file" name="file" accept=".cer,.crt,.pem,.pfx,.p12" required>
-          <input type="password" name="password" placeholder=".pfx password (if any)" autocomplete="new-password">
-          <button>Install certificate</button>
+        <form id="tlsform" class="tlsform">
+          <label class="tlsfmt">Format
+            <select name="format" id="tlsfmt">
+              <option value="auto">Detect from the file</option>
+              <option value="pfx">PFX / PKCS#12 (.pfx, .p12) with its password</option>
+              <option value="request">Certificate for the request made here (.cer, .crt, .pem, .p7b)</option>
+              <option value="pem_key">Certificate + separate private key (.crt/.cer/.pem + .key)</option>
+              <option value="pem_combined">One PEM file with certificate and key (.pem)</option>
+              <option value="store" id="tlsfmtstore" hidden>From this server's Windows certificate store</option>
+            </select>
+          </label>
+          <p class="muted small" id="tlsfmthint"></p>
+          <div class="tlsrow" data-for="auto pfx request pem_key pem_combined"><span id="tlscertlabel">Certificate file</span>
+            <input type="file" name="file" accept=".pfx,.p12,.cer,.crt,.pem,.der,.p7b,.p7c,.key"></div>
+          <div class="tlsrow" data-for="auto pfx"><span>.pfx password</span>
+            <input type="password" name="password" placeholder="leave empty if none" autocomplete="new-password"></div>
+          <div class="tlsrow" data-for="auto pem_key"><span>Private key file</span>
+            <input type="file" name="key" accept=".key,.pem,.der"></div>
+          <div class="tlsrow" data-for="auto pem_key pem_combined"><span>Key password</span>
+            <input type="password" name="key_password" placeholder="only if the key is encrypted" autocomplete="new-password"></div>
+          <div class="tlsrow" data-for="auto request pem_key pem_combined"><span>Chain (optional)</span>
+            <input type="file" name="chain" accept=".pem,.crt,.cer,.p7b,.p7c"></div>
+          <div class="tlsrow" data-for="store"><span>Certificate</span>
+            <select name="thumbprint" id="tlsstore"><option value="">Loading…</option></select></div>
+          <div class="row"><button type="button" class="ghost" id="tlscheck">Check</button><button>Install certificate</button></div>
+          <div id="tlspreview"></div>
         </form>
       </div>
       <div class="panel">
