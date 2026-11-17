@@ -714,3 +714,98 @@ def rename(db, dev: Device, who: str, new: str, cred: dict) -> dict:
         return {"ok": False, "output": "That's already its name."}
     script = RENAME.replace("__NEW__", _b(new)).replace("__USER__", _b(cred.get("user") or "")).replace("__PASS__", _b(cred.get("password") or ""))
     return _go(db, dev, who, "ad.rename", f"Rename {dev.hostname} to {new}", script)
+
+
+AD_OPS = ("description", "location", "enable", "disable", "move", "add_group", "remove_group", "rename")
+
+
+def ad_change(db, dev: Device, who: str, op: str, value: str = "") -> dict:
+    """A change to the PC's AD computer object (LDAP with the saved Windows credential); rename runs on the PC."""
+    from .collectors import ad as adc
+    from .db import AuditLog
+    from .ingest import log_change
+    from .scanning import ad_action_cfg
+    value = (value or "").strip()
+    if op not in AD_OPS:
+        return {"ok": False, "output": "Unknown change."}
+    if not dev.ad_dn:
+        return {"ok": False, "output": "This PC isn't in the AD data."}
+    cfg = ad_action_cfg(db, dev.ad_dn)
+    if op == "rename":
+        return rename(db, dev, who, value, cfg)
+    base = adc._base(cfg, dev.ad_dn).lower()
+    if len(value) > 1024 or any(ord(ch) < 32 for ch in value):
+        return {"ok": False, "output": "Value too long."}
+    if op in ("move", "add_group", "remove_group") and not (value.lower().endswith("," + base) and "=" in value.split(",")[0]):
+        return {"ok": False, "output": "Pick an OU or group from this computer's domain."}
+    labels = {"description": f"Set AD description to '{value}'", "location": f"Set AD location to '{value}'", "enable": "Enable the AD computer account",
+              "disable": "Disable the AD computer account", "move": f"Move to {value}", "add_group": f"Add to group {value}",
+              "remove_group": f"Remove from group {value}"}
+    try:
+        new_dn = adc.computer_action(cfg, dev.ad_dn, op, value)
+        ok, msg = True, "done"
+        if op == "move":
+            dev.ad_dn = new_dn
+        if op in ("enable", "disable"):
+            dev.ad_enabled = op == "enable"
+        if op == "description":
+            dev.ad_description = value
+    except Exception as exc:
+        ok, msg = False, f"failed: {str(exc)[:300]}"
+    db.add(AuditLog(actor=who, action=f"ad.computer.{op}", target=f"computer:{dev.hostname}", result=f"{labels[op]}: {msg}"[:500]))
+    log_change(db, dev, "tool", f"{labels[op]}: {msg} (by {who})")
+    db.commit()
+    return {"ok": ok, "output": f"{labels[op]}: {msg}"}
+
+
+# ------------------------------------------------------------------ bulk: the same tools on many PCs, through the deployment queue
+def _pc(name):
+    from . import pctools
+    return getattr(pctools, name)
+
+
+BULK = {
+    # key: (label(args), run(db, dev, who, args) -> {"ok", "output"})
+    "power": (lambda a: {"shutdown": "Shut down", "restart": "Restart", "abort": "Cancel pending shutdown", "hibernate": "Hibernate",
+                         "sleep": "Sleep", "lock": "Lock screen", "logoff_all": "Log off everyone"}.get(a.get("op"), "?")
+              + (f" in {a.get('minutes')} min" if a.get("minutes") else ""),
+              lambda db, dev, who, a: power(db, dev, who, a.get("op"), a.get("minutes") or 0, a.get("message") or "")),
+    "message": (lambda a: f"Pop-up message: {str(a.get('text'))[:80]}",
+                lambda db, dev, who, a: message(db, dev, who, a.get("text") or "", a.get("title") or "", "", 0, a.get("seconds") or 300)),
+    "service": (lambda a: f"Service {a.get('name')}: {a.get('action')}",
+                lambda db, dev, who, a: _pc("service")(db, dev, a.get("name") or "", a.get("action") or "", who)),
+    "registry": (lambda a: f"Registry {'set' if a.get('op', 'set') == 'set' else 'delete'} {a.get('path')}\\{a.get('name') or '(Default)'}",
+                 lambda db, dev, who, a: _pc("reg_change")(db, dev, who, "delete_value" if a.get("op") == "delete_value" else "set",
+                                                            a.get("path") or "", a.get("name") or "", a.get("kind") or "String", str(a.get("data") or ""))),
+    "admin": (lambda a: f"{'Add' if a.get('op') == 'add_admin' else 'Remove'} {a.get('name')} {'to' if a.get('op') == 'add_admin' else 'from'} local Administrators",
+              lambda db, dev, who, a: _pc("local_change")(db, dev, who, a.get("op") if a.get("op") in ("add_admin", "remove_admin") else "?", a.get("name") or "")),
+    "printer": (lambda a: f"{'Add' if a.get('op') == 'add' else 'Remove'} printer {a.get('name')}",
+                lambda db, dev, who, a: _pc("printer_change")(db, dev, who, a.get("op") if a.get("op") in ("add", "remove") else "?", a.get("name") or "")),
+    "env": (lambda a: f"Set system variable {a.get('name')}",
+            lambda db, dev, who, a: change(db, dev, who, "env", "set", {"name": a.get("name"), "value": a.get("value")})),
+    "net": (lambda a: {"flushdns": "Flush DNS", "registerdns": "Register in DNS", "gpupdate": "Group Policy update"}.get(a.get("op"), "?"),
+            lambda db, dev, who, a: change(db, dev, who, "net", a.get("op") if a.get("op") in ("flushdns", "registerdns", "gpupdate") else "?", {})),
+    "defender": (lambda a: {"quickscan": "Defender quick scan", "fullscan": "Defender full scan", "signatures": "Update Defender signatures"}.get(a.get("op"), "?"),
+                 lambda db, dev, who, a: change(db, dev, who, "defender", a.get("op") or "", {})),
+    "ad": (lambda a: {"description": "AD description", "location": "AD location", "move": "Move to OU", "add_group": "Add to AD group",
+                      "remove_group": "Remove from AD group", "enable": "Enable in AD", "disable": "Disable in AD"}.get(a.get("op"), "?")
+           + (f" {a.get('value')}" if a.get("value") else ""),
+           lambda db, dev, who, a: ad_change(db, dev, who, a.get("op") if a.get("op") != "rename" else "?", a.get("value") or "")),
+}
+
+
+def bulk_label(spec: dict) -> str:
+    """Checks the shape of a bulk tool request and names it; the full checks run per PC (a refused one fails with the reason)."""
+    if not isinstance(spec, dict) or spec.get("tool") not in BULK or not isinstance(spec.get("args", {}), dict):
+        raise ValueError("Unknown tool.")
+    label = BULK[spec["tool"]][0](spec.get("args") or {})
+    if "?" in label.split(" ")[0:3] or label.startswith("?"):
+        raise ValueError("Unknown action for that tool.")
+    return label[:250]
+
+
+def bulk_run(db, dev: Device, who: str, spec: dict) -> str:
+    r = BULK[spec["tool"]][1](db, dev, who, spec.get("args") or {})
+    if not r.get("ok"):
+        raise RuntimeError(r.get("output") or "failed")
+    return r.get("output") or "done"

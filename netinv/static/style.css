@@ -295,3 +295,4 @@ span.code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; whit
 label.btnlike { display: inline-block; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
 .xfer { margin: 4px 0; display: flex; gap: 8px; align-items: center; }
 .xfer progress { width: 160px; }
+fieldset.bulkf { border: 0; padding: 0; margin: 0; }

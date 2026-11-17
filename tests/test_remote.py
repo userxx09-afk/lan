@@ -199,6 +199,36 @@ with TestClient(m.app) as c:
         assert c.post(f"{u}/ad", json={"op": "rename", "value": "ws-new-01"}).json()["ok"]
         assert "WS-NEW-01" in decoded(sent[-1]) and "x" in decoded(sent[-1]) and "Rename-Computer" in sent[-1]
 
+    # bulk: tools through the deployment queue
+    from netinv.db import Deployment
+    assert c.post("/api/fix/bulk", json={"action": "tool", "tool": {"tool": "nuke", "args": {}}, "hostnames": [h]}).status_code == 400
+    assert c.post("/api/fix/bulk", json={"action": "tool", "tool": {"tool": "power", "args": {"op": "explode"}}, "hostnames": [h]}).status_code == 400
+    specs = [{"tool": "power", "args": {"op": "restart", "minutes": 5, "message": "save"}}, {"tool": "message", "args": {"text": "hi all"}},
+             {"tool": "service", "args": {"name": "Spooler", "action": "restart"}}, {"tool": "registry", "args": {"path": "HKLM\\SOFTWARE\\Vendor", "name": "x", "kind": "DWord", "data": "1"}},
+             {"tool": "admin", "args": {"op": "add_admin", "name": "CORP\\Helpdesk"}}, {"tool": "net", "args": {"op": "gpupdate"}},
+             {"tool": "env", "args": {"name": "COMPANY", "value": "Corp"}}, {"tool": "defender", "args": {"op": "signatures"}},
+             {"tool": "service", "args": {"name": "winrm", "action": "stop"}}]
+    for spec in specs:
+        r = c.post("/api/fix/bulk", json={"action": "tool", "tool": spec, "hostnames": [h, "NOPE-PC"]}).json()
+        assert r["ok"] and r["count"] == 1, (spec, r)
+    import time
+    with SessionLocal() as db:
+        ids = [d.id for d in db.scalars(select(Deployment).where(Deployment.action == "tool").order_by(Deployment.id.desc()).limit(len(specs)))][::-1]
+        for _ in range(60):          # sent by the dispatcher (or here, if it isn't running)
+            db.expire_all()
+            deps = [db.get(Deployment, i) for i in ids]
+            for d in deps:
+                if d.status == "queued":
+                    fixes.attempt(db, d)
+            if all(d.status not in ("queued", "sending") for d in deps):
+                break
+            time.sleep(0.2)
+        assert all(d.status == "success" for d in deps[:-1]), [(d.label, d.status, d.message) for d in deps]
+        assert deps[-1].status == "failed" and "winrm" in deps[-1].message, (deps[-1].status, deps[-1].message)
+        assert deps[0].label.startswith("Restart in 5 min"), deps[0].label
+    r = c.post(f"{u}/fix", json={"action": "tool", "tool": {"tool": "net", "args": {"op": "flushdns"}}}).json()
+    assert r["ok"], r
+
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []
     assert any("Command (powershell)" in (x.get("detail") or x.get("text") or str(x)) for x in hist), hist[:3]
