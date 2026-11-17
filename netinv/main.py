@@ -1062,11 +1062,24 @@ class FixIn(BaseModel):
     value: str | None = None
     adhoc: AdhocIn | None = None     # action "script" without a saved script: a one-off command
     tool: dict | None = None         # action "tool": {"tool": ..., "args": {...}} (remote.BULK)
+    credential_id: int | None = None  # sign in with this account (0 = the server's own); None = the scan credentials
+    run_mode: str | None = None      # scripts: user | account | system (fixes.RUN_MODES), when the script leaves it open
+
+
+@app.get("/api/run-as", dependencies=UI)
+def run_as_options(db=Depends(db_session)):
+    """What a deployment or a scan run can sign in with and run as (the Run as pickers)."""
+    return {"modes": fixes.RUN_MODES, "script_modes": fixes.SCRIPT_MODES,
+            "accounts": [{"id": c.id, "name": c.name, "username": c.username}
+                         for c in db.scalars(select(Credential).where(Credential.kind == "windows").order_by(Credential.name))],
+            "service": {"id": scanning.SERVICE_CRED_ID, "account": scanning.service_account()}}
 
 
 @app.post("/api/devices/{hostname}/fix")
 def device_fix(hostname: str, body: FixIn, user=Depends(ui_auth), db=Depends(db_session)):
-    return fixes.run(db, _device(db, hostname), body.action, user, body.value, body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None)
+    return fixes.run(db, _device(db, hostname), body.action, user, body.value,
+                     body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None,
+                     cred_id=body.credential_id, run_mode=body.run_mode)
 
 
 class BulkFixIn(BaseModel):
@@ -1076,6 +1089,8 @@ class BulkFixIn(BaseModel):
     value: str | None = None
     adhoc: AdhocIn | None = None
     tool: dict | None = None
+    credential_id: int | None = None
+    run_mode: str | None = None
 
 
 @app.post("/api/fix/bulk")
@@ -1091,7 +1106,8 @@ def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
     if len(set(hosts)) > 2000:
         raise HTTPException(400, "at most 2,000 computers at a time")
     try:
-        n = fixes.run_many(hosts, body.action, user, body.value, body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None)
+        n = fixes.run_many(hosts, body.action, user, body.value, body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None,
+                           cred_id=body.credential_id, run_mode=body.run_mode)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "count": n, "output": f"Queued for {n} computer{'s' if n != 1 else ''}. Track it in Software > Deployments; "
@@ -1103,7 +1119,26 @@ def _dep_out(x) -> dict:
     return {"id": x.id, "hostname": x.hostname, "action": x.action, "value": x.value, "label": x.label, "who": x.who,
             "status": x.status, "message": x.message, "created": t(x.created), "started": t(x.started),
             "finished": t(x.finished), "attempts": x.attempts, "next_try": t(x.next_try), "expires": t(x.expires),
-            "waiting_offline": x.status == "queued" and (x.attempts or 0) > 0}
+            "waiting_offline": x.status == "queued" and (x.attempts or 0) > 0,
+            "run_as": (fixes.run_as_label(x.run_mode, _cname(x.cred_id)) if x.action == "script" else
+                       ("SYSTEM" if x.action in fixes.LONG else "") + (f"{', ' if x.action in fixes.LONG else ''}signed in as {_cname(x.cred_id)}"
+                                                                     if x.cred_id is not None else ""))}
+
+
+def _cname(cid):
+    """A credential's name for display (cached for a minute: the deployment log lists thousands of rows)."""
+    import time
+    if cid is None:
+        return None
+    if time.time() - _CNAMES.get("_at", 0) > 60:
+        with SessionLocal() as db:
+            _CNAMES.clear()
+            _CNAMES.update({c.id: c.name for c in db.scalars(select(Credential))})
+            _CNAMES["_at"] = time.time()
+    return "This server's own account" if cid == scanning.SERVICE_CRED_ID else _CNAMES.get(cid, f"credential #{cid}")
+
+
+_CNAMES: dict = {}
 
 
 @app.get("/api/deployments", dependencies=UI)
@@ -1140,7 +1175,8 @@ def deployment_retry(did: int, actor=Depends(ui_auth), db=Depends(db_session)):
         raise HTTPException(400, "only a failed, expired or cancelled deployment can be retried")
     snap = (d.label, d.payload) if d.action in ("script", "tool") and d.payload else None
     try:
-        n = fixes.run_many([d.hostname], d.action, actor, d.value, snapshot=snap)
+        n = fixes.run_many([d.hostname], d.action, actor, d.value, snapshot=snap, cred_id=d.cred_id,
+                           snapshot_mode=d.run_mode or ("system" if d.action == "script" else None))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "output": f"{d.label} on {d.hostname} queued again." if n else "That computer no longer exists."}
@@ -1165,12 +1201,13 @@ class ScriptIn(BaseModel):
     language: str = "powershell"
     body: str
     timeout_min: int = 30
+    run_mode: str = "select"       # fixes.SCRIPT_MODES
 
 
 def _script_out(x: Script, runs: dict) -> dict:
     t = lambda v: jobs._local(v).isoformat(sep=" ", timespec="minutes") if v else None  # noqa: E731
     return {"id": x.id, "name": x.name, "description": x.description, "language": x.language, "body": x.body,
-            "timeout_min": x.timeout_min, "updated": t(x.updated), "who": x.who, **runs.get(str(x.id), {"runs": 0, "ok": 0, "failed": 0})}
+            "timeout_min": x.timeout_min, "run_mode": x.run_mode if x.run_mode in fixes.RUN_MODES else "select", "updated": t(x.updated), "who": x.who, **runs.get(str(x.id), {"runs": 0, "ok": 0, "failed": 0})}
 
 
 @app.get("/api/scripts", dependencies=UI)
@@ -1187,7 +1224,7 @@ def scripts_list(db=Depends(db_session)):
         elif st in ("failed", "expired"):
             r["failed"] += n
     return {"scripts": [_script_out(x, runs) for x in db.scalars(select(Script).order_by(Script.name))],
-            "languages": fixes.LANGS, "groups": groups.names(db)}
+            "languages": fixes.LANGS, "groups": groups.names(db), "run_modes": fixes.SCRIPT_MODES}
 
 
 def _script_save(db, x: Script, body: ScriptIn, actor: str) -> dict:
@@ -1198,14 +1235,17 @@ def _script_save(db, x: Script, body: ScriptIn, actor: str) -> dict:
         fixes.check_script(body.language, body.body, body.timeout_min)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if body.run_mode not in fixes.SCRIPT_MODES:
+        raise HTTPException(400, "pick a run mode")
     clash = db.scalar(select(Script.id).where(Script.name == name))
     if clash and clash != x.id:
         raise HTTPException(400, "another script already has that name")
     x.name, x.description, x.language, x.body = name, (body.description or "").strip() or None, body.language, body.body
     x.timeout_min, x.updated, x.who = body.timeout_min, utcnow(), actor[:64]
+    x.run_mode = None if body.run_mode == "select" else body.run_mode
     db.add(x)
     db.flush()
-    db.add(AuditLog(actor=actor, action="script.save", target=f"script:{x.id}", result=f"{name} ({fixes._digest(json.dumps({'language': x.language, 'body': x.body}))})"))
+    db.add(AuditLog(actor=actor, action="script.save", target=f"script:{x.id}", result=f"{name} ({fixes._digest(json.dumps({'language': x.language, 'body': x.body}))}, run mode {fixes.SCRIPT_MODES[body.run_mode]})"))
     db.commit()
     return {"ok": True, "id": x.id}
 
@@ -1902,7 +1942,8 @@ def _job_out(j: ScanJob, tnames: dict) -> dict:
             "collectors": [c for c in (j.collectors or "").split(",") if c], "every_min": j.every_min, "at_time": j.at_time,
             "days": j.days or "0123456", "window_start": j.window_start, "window_end": j.window_end,
             "max_parallel": j.max_parallel, "ip_methods": [m for m in (j.ip_methods or "").split(",") if m],
-            "group_name": j.group_name,
+            "group_name": j.group_name, "credential_id": j.cred_id,
+            "sign_in": _cname(j.cred_id),
             "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
             "next_run": nxt.isoformat(sep=" ", timespec="minutes") if nxt else None,
             "last_run": jobs._local(j.last_run).isoformat(sep=" ", timespec="minutes") if j.last_run else None,
@@ -1933,6 +1974,7 @@ class JobIn(BaseModel):
     max_parallel: int | None = None
     ip_methods: list[str] = []          # empty = each IP range target's own ticks
     group_name: str | None = None       # PC scans reach only this group's computers
+    credential_id: int | None = None    # sign in with only this account (0 = the server's own); None = each target's
 
 
 def _check_job(body: JobIn, db) -> None:
@@ -1957,6 +1999,10 @@ def _check_job(body: JobIn, db) -> None:
         raise HTTPException(400, "a chosen scan target no longer exists")
     if body.group_name and body.group_name not in groups.names(db):
         raise HTTPException(400, "the chosen group no longer exists")
+    if body.credential_id not in (None, scanning.SERVICE_CRED_ID):
+        c = db.get(Credential, body.credential_id)
+        if not c or c.kind != "windows":
+            raise HTTPException(400, "the account picked to sign in with no longer exists")
     if body.group_name and not {"pcs", "pcs_updates"} & set(body.collectors):
         raise HTTPException(400, "a group limits PC scans: tick PCs (inventory) or Windows updates, or clear the group")
 
@@ -1980,6 +2026,7 @@ def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Dep
     j.max_parallel = body.max_parallel
     j.ip_methods = ",".join(m for m in scanning.IP_METHODS if m in body.ip_methods) or None
     j.group_name = (body.group_name or "").strip() or None
+    j.cred_id = body.credential_id
     db.add(j)
     db.add(AuditLog(actor=actor, action="job.save", target=f"job:{j.name[:100]}", result=jobs.describe(j)))
     db.commit()
@@ -1996,17 +2043,29 @@ def delete_job(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
     return {"ok": True}
 
 
+class JobRunIn(BaseModel):
+    job_account: bool = True            # sign in as the job is set up to; False = use credential_id for this run only
+    credential_id: int | None = None    # None = each target's ticked credentials, 0 = the server's own account
+
+
 @app.post("/api/jobs/{jid}/run")
-def run_job_now(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+def run_job_now(jid: int, body: JobRunIn | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
     j = db.get(ScanJob, jid)
     if not j:
         raise HTTPException(404)
     if jobs.JOB_STATE.get(jid):
         raise HTTPException(400, f"{j.name} is already {jobs.JOB_STATE[jid]}")
-    db.add(AuditLog(actor=actor, action="job.run", target=f"job:{j.name[:100]}", result="started"))
+    body = body or JobRunIn()
+    cid = j.cred_id if body.job_account else body.credential_id
+    if cid not in (None, scanning.SERVICE_CRED_ID):
+        c = db.get(Credential, cid)
+        if not c or c.kind != "windows":
+            raise HTTPException(400, "the account picked to sign in with no longer exists")
+    signin = fixes.cred_name(db, cid) or "each target's credentials"
+    db.add(AuditLog(actor=actor, action="job.run", target=f"job:{j.name[:100]}", result=f"started, signing in as {signin}"))
     db.commit()
-    threading.Thread(target=jobs.run_scan_job, args=(jid, actor), daemon=True).start()
-    return {"ok": True, "output": f"{j.name} started (or queued if other jobs are running)."}
+    threading.Thread(target=jobs.run_scan_job, args=(jid, actor, cid), daemon=True).start()
+    return {"ok": True, "output": f"{j.name} started (or queued if other jobs are running), signing in as {signin}."}
 
 
 @app.get("/api/jobs/{jid}/history", dependencies=UI)

@@ -424,6 +424,8 @@ class ScanJob(Base):
     max_parallel: Mapped[int | None] = mapped_column(Integer)       # PCs scanned at once over WinRM (default 16)
     ip_methods: Mapped[str | None] = mapped_column(String(64))      # IP ranges: "ping,snmp,winrm"; empty = each target's own
     group_name: Mapped[str | None] = mapped_column(String(128))     # PC scans: only the computers in this group
+    cred_id: Mapped[int | None] = mapped_column(Integer)            # Windows sign-in for this job: None = each target's
+                                                                    # ticked credentials, 0 = the server's own account
     last_run: Mapped[datetime | None] = mapped_column(DateTime)     # UTC
     last_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_result: Mapped[str | None] = mapped_column(Text)
@@ -476,6 +478,8 @@ class Deployment(Base):
     payload: Mapped[str | None] = mapped_column(Text)               # a script: the exact text that was approved and runs
     cred_id: Mapped[int | None] = mapped_column(Integer)            # sign in with: None = the scan targets' credentials,
                                                                     # 0 = this server's own Windows account, else a credential
+    run_mode: Mapped[str | None] = mapped_column(String(16))        # scripts: who it runs as on the PC (fixes.RUN_MODES);
+                                                                    # None = SYSTEM (pushes queued before 0.24)
 
 
 class Script(Base):
@@ -487,6 +491,8 @@ class Script(Base):
     language: Mapped[str] = mapped_column(String(16), default="powershell")      # powershell | cmd
     body: Mapped[str] = mapped_column(Text)
     timeout_min: Mapped[int] = mapped_column(Integer, default=30)
+    run_mode: Mapped[str | None] = mapped_column(String(16))        # select (ask when deploying, also None) | user |
+                                                                    # account (the signing-in account) | system
     created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     who: Mapped[str | None] = mapped_column(String(64))

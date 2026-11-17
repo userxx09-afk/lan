@@ -370,8 +370,10 @@ function renderAssetTab(d, tab) {
       cell: { status: swPill, fix: (_, r) => `${swFixCell(r)} ${r.product_code && r.scope !== "user" ? `<span class="swmore">
         ${/^\{[0-9A-Fa-f-]{36}\}$/.test(r.product_code) ? `<a class="link small" data-swrep="${esc(r.product_code)}" data-name="${esc(r.name)}">Repair</a> · ` : ""}<a class="link small" data-swrm="${esc(r.product_code)}" data-name="${esc(r.name)}">Uninstall</a></span>` : ""}` } });
     const swact = (action, code, name, q) => async () => {
-      if (!(await confirmBox(q))) return;
-      try { const r = await post(`/api/devices/${encodeURIComponent(current)}/fix`, { action, value: code }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+      const ra = await getRunAs();
+      const f = await formModal(`<p>${esc(q)}</p>${signInField(ra, { note: SYSTEM_NOTE })}`);
+      if (!f) return;
+      try { const r = await post(`/api/devices/${encodeURIComponent(current)}/fix`, { action, value: code, credential_id: credVal(f.credential_id) }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
     };
     el.onclick = (e) => {
       const a = e.target.closest("[data-swupd],[data-swrm],[data-swrep]"); if (!a) return;
@@ -460,6 +462,42 @@ document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   b.disabled = false;
 });
 
+// ------------------------------------------------------------ who a deployment signs in as, and runs as on the PC
+// Least privileged first. A script's "Select on deployment" asks here; other actions only pick the sign-in account.
+const RUN_MODE_HELP = {
+  user: "runs in the signed-in user's session with their own rights; waits if nobody is signed in",
+  account: "runs as the account that signs in to the PC (the scan credentials, or the account picked here)",
+  system: "runs as the PC's built-in System account (full rights on the PC)",
+};
+const getRunAs = () => api("/api/run-as").catch(() => ({ modes: {}, script_modes: {}, accounts: [], service: { id: 0, account: "" } }));
+const acctLabel = (a) => `${esc(a.name)}${a.username ? ` (${esc(a.username)})` : ""}`;
+// "Sign in with": "" = the scan credentials, else a credential id (0 = this server's own account)
+function signInField(ra, { selected = "", label = "Sign in with", note = "" } = {}) {
+  const sel = (v) => (String(selected) === String(v) ? "selected" : "");
+  return `<label>${label} <select name="credential_id">
+      <option value="" ${sel("")}>Scanning credentials (the accounts ticked on the scan targets)</option>
+      ${ra.accounts.map((a) => `<option value="${a.id}" ${sel(a.id)}>${acctLabel(a)}</option>`).join("")}
+      <option value="${ra.service.id}" ${sel(ra.service.id)}>This server's own account: ${esc(ra.service.account)}</option></select></label>
+    ${note ? `<p class="muted small">${note}</p>` : ""}`;
+}
+const credVal = (v) => (v === "" || v == null ? null : Number(v));
+// A script's Run as when it's chosen at deployment: the three modes, then each saved account (runs as that account)
+function runAsField(ra, selected = "user") {
+  const opt = (v, l, h) => `<option value="${v}" ${v === selected ? "selected" : ""} title="${esc(h || "")}">${l}</option>`;
+  return `<label>Run as <select name="runas">
+      <optgroup label="Run mode">${Object.entries(ra.modes).map(([k, l]) => opt(k, esc(l) + (k === "user" ? " (least privilege)" : ""), RUN_MODE_HELP[k])).join("")}</optgroup>
+      <optgroup label="A saved account (signs in and runs as it)">${ra.accounts.map((a) => opt(`cred:${a.id}`, acctLabel(a))).join("")}
+        ${opt(`cred:${ra.service.id}`, `This server's own account: ${esc(ra.service.account)} (no network access)`)}</optgroup></select></label>
+    <p class="muted small" data-runhelp></p>`;
+}
+const runAsReq = (v) => (String(v).startsWith("cred:") ? { run_mode: "account", credential_id: Number(v.slice(5)) } : { run_mode: v, credential_id: null });
+function wireRunHelp(form) {
+  const h = form.querySelector("[data-runhelp]"); if (!h || !form.runas) return;
+  const sync = () => { const v = form.runas.value; h.textContent = v.startsWith("cred:") ? "Signs in to the PC with this account and runs the script as it (it needs to be an administrator on the PC)." : `This ${RUN_MODE_HELP[v] || ""}.`; };
+  form.runas.addEventListener("change", sync); sync();
+}
+const SYSTEM_NOTE = "This runs as the PC's System account (Windows only allows it that way). The account above only signs in to start it.";
+
 // ------------------------------------------------------------ app catalog and one-click fixes
 const SW_PILL = { current: "good", outdated: "warn", unknown: "mute", ignored: "mute" };
 const swPill = (v) => (v ? `<span class="pill ${SW_PILL[v] || "mute"}">${v === "unknown" ? "not in catalog" : esc(v)}</span>` : "");
@@ -470,12 +508,14 @@ function swFixCell(r) {
   return `<button class="small" data-swupd="${esc(r.catalog_id)}" data-name="${esc(r.name)}">Update</button>`;
 }
 async function appUpdate(hosts, pkg, name) {
-  const n = hosts.length;
-  if (!(await confirmBox(`Update ${name} to the latest version with winget (${pkg}) on ${n === 1 ? hosts[0] : `${n} computers`}? ` +
-    "The app is closed and updated silently; anyone using it loses unsaved work in it.")) ) return;
+  const n = hosts.length, ra = await getRunAs();
+  const f = await formModal(`<p>${esc(`Update ${name} to the latest version with winget (${pkg}) on ${n === 1 ? hosts[0] : `${n} computers`}? ` +
+    "The app is closed and updated silently; anyone using it loses unsaved work in it.")}</p>${signInField(ra, { note: SYSTEM_NOTE })}`);
+  if (!f) return;
+  const cred = credVal(f.credential_id);
   try {
-    const r = n === 1 ? await post(`/api/devices/${encodeURIComponent(hosts[0])}/fix`, { action: "app_update", value: pkg })
-      : await post("/api/fix/bulk", { action: "app_update", value: pkg, hostnames: hosts });
+    const r = n === 1 ? await post(`/api/devices/${encodeURIComponent(hosts[0])}/fix`, { action: "app_update", value: pkg, credential_id: cred })
+      : await post("/api/fix/bulk", { action: "app_update", value: pkg, hostnames: hosts, credential_id: cred });
     toast(r.output, !r.ok);
   } catch (e) { toast(errText(e), true); }
 }
@@ -484,25 +524,28 @@ const WU_AFTER_FIELD = `<label>If an update needs a restart <select name="after"
   <p class="muted small">Installs everything Windows Update (or your WSUS) offers. Runs in the background; offline PCs get it when they come back.</p>`;
 const SERVICES = { WinDefend: "Microsoft Defender Antivirus", wuauserv: "Windows Update", BITS: "Background Intelligent Transfer (BITS)" };
 async function runFix(action) {
-  const host = current;
-  let value = null, ask = "";
-  if (action === "cancel_reboot") ask = `Cancel a reboot scheduled on ${host}?`;
-  if (action === "windows_updates") {
-    const f = await formModal(`<h3>Install Windows updates on ${esc(host)}</h3>${WU_AFTER_FIELD}`);
-    if (!f) return; value = f.after;
+  const host = current, ra = await getRunAs();
+  let value = null, f = null;
+  const SIGN = signInField(ra, { note: action === "windows_updates" ? SYSTEM_NOTE : "Runs with the rights of the account that signs in." });
+  if (action === "cancel_reboot") {
+    f = await formModal(`<p>${esc(`Cancel a reboot scheduled on ${host}?`)}</p>${SIGN}`);
+  } else if (action === "windows_updates") {
+    f = await formModal(`<h3>Install Windows updates on ${esc(host)}</h3>${WU_AFTER_FIELD}${SIGN}`);
+    if (f) value = f.after;
   } else if (action === "start_service") {
-    const f = await formModal(`<h3>Start a service on ${esc(host)}</h3><label>Service <select name="svc">${Object.entries(SERVICES).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
-      <p class="muted">Only starts it if it is stopped. A service disabled by policy is left alone.</p>`);
-    if (!f) return; value = f.svc;
+    f = await formModal(`<h3>Start a service on ${esc(host)}</h3><label>Service <select name="svc">${Object.entries(SERVICES).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+      <p class="muted">Only starts it if it is stopped. A service disabled by policy is left alone.</p>${SIGN}`);
+    if (f) value = f.svc;
   } else if (action === "reboot") {
     const h = String((await getSettings())?.["fix:reboot_hour"] ?? 2).padStart(2, "0");
-    const f = await formModal(`<h3>Schedule a reboot of ${esc(host)}</h3>
+    f = await formModal(`<h3>Schedule a reboot of ${esc(host)}</h3>
       <label>When <select name="when"><option value="tonight">Tonight at ${h}:00 (PC local time)</option><option value="soon">In 5 minutes</option></select></label>
-      <p class="muted">The signed-in user sees a notice and can save their work. You can cancel it until then.</p>`);
-    if (!f) return; value = f.when;
-  } else if (!(await confirmBox(ask))) return;
+      <p class="muted">The signed-in user sees a notice and can save their work. You can cancel it until then.</p>${SIGN}`);
+    if (f) value = f.when;
+  } else f = await formModal(SIGN);
+  if (!f) return;
   try {
-    const r = await post(`/api/devices/${encodeURIComponent(host)}/fix`, { action, value });
+    const r = await post(`/api/devices/${encodeURIComponent(host)}/fix`, { action, value, credential_id: credVal(f.credential_id) });
     toast(r.output, !r.ok);
     openDevice(host);
   } catch (e) { toast(errText(e), true); }
@@ -518,9 +561,10 @@ async function loadScripts() {
   const render = () => {
     const f = $("#scf").value.toLowerCase();
     const rows = d.scripts.filter((x) => [x.name, x.description, x.body].some((v) => String(v || "").toLowerCase().includes(f)));
-    table($("#sctable"), rows.map((x) => ({ ...x, act: x.id })), ["name", "language", "description", "runs", "timeout_min", "updated", "who", "act"], {
-      labels: { timeout_min: "time limit", who: "by", act: "" },
+    table($("#sctable"), rows.map((x) => ({ ...x, act: x.id })), ["name", "language", "run_mode", "description", "runs", "timeout_min", "updated", "who", "act"], {
+      labels: { timeout_min: "time limit", who: "by", act: "", run_mode: "run mode" },
       cell: { name: (v, r) => `<a class="link" data-scedit="${r.id}">${esc(v)}</a>`, language: (v) => esc(LANGS[v] || v),
+        run_mode: (v) => `<span class="pill ${v === "system" ? "warn" : v === "select" ? "mute" : "good"}">${esc((d.run_modes || {})[v] || v)}</span>`,
         description: (v) => `<span class="longtext small">${esc(v || "")}</span>`, timeout_min: (v) => `${esc(v)} min`, updated: (v) => esc(v || ""),
         runs: (v, r) => (v ? `${v} <span class="muted small">(${r.ok} ok, ${r.failed} failed)</span>` : `<span class="muted">never</span>`),
         act: (id) => `<a class="link" data-scrun="${id}">Run…</a> &nbsp; <a class="link" data-scdel="${id}">Delete</a>` } });
@@ -537,7 +581,7 @@ async function loadScripts() {
   render();
 }
 const langSelect = (v) => `<select name="language">${Object.entries(LANGS).map(([k, l]) => `<option value="${k}" ${v === k ? "selected" : ""}>${l}</option>`).join("")}</select>`;
-const SCRIPT_HELP = `<p class="muted small">Runs as SYSTEM on the PC, with no window and nobody to answer prompts, so make it silent.
+const SCRIPT_HELP = `<p class="muted small">Runs hidden, with nobody to answer prompts, so make it silent.
   Exit code 0 counts as success, anything else as failed (in PowerShell, <code>exit 1</code> or an error with <code>-ErrorAction Stop</code>).
   Everything it prints is kept (the last 3,500 characters).</p>`;
 async function editScript(x = {}) {
@@ -546,7 +590,8 @@ async function editScript(x = {}) {
     <label>What it does <input name="description" value="${esc(x.description || "")}" placeholder="optional"></label>
     <div class="row"><label>Language ${langSelect(x.language || "powershell")}</label>
       <label>Time limit (minutes) <input name="timeout_min" type="number" min="1" max="240" value="${esc(x.timeout_min || 30)}"></label></div>
-    <label>Script <textarea name="body" class="code" rows="16" spellcheck="false" required>${esc(x.body || "")}</textarea></label>${SCRIPT_HELP}`, true);
+    <label>Script <textarea name="body" class="code" rows="16" spellcheck="false" required>${esc(x.body || "")}</textarea></label>
+    <fieldset class="runmode"><legend>Run mode</legend>${runModeRadios(x.run_mode || "select")}</fieldset>${SCRIPT_HELP}`, true);
   if (!f) return;
   try {
     await (x.id ? api(`/api/scripts/${x.id}`, { method: "PUT", body: JSON.stringify(f) }) : post("/api/scripts", f));
@@ -554,9 +599,17 @@ async function editScript(x = {}) {
   } catch (e) { toast(errText(e), true); }
 }
 $("#scnew").onclick = () => editScript();
+// Like a deployment package's Run mode: "Select on deployment" (ask each time) or a predefined account.
+function runModeRadios(v) {
+  const r = (k, l, h) => `<label class="check"><input type="radio" name="run_mode" value="${k}" ${v === k ? "checked" : ""}> <span><b>${l}</b><br><span class="muted small">${h}</span></span></label>`;
+  return `<div class="muted small">User defined</div>${r("select", "Select on deployment", "whoever deploys it picks the account each time (recommended)")}
+    <div class="muted small">Predefined</div>${r("user", "Currently logged on user", "least privilege: " + RUN_MODE_HELP.user)}
+    ${r("account", "Scanning credentials", RUN_MODE_HELP.account)}${r("system", "System account", RUN_MODE_HELP.system)}`;
+}
 const splitHosts = (t) => String(t || "").split(/[\s,;]+/).map((h) => h.trim()).filter(Boolean);
 async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {}) {
   const d = (!group && scriptData) || (await getScripts().catch(() => ({ scripts: [], groups: [] })));
+  const ra = await getRunAs();
   const one = hosts.length === 1 && !scriptId ? hosts[0] : null;
   const f = await formModal(`<h3>Run a script${one ? ` on ${esc(one)}` : ""}</h3>
     <label>Script <select name="sid"><option value="">A one-off command (type it below)</option>
@@ -565,6 +618,7 @@ async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {
         <label>Time limit (minutes) <input name="timeout" type="number" min="1" max="240" value="10"></label></div>
       <label>Command <textarea name="body" class="code" rows="8" spellcheck="false" placeholder="for example: ipconfig /flushdns"></textarea></label></div>
     <pre id="sc-preview" class="code small" hidden></pre>
+    <div id="sc-runas">${runAsField(ra)}</div><p id="sc-fixed" class="small" hidden></p>
     ${one ? "" : `<label>On <select name="on">
         <option value="sel" ${hosts.length ? "selected" : ""}>the ${hosts.length} computer${hosts.length === 1 ? "" : "s"} selected in Computers</option>
         <option value="group" ${hosts.length ? "" : "selected"}>every computer in a group</option><option value="list">these computers</option></select></label>
@@ -575,20 +629,26 @@ async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {
       const x = d.scripts.find((s) => String(s.id) === form.sid.value);
       form.querySelector("#sc-adhoc").hidden = !!x;
       const pv = form.querySelector("#sc-preview"); pv.hidden = !x; pv.textContent = x ? `${LANGS[x.language]}, stops after ${x.timeout_min} min\n\n${x.body}` : "";
+      const fixed = x && x.run_mode !== "select" ? x.run_mode : null;
+      form.querySelector("#sc-runas").hidden = !!fixed; form.querySelector("#sc-fixed").hidden = !fixed;
+      if (fixed) form.querySelector("#sc-fixed").innerHTML = `Run as: <b>${esc(ra.modes[fixed])}</b> <span class="muted">(set on the script: ${esc(RUN_MODE_HELP[fixed])}. Change it in Software &gt; Scripts.)</span>`;
       if (form.on) { form.querySelector("#sc-group").hidden = form.on.value !== "group"; form.querySelector("#sc-list").hidden = form.on.value !== "list"; }
     };
-    form.sid.onchange = sync; if (form.on) form.on.onchange = sync; sync();
+    form.sid.onchange = sync; if (form.on) form.on.onchange = sync; sync(); wireRunHelp(form);
   });
   if (!f) return;
   const x = d.scripts.find((s) => String(s.id) === f.sid);
-  const req = { action: "script", value: x ? String(x.id) : null, adhoc: x ? null : { language: f.language, body: f.body, timeout: +f.timeout || 10 } };
+  const fixed = x && x.run_mode !== "select" ? x.run_mode : null;
+  const ras = fixed ? { run_mode: fixed, credential_id: null } : runAsReq(f.runas);
+  const asWho = ras.credential_id != null ? (ras.credential_id === ra.service.id ? "this server's own account" : (ra.accounts.find((a) => a.id === ras.credential_id) || {}).name || "the picked account") : ra.modes[ras.run_mode];
+  const req = { action: "script", value: x ? String(x.id) : null, adhoc: x ? null : { language: f.language, body: f.body, timeout: +f.timeout || 10 }, ...ras };
   if (!x && !f.body.trim()) return toast("Type a command, or pick a saved script.", true);
   const what = x ? x.name : `the command “${f.body.trim().split("\n")[0].slice(0, 60)}”`;
   let where, body;
   if (one) where = one;
   else if (f.on === "group") { if (!f.group) return toast("Pick a group.", true); body = { ...req, group: f.group }; where = `every computer in the group ${f.group}`; }
   else { const h = f.on === "list" ? splitHosts(f.list) : hosts; if (!h.length) return toast("No computers picked.", true); body = { ...req, hostnames: h }; where = h.length === 1 ? h[0] : `${h.length} computers`; }
-  if (!(await confirmBox(`Run ${what} as SYSTEM on ${where}?`))) return;
+  if (!(await confirmBox(`Run ${what} as ${asWho} on ${where}?`))) return;
   try {
     const r = one ? await post(`/api/devices/${encodeURIComponent(one)}/fix`, req) : await post("/api/fix/bulk", body);
     toast(r.output, !r.ok);
@@ -1342,16 +1402,18 @@ const BULK_TOOLS = {
     <label>Value (text, or the OU / group distinguished name) <input name="ad_value" placeholder="OU=Laptops,DC=corp,DC=example,DC=com"></label>`, (f) => ({ op: f.ad_op, value: f.ad_value.trim() })],
 };
 async function bulkToolDialog({ hosts = [], group = null } = {}) {
+  const ra = await getRunAs();
   const who = group ? `every computer in the group ${group}` : hosts.length === 1 ? hosts[0] : `${hosts.length} computers`;
   const f = await formModal(`<h3>Configure ${esc(who)}</h3><label>What <select name="tool">${Object.entries(BULK_TOOLS).map(([k, t]) => `<option value="${k}">${esc(t[0])}</option>`).join("")}</select></label>
     ${Object.entries(BULK_TOOLS).map(([k, t]) => `<fieldset class="bulkf" data-bt="${k}">${t[1]}</fieldset>`).join("")}
+    ${signInField(ra, { label: "Run as (sign in with)", note: "Changes run with the rights of this account (Windows updates run as System; Active Directory changes use the saved AD credential)." })}
     <p class="muted small">Goes through the deployment queue: a few PCs at a time, offline PCs get it when they come back, and each PC's result is in Software &gt; Deployments and its History.</p>`, true,
     (form) => { const show = () => form.querySelectorAll(".bulkf").forEach((fs) => { fs.hidden = fs.dataset.bt !== form.tool.value; }); form.tool.onchange = show; show(); });
   if (!f) return;
   const t = BULK_TOOLS[f.tool], args = t[2](f);
   if (!(await confirmBox(`${t[0]} on ${who}?`))) return;
   const req = f.tool === "windows_updates" ? { action: "windows_updates", value: args } : { action: "tool", tool: { tool: f.tool, args } };
-  try { const r = await post("/api/fix/bulk", { ...req, hostnames: hosts, group }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+  try { const r = await post("/api/fix/bulk", { ...req, hostnames: hosts, group, credential_id: credVal(f.credential_id) }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
 }
 $("#bulkconfig").onclick = () => grid.selected.size ? bulkToolDialog({ hosts: [...grid.selected] }) : toast("Select one or more computers first.", true);
 
@@ -1359,10 +1421,10 @@ $("#bulkconfig").onclick = () => grid.selected.size ? bulkToolDialog({ hosts: [.
 const DEP_PILL = { queued: "warn", sending: "warn", running: "warn", success: "good", failed: "bad", expired: "bad", cancelled: "mute" };
 const depStatus = (v, r) => `<span class="pill ${DEP_PILL[v] || "mute"}">${r.waiting_offline ? "waiting (PC offline)" : v === "sending" ? "sending" : esc(v)}</span>`;
 function depTable(el, rows, withHost = true) {
-  const cols = [...(withHost ? ["hostname"] : []), "label", "status", "message", "who", "created", "finished", "attempts", "act"];
+  const cols = [...(withHost ? ["hostname"] : []), "label", "run_as", "status", "message", "who", "created", "finished", "attempts", "act"];
   table(el, rows.map((r) => ({ ...r, act: r.id })), cols, {
-    labels: { label: "what", message: "result", who: "by", created: "queued", attempts: "tries", act: "" },
-    cell: { hostname: hostLink, status: depStatus, label: (v, r) => r.action === "script" ? `<a class="link" data-dview="${r.id}" title="Show the script and its full output">${esc(v)}</a>` : esc(v),
+    labels: { label: "what", run_as: "run as", message: "result", who: "by", created: "queued", attempts: "tries", act: "" },
+    cell: { hostname: hostLink, status: depStatus, run_as: (v) => `<span class="small">${esc(v || "scanning credentials")}</span>`, label: (v, r) => r.action === "script" ? `<a class="link" data-dview="${r.id}" title="Show the script and its full output">${esc(v)}</a>` : esc(v),
       message: (v, r) => `<span class="longtext small">${esc(r.action === "script" && v ? v.split("\n").slice(0, 3).join(" · ").slice(0, 300) : v || "")}</span>${r.status === "queued" && r.expires ? `<div class="muted small">gives up ${esc(r.expires)}</div>` : ""}`,
       act: (id, r) => r.status === "queued" ? `<a class="link" data-dcancel="${id}">Cancel</a>` : ["failed", "expired", "cancelled"].includes(r.status) ? `<a class="link" data-dretry="${id}">Retry</a>` : "" } });
   el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
@@ -1761,6 +1823,7 @@ function formModal(html, wide = false, init = null) {
       const out = {};
       form.querySelectorAll("input, select, textarea").forEach((i) => {
         if (!i.name) return;
+        if (i.type === "radio") { if (i.checked) out[i.name] = i.value; return; }
         if (i.type === "checkbox") { if (i.dataset.multi) { (out[i.name] = out[i.name] || []); if (i.checked) out[i.name].push(i.value); } else out[i.name] = i.checked; }
         else out[i.name] = i.value;
       });
@@ -2036,14 +2099,18 @@ async function loadJobs(targets) {
   $("#jobcap").reach_interval.value = jobData.reach_interval;
   const stateCell = (v, r) => r.state ? `<span class="pill warn">${r.state}</span>` : !r.enabled ? `<span class="pill mute">off</span>` : fmtDate(r.next_run);
   table($("#jobtable"), jobData.jobs.map((j) => ({ ...j, what: j.collectors.map((c) => JOB_LABEL[c] || c).join(", "), next: j.id, act: j.id })),
-    ["name", "scope", "what", "schedule", "next", "last_run", "last_result", "act"], {
-      labels: { what: "scans", next: "next run", last_result: "result", act: "" },
-      cell: { next: stateCell, last_run: (v, r) => v ? `${fmtDate(v)}${r.last_seconds != null ? ` <span class="muted small">(${Math.round(r.last_seconds / 60)} min)</span>` : ""}` : "never",
+    ["name", "scope", "what", "sign_in", "schedule", "next", "last_run", "last_result", "act"], {
+      labels: { what: "scans", sign_in: "signs in as", next: "next run", last_result: "result", act: "" },
+      cell: { next: stateCell, sign_in: (v) => `<span class="small">${esc(v || "scanning credentials")}</span>`, last_run: (v, r) => v ? `${fmtDate(v)}${r.last_seconds != null ? ` <span class="muted small">(${Math.round(r.last_seconds / 60)} min)</span>` : ""}` : "never",
         last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}" title="${esc(r.ran_by ? `Ran on NetInventory ${r.ran_by}` : "Written by an older NetInventory version")}">${esc(v)}</span>` : "",
         act: (id) => `<a class="link" data-jrun="${id}">Run now</a> · <a class="link" data-jhist="${id}">History</a> · <a class="link" data-jedit="${id}">Edit</a> · <a class="link" data-jdel="${id}">Delete</a>` } });
   const byId = (a, k) => jobData.jobs.find((j) => j.id === +a.dataset[k]);
   $("#jobtable").querySelectorAll("[data-jrun]").forEach((a) => a.onclick = async () => {
-    try { const r = await post(`/api/jobs/${a.dataset.jrun}/run`, {}); toast(r.output); setTimeout(() => { loadJobs(); pollStatus(); }, 1000); } catch (e) { toast(errText(e), true); }
+    const j = byId(a, "jrun"), ra = await getRunAs();
+    const f = await formModal(`<h3>Run ${esc(j.name)} now</h3>${signInField(ra, { label: "Sign in with (this run only)", selected: j.credential_id ?? "",
+      note: "Used for Active Directory, PC inventory and DC logons. Scanning credentials = each target's ticked accounts, as the schedule does. SNMP keeps its own community strings." })}`);
+    if (!f) return;
+    try { const r = await post(`/api/jobs/${j.id}/run`, { job_account: false, credential_id: credVal(f.credential_id) }); toast(r.output); setTimeout(() => { loadJobs(); pollStatus(); }, 1000); } catch (e) { toast(errText(e), true); }
   });
   $("#jobtable").querySelectorAll("[data-jedit]").forEach((a) => a.onclick = () => editJob(byId(a, "jedit")));
   $("#jobtable").querySelectorAll("[data-jdel]").forEach((a) => a.onclick = async () => {
@@ -2059,6 +2126,7 @@ async function loadJobs(targets) {
   });
 }
 async function editJob(j = null) {
+  const ra = await getRunAs();
   const v = j || { name: "", enabled: true, target_ids: [], collectors: ["ad", "pcs"], every_min: 30, at_time: null, days: "0123456", window_start: null, window_end: null, max_parallel: null };
   const mode = v.at_time ? "daily" : v.every_min ? "every" : "manual";
   const f = await formModal(`<h3>${j ? "Edit" : "New"} scan job</h3>
@@ -2082,7 +2150,8 @@ async function editJob(j = null) {
         <input name="window_end" type="number" min="0" max="23" placeholder="any" value="${v.window_end ?? ""}" style="width:4em">:00 <span class="muted small">(server time; 18 and 6 means overnight)</span></label></fieldset>
     <label>Only PCs in this group <select name="group_name"><option value="">(any: what the targets above cover)</option>
       ${(jobData.groups || []).map((g) => `<option ${g === v.group_name ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
-      <span class="muted small">Limits PC inventory and Windows update scans to the group's computers. Credentials still come from the targets.</span></label>
+      <span class="muted small">Limits PC inventory and Windows update scans to the group's computers.</span></label>
+    ${signInField(ra, { selected: v.credential_id ?? "", note: "Scanning credentials = each target's ticked accounts. Pick one account to scan with only that one. Run now lets you change it for one run." })}
     <label>PCs scanned at once over WinRM <input name="max_parallel" type="number" min="1" max="64" placeholder="16" value="${v.max_parallel ?? ""}" style="width:5em"></label>
     <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? "checked" : ""}> Enabled</label>`, true, (form) => {
       const sync = () => { const m = form.mode.value; form.querySelectorAll(".m-every").forEach((e) => e.hidden = m !== "every"); form.querySelectorAll(".m-daily").forEach((e) => e.hidden = m !== "daily"); };
@@ -2092,7 +2161,7 @@ async function editJob(j = null) {
   const num = (x) => (x === "" || x == null ? null : +x);
   const body = { name: f.name, enabled: f.enabled, target_ids: f.t.map(Number), collectors: f.c, days: f.d.join(""),
     every_min: f.mode === "every" ? (+f.every_n) * (+f.every_u) : null, at_time: f.mode === "daily" ? f.at_time : null,
-    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel), ip_methods: f.ipm, group_name: f.group_name || null };
+    window_start: f.mode === "every" ? num(f.window_start) : null, window_end: f.mode === "every" ? num(f.window_end) : null, max_parallel: num(f.max_parallel), ip_methods: f.ipm, group_name: f.group_name || null, credential_id: credVal(f.credential_id) };
   try { await post(`/api/jobs${j ? `?jid=${j.id}` : ""}`, body); toast("Scan job saved."); loadJobs(); }
   catch (e) { toast(errText(e), true); }
 }

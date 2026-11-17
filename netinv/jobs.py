@@ -157,7 +157,10 @@ QUEUE: list[int] = []                # job ids waiting for a slot, first in line
 QUEUED: dict[int, tuple[float, str]] = {}   # job id -> (queued at, who)
 
 
-def run_scan_job(job_id: int, who: str = "schedule") -> None:
+_KEEP = object()        # run_scan_job: sign in as the job says
+
+
+def run_scan_job(job_id: int, who: str = "schedule", cred_id=_KEEP) -> None:
     """Run one job: waits its turn for a free slot (global cap), never overlaps itself."""
     global _active
     with _slots:
@@ -182,7 +185,7 @@ def run_scan_job(job_id: int, who: str = "schedule") -> None:
                 _slots.wait(15)
             JOB_STATE[job_id] = "running"
             QUEUED.pop(job_id, None)
-        _run_scan_job(job_id, who)
+        _run_scan_job(job_id, who, cred_id)
     finally:
         with _slots:
             JOB_STATE.pop(job_id, None)
@@ -221,7 +224,7 @@ def queue_snapshot() -> list[tuple[int, float, str]]:
         return [(j, *QUEUED.get(j, (time.time(), "?"))) for j in QUEUE]
 
 
-def _run_scan_job(job_id: int, who: str) -> None:
+def _run_scan_job(job_id: int, who: str, cred_id=_KEEP) -> None:
     from .db import ScanJob
     with SessionLocal() as db:
         job = db.get(ScanJob, job_id)
@@ -232,6 +235,9 @@ def _run_scan_job(job_id: int, who: str) -> None:
         par, expected = job.max_parallel, job.last_seconds
         ipm = {m for m in (job.ip_methods or "").split(",") if m} or None
         grp = job.group_name or None
+        cid = job.cred_id if cred_id is _KEEP else cred_id
+        from .fixes import cred_name
+        signin = cred_name(db, cid)
         job.last_run = utcnow()
         db.commit()
     key = f"job: {name}"
@@ -245,7 +251,7 @@ def _run_scan_job(job_id: int, who: str) -> None:
             run = CollectorRun(collector=f"job:{job_id}", started=utcnow())
             db.add(run)
             db.commit()
-            with scanning.scoped(ids, par, ipm, grp, scheduled=who == "schedule"):
+            with scanning.scoped(ids, par, ipm, grp, scheduled=who == "schedule", cred_id=cid):
                 for c in colls:
                     if prog.stop.is_set():
                         break
@@ -262,7 +268,8 @@ def _run_scan_job(job_id: int, who: str) -> None:
                         log.exception("scan job %s, %s failed", name, c)
                         ok = False
                         parts.append(f"{c}: failed ({short_error(exc)})")
-            msg = ("; ".join(parts) or "Skipped: this job has no scans ticked") + ("" if who == "schedule" else f" (started by {who})")
+            msg = ("; ".join(parts) or "Skipped: this job has no scans ticked") + ("" if who == "schedule" else f" (started by {who})") \
+                + (f" (signed in as {signin})" if signin else "")
             if not parts or (skipped and skipped == len(parts)):     # nothing scanned at all: not "ok"
                 ok = False
                 if parts:
