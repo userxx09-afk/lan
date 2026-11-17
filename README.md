@@ -287,7 +287,7 @@ What a user group is for:
   alongside (or instead of) the AD group. The group's conditions are checked against the user's live AD entry at each
   sign-in, so moving someone into the OU or AD group gives access straight away.
 
-AD group conditions use the groups stored by the AD import (0.22 and later), so run the AD import once after updating.
+AD group conditions use the groups stored by the AD import (0.23 and later), so run the AD import once after updating.
 
 ## Dashboard drill-down
 
