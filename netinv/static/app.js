@@ -2242,15 +2242,78 @@ $("#tlscsr").onclick = async () => {
     a.click(); toast("Request downloaded. Submit it to your CA, then install the certificate it returns."); loadTls();
   } catch (e) { toast(errText(e), true); }
 };
-$("#tlsform").onsubmit = async (e) => {
-  e.preventDefault();
-  const f = e.target.file.files[0];
-  if (!f) return;
+const TLS_HINT = {
+  auto: "Pick the file(s) and NetInventory works out the format: a .pfx, a PEM or DER certificate (with a key file, a key inside it, or the request made here), or a .p7b chain.",
+  pfx: "One file with the certificate, its private key and usually the CA chain. Export it from Windows with \"Yes, export the private key\", or download it from your CA.",
+  request: "The .cer / .crt / .pem (PEM or DER) or .p7b your CA returned for \"Create request for AD CS\". The private key is already on this server.",
+  pem_key: "A certificate (.crt, .cer or .pem, PEM or DER) and its private key (.key: PKCS#8, RSA or EC, encrypted or not), e.g. from openssl, Let's Encrypt or a Linux CA.",
+  pem_combined: "A single .pem holding the certificate, its private key and optionally the chain.",
+  store: "A certificate with a private key in Local Computer > Personal on this server (certlm.msc). Its key must be exportable.",
+};
+function tlsFormat() {
+  const f = $("#tlsfmt").value;
+  $("#tlsfmthint").textContent = TLS_HINT[f] || "";
+  document.querySelectorAll("#tlsform .tlsrow").forEach(r => { r.hidden = !r.dataset.for.split(" ").includes(f); });
+  $("#tlscertlabel").textContent = f === "pfx" ? ".pfx / .p12 file" : f === "pem_combined" ? "PEM file" : "Certificate file";
+  $("#tlspreview").innerHTML = "";
+  if (f === "store") loadTlsStore();
+}
+async function loadTlsStore() {
+  const sel = $("#tlsstore");
+  try {
+    const d = await api("/api/tls/store");
+    sel.innerHTML = d.certs.length ? `<option value="">Choose a certificate…</option>` + d.certs.map(c =>
+      `<option value="${esc(c.thumbprint)}"${c.expired ? " disabled" : ""}>${esc((c.names[0] || c.subject).slice(0, 60))} · ${esc(c.issuer.replace(/^CN=/, "").split(",")[0])} · until ${fmtDate(c.not_after)}${c.expired ? " (expired)" : !c.server_auth ? " (not for web servers)" : ""}${c.friendly ? " · " + esc(c.friendly) : ""}</option>`).join("")
+      : `<option value="">No certificates with a private key in Local Computer > Personal</option>`;
+  } catch (e) { sel.innerHTML = `<option value="">${esc(errText(e))}</option>`; }
+}
+async function readB64(input) {
+  const f = input && input.files && input.files[0];
+  if (!f) return null;
   const buf = new Uint8Array(await f.arrayBuffer());
   let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-  try { const r = await post("/api/tls/import", { data: btoa(bin), password: e.target.password.value || null }); toast(r.output); e.target.reset(); setTimeout(loadTls, 30000); }
-  catch (er) { toast(errText(er), true); }
+  return btoa(bin);
+}
+async function tlsBody(form) {
+  const fmt = form.format.value;
+  const b = { format: fmt, password: form.password.value || null, key_password: form.key_password.value || null };
+  if (fmt === "store") {
+    if (!form.thumbprint.value) throw new Error("Choose a certificate from the store.");
+    b.thumbprint = form.thumbprint.value;
+    return b;
+  }
+  b.data = await readB64(form.file);
+  if (!b.data) throw new Error("Choose the certificate file.");
+  if (fmt === "auto" || fmt === "pem_key") b.key = await readB64(form.key);
+  if (fmt === "pem_key" && !b.key) throw new Error("Choose the private key file.");
+  if (fmt !== "pfx") b.chain = await readB64(form.chain);
+  return b;
+}
+function tlsPreview(s) {
+  const kv = (k, v) => `<div class="kvr"><span>${k}</span><div>${v}</div></div>`;
+  $("#tlspreview").innerHTML = `<p><span class="pill good">certificate and key match</span> ${esc(s.format)}, key ${esc(s.key_source)} (${esc(s.key_type)})</p>
+    ${kv("Subject", esc(s.subject))}${kv("Issuer", s.self_signed ? "self-signed" : esc(s.issuer))}
+    ${kv("Valid", `${fmtDate(s.not_before)} to ${fmtDate(s.not_after)}`)}${kv("Names", esc(s.names.join(", ") || "none"))}
+    ${kv("Chain", s.chain.length ? s.chain.map(esc).join("<br>") : `<span class="muted">none included</span>`)}
+    ${kv("SHA-256", `<code class="small">${esc(s.sha256)}</code>`)}
+    ${s.warnings.map(w => `<p class="pill warn longtext">${esc(w)}</p>`).join("")}`;
+}
+$("#tlsfmt").onchange = tlsFormat;
+$("#tlscheck").onclick = async () => {
+  try { tlsPreview(await post("/api/tls/check", await tlsBody($("#tlsform")))); }
+  catch (er) { $("#tlspreview").innerHTML = `<p class="pill bad longtext">${esc(errText(er))}</p>`; }
 };
+$("#tlsform").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const body = await tlsBody(e.target);
+    tlsPreview(await post("/api/tls/check", body));
+    const r = await post("/api/tls/import", body);
+    toast(r.output); e.target.reset(); tlsFormat(); setTimeout(loadTls, 30000);
+  } catch (er) { toast(errText(er), true); }
+};
+api("/api/tls/formats").then(d => { $("#tlsfmtstore").hidden = !d.store; }).catch(() => {});
+tlsFormat();
 
 // ------------------------------------------------------------ scanning exclusions
 const EXCL_HINT = { event: "Microsoft-Windows-DistributedCOM 10009", ip: "10.0.5.0/24, 10.0.5.10-10.0.5.50 or 10.0.5.7",
