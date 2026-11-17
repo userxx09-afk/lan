@@ -19,6 +19,8 @@ def decoded(script):
 
 def fake(addr, cfg, script):
     sent.append(script)
+    if "netinv-shot" in script:
+        return {"ok": True, "shots": {"user": "alee", "png": "iVBORw0KGgo=", "bytes": 8}, "message": "1 screen(s) captured"}
     if "Start-Job" in script:
         return {"ok": True, "timed_out": False, "exit_code": 0, "output": "Windows IP Configuration", "user": "CORP\\svc"}
     if "__NAMESPACE" in script:
@@ -228,6 +230,17 @@ with TestClient(m.app) as c:
         assert deps[0].label.startswith("Restart in 5 min"), deps[0].label
     r = c.post(f"{u}/fix", json={"action": "tool", "tool": {"tool": "net", "args": {"op": "flushdns"}}}).json()
     assert r["ok"], r
+
+    # screenshot (user notified) and audit report
+    r = c.post(f"{u}/screenshot").json()
+    assert r["ok"] and r["shots"][0]["user"] == "alee", r
+    assert "ToastNotificationManager" in decoded(sent[-1])[0] and "S-1-5-32-545" in sent[-1]
+    r = c.get(f"{u}/audit")
+    assert r.status_code == 200 and f"Audit report: {h}" in r.text and "Installed software" in r.text and "Local Administrators" not in r.text, r.text[:300]
+    r = c.get(f"{u}/audit", params={"live": 1})
+    assert r.status_code == 200 and "Local Administrators" in r.text and "Automatic services not running" in r.text
+    with SessionLocal() as db:
+        assert db.scalar(select(AuditLog).where(AuditLog.action == "pc.audit_report").order_by(AuditLog.id.desc())).result == "with live checks"
 
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []

@@ -924,6 +924,21 @@ def device_ad_change(hostname: str, body: AdOpIn, user=Depends(ui_auth), db=Depe
     return _remote(lambda: remote.ad_change(db, dev, user, body.op, body.value))
 
 
+@app.post("/api/devices/{hostname}/screenshot")
+def device_screenshot(hostname: str, user=Depends(ui_auth), db=Depends(db_session)):
+    from . import remote
+    dev = _device(db, hostname)
+    return _remote(lambda: remote.screenshot(db, dev, user))
+
+
+@app.get("/api/devices/{hostname}/audit")
+def device_audit(hostname: str, live: bool = False, user=Depends(ui_auth), db=Depends(db_session)):
+    """One printable page with everything known about the PC (and, with live=1, a few checks run on it now)."""
+    from . import audit
+    data = device(hostname, db)
+    return Response(audit.render(db, _device(db, hostname), data, live, user), media_type="text/html")
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None

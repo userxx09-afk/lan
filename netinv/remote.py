@@ -809,3 +809,66 @@ def bulk_run(db, dev: Device, who: str, spec: dict) -> str:
     if not r.get("ok"):
         raise RuntimeError(r.get("output") or "failed")
     return r.get("output") or "done"
+
+
+# ------------------------------------------------------------------ screenshot of the signed-in user's screen (they get a toast)
+SHOT_USER = r'''
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -Namespace NI -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+[void][NI.Dpi]::SetProcessDPIAware()
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+$g = [Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+$bmp.Save("__OUT__-$env:USERNAME.png", [Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $bmp.Dispose()
+$title = 'IT support'; $text = 'Your IT department took a screenshot of your screen.'
+try {
+  [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+  $x = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+  $t = $x.GetElementsByTagName('text'); [void]$t.Item(0).AppendChild($x.CreateTextNode($title)); [void]$t.Item(1).AppendChild($x.CreateTextNode($text))
+  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))
+  Start-Sleep 1
+} catch {
+  $n = New-Object System.Windows.Forms.NotifyIcon
+  $n.Icon = [Drawing.SystemIcons]::Information; $n.Visible = $true
+  $n.ShowBalloonTip(8000, $title, $text, 'Info'); Start-Sleep 8; $n.Dispose()
+}
+'''
+SCREENSHOT = r'''
+$id = [guid]::NewGuid().ToString('N')
+$base = Join-Path $env:PUBLIC "netinv-shot-$id"
+$inner = (D '__INNER__').Replace('__OUT__', $base)
+$enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+$tn = "NetInventory-Screenshot-$id"
+$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $enc"
+$p = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545'
+Register-ScheduledTask -TaskName $tn -Action $a -Principal $p -Force | Out-Null
+try {
+  Start-ScheduledTask -TaskName $tn
+  $files = @()
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 500
+    $files = @(Get-ChildItem "$base-*.png" -ErrorAction SilentlyContinue)
+    if ($files -and $i -ge 6) { break }
+  }
+} finally { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 500
+$shots = @(foreach ($f in @(Get-ChildItem "$base-*.png" -ErrorAction SilentlyContinue)) {
+  $bytes = [IO.File]::ReadAllBytes($f.FullName)
+  Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+  [pscustomobject]@{ user = ($f.BaseName -replace "^netinv-shot-$id-", ''); png = [Convert]::ToBase64String($bytes); bytes = $bytes.Length } })
+@{ ok = [bool]$shots; shots = $shots; message = $(if ($shots) { "$($shots.Count) screen(s) captured" } else { 'nobody is signed in (or the screen is locked)' }) } | ConvertTo-Json -Compress -Depth 3
+'''
+
+
+def screenshot(db, dev: Device, who: str) -> dict:
+    try:
+        r = _run(db, dev, SCREENSHOT.replace("__INNER__", _b(SHOT_USER)))
+    except Exception as exc:
+        _record(db, dev, who, "screenshot", f"Screenshot: {str(exc)[:200]}", False)
+        raise
+    shots = _list(r.get("shots"))
+    users = ", ".join(s.get("user") or "?" for s in shots)
+    _record(db, dev, who, "screenshot", f"Screenshot of {users or 'nobody'} (the user was notified)", bool(shots))
+    return {"ok": bool(shots), "output": r.get("message") or "", "shots": shots}

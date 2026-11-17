@@ -204,6 +204,13 @@ Over WinRM, live, on demand:
 - **Network**: adapters (IP, gateway, DNS, DHCP, speed, MAC), TCP/UDP connections and listening ports with the
   program behind each; flush DNS, register in DNS, release and renew DHCP, Group Policy update.
 - **Devices**: Device Manager's list with driver version, date and provider; devices with a problem code first.
+- **Screenshot of the user's screen** (left side): captures every signed-in user's screen (all monitors) and shows it
+  in the browser with a Save link. The user always gets a notice ("Your IT department took a screenshot of your
+  screen"); the image isn't kept on the server, and each one is audit-logged.
+- **Audit report** (left side): one printable page (print or save as PDF) with everything stored about the PC:
+  summary, disks, adapters, switch port, software, updates, users and logons, deployments, History and comments.
+  *Include live checks* also asks the PC for its local administrators, security state, shares, startup programs
+  and automatic services that aren't running.
 - **Power** (left side): restart or shut down now or after a delay with a notice to the user, cancel a pending
   shutdown, hibernate, sleep, lock the screen, log off everyone. **Send a pop-up message** to everyone on the PC, one
   session, or (from a user's page) that user on their last PC; one way, shown with `msg.exe`.
