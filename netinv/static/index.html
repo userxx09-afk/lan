@@ -334,13 +334,15 @@
       </div>
       <div class="panel">
         <h3>Credentials</h3>
-        <p class="muted">Windows accounts are used for AD (LDAP) and for WinRM to PCs and DCs. SNMP v2c/v3 credentials are used for switches and routers. Secrets are encrypted on the server and never shown again.</p>
+        <p class="muted">Windows accounts are used for AD (LDAP) and for WinRM to PCs and DCs. SNMP v2c/v3 credentials are used for switches and routers. Secrets are encrypted on the server and never shown again.
+          Besides these, every target and agent push can also use <b>this server's own account</b>: the Windows account the NetInventory service runs as (<span id="svcacct">see services.msc</span>), with no password stored. To use that, run the NetInventory service as a domain account with admin rights on the PCs (services.msc, NetInventory, Log On).</p>
         <div id="credtable"></div>
         <button id="addcred">+ Add credential</button>
       </div>
       <div class="panel">
         <h3>What to scan</h3>
-        <p class="muted">Add an AD domain, an OU of computers or users, or an IP range of network gear and PCs. Each target uses the credentials you pick, tried in order.</p>
+        <p class="muted">Add an AD domain, an OU of computers or users, or an IP range of network gear and PCs. Each target uses the credentials you pick, tried in order.
+          This is only <i>what</i> gets scanned and <i>with which account</i>. <i>When</i> it is scanned, and pausing, is set in Scan schedule below. Scan now always scans every target here.</p>
         <div id="targettable"></div>
         <div class="row"><button id="addtarget">+ Add scan target</button><button id="scanall" class="ghost">Scan everything now</button></div>
       </div>

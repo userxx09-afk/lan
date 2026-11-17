@@ -1,6 +1,7 @@
 """Install (push) or remove the NetInventory Agent on PCs from the dashboard, through the deployment queue (fixes.py).
 
-What a push does, over WinRM with the scan credential, like every other deployment:
+What a push does, over WinRM with the scan credential (or the account picked under "Install using": a stored
+Windows credential, or this server's own Windows account), like every other deployment:
 - sends the agent to the PC inside the script: the agent MSI that ships with this server (agent-msi folder, built
   by CI with the same version), or, when the server has no MSI (a development install), the three agent scripts;
 - installs it as SYSTEM from a one-off scheduled task (Windows refuses MSI installs straight from a remote
@@ -81,11 +82,16 @@ def pin() -> str | None:
 
 def status(db, request_base: str | None = None) -> dict:
     """What the push dialog shows."""
-    from .scanning import winrm_cfg
+    from sqlalchemy import select
+    from .db import Credential
+    from .scanning import service_account, winrm_cfg
     p = msi_path()
     return {"server": server_url(db, request_base), "saved": bool(get_setting(db, "agent:server_url", None)),
             "https": bool(pin()), "pin": pin(), "package": "msi" if p else "scripts",
-            "credential": bool(winrm_cfg(db))}
+            "credential": bool(winrm_cfg(db)), "service_account": service_account(),
+            # accounts the push can sign in to the PCs with ("Install using")
+            "accounts": [{"id": c.id, "name": c.name, "username": c.username}
+                         for c in db.scalars(select(Credential).where(Credential.kind == "windows").order_by(Credential.name))]}
 
 
 # ------------------------------------------------------------------ one-time enrollment tickets

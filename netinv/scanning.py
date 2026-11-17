@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import logging
 
@@ -26,6 +27,31 @@ from .secrets import decrypt
 
 log = logging.getLogger(__name__)
 AD_KINDS = ("ad_domain", "ad_computer_path", "ad_user_path")
+
+
+# Credential id 0 in a target's (or a push's) credential list = the Windows account NetInventory itself runs as
+# (no stored password: WinRM and LDAP sign in with Windows integrated authentication, Kerberos/NTLM via SSPI).
+SERVICE_CRED_ID = 0
+
+
+class NothingToDo(Exception):
+    """A scan that had nothing to scan (no target, or its targets are left out of scheduled runs). The run is
+    recorded as skipped, not ok."""
+
+
+def service_account() -> str:
+    """The Windows account this process runs as, e.g. CORP\\svc-netinv, or the computer account under SYSTEM."""
+    import getpass
+    user = os.environ.get("USERNAME") or getpass.getuser()
+    dom = os.environ.get("USERDOMAIN") or ""
+    if user.upper() == "SYSTEM" or user.endswith("$"):
+        host = os.environ.get("COMPUTERNAME") or ""
+        return f"SYSTEM (other PCs see the server's computer account {dom + chr(92) if dom else ''}{host}$)"
+    return f"{dom}\\{user}" if dom and dom.upper() != user.upper() else user
+
+
+def service_cfg() -> dict:
+    return {"user": None, "password": None, "integrated": True}
 
 
 def cred_cfg(c: Credential) -> dict:
@@ -42,6 +68,11 @@ def _creds(db: Session, targets: list[ScanTarget], kinds: tuple[str, ...]) -> li
     seen, out = set(), []
     for t in targets:
         for cid in (t.credential_ids or "").split(","):
+            if cid.strip() == str(SERVICE_CRED_ID):
+                if "windows" in kinds and SERVICE_CRED_ID not in seen:
+                    seen.add(SERVICE_CRED_ID)
+                    out.append(service_cfg())
+                continue
             if cid.strip().isdigit() and int(cid) not in seen:
                 c = db.get(Credential, int(cid))
                 if c and c.kind in kinds:
@@ -62,25 +93,60 @@ SCOPE = threading.local()
 
 
 def scoped(target_ids: list[int] | None, parallel: int | None = None, ip_methods: set[str] | None = None,
-           group: str | None = None):
+           group: str | None = None, scheduled: bool = False):
     """Context manager: scans in this thread only see these targets (None = all), use this WinRM parallelism,
-    on IP ranges run only these methods (None = each target's own), and PC scans only reach this group's computers."""
+    on IP ranges run only these methods (None = each target's own), and PC scans only reach this group's computers.
+    scheduled=True: a run started by the schedule, which leaves out targets with "Include in scheduled scans"
+    unticked. Scan now and Run now scan every target: that box only affects the schedule."""
     class _S:
         def __enter__(self):
             SCOPE.ids, SCOPE.parallel = (set(target_ids) if target_ids else None), parallel
             SCOPE.ip_methods = set(ip_methods) if ip_methods else None
             SCOPE.group = group or None
+            SCOPE.scheduled = scheduled
         def __exit__(self, *a):
             SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = SCOPE.group = None
+            SCOPE.scheduled = False
     return _S()
 
 
+def _scheduled() -> bool:
+    return bool(getattr(SCOPE, "scheduled", False))
+
+
 def _targets(db: Session, *kinds: str, all_scopes: bool = False) -> list[ScanTarget]:
-    q = select(ScanTarget).where(ScanTarget.enabled.is_(True), ScanTarget.kind.in_(kinds))
+    """The targets a scan works on. all_scopes=True (looking up credentials for an action): every target of these
+    kinds. Otherwise the scan job's own targets, minus the ones left out of the schedule on a scheduled run."""
+    q = select(ScanTarget).where(ScanTarget.kind.in_(kinds))
+    if not all_scopes and _scheduled():
+        q = q.where(ScanTarget.enabled.is_(True))
     ids = None if all_scopes else getattr(SCOPE, "ids", None)
     if ids:
         q = q.where(ScanTarget.id.in_(ids))
     return list(db.scalars(q.order_by(ScanTarget.id)))
+
+
+def _label(t: ScanTarget) -> str:
+    v = t.value or ""
+    return v if len(v) <= 60 else v[:57] + "..."
+
+
+def nothing_to_do(db: Session, *kinds: str, what: str) -> NothingToDo:
+    """Why a scan of these target kinds has nothing to work on, worded for the Scanning page."""
+    q = select(ScanTarget).where(ScanTarget.kind.in_(kinds))
+    ids = getattr(SCOPE, "ids", None)
+    if ids:
+        q = q.where(ScanTarget.id.in_(ids))
+    off = [t for t in db.scalars(q.order_by(ScanTarget.id)) if not t.enabled]
+    if off and _scheduled():
+        names = ", ".join(_label(t) for t in off)
+        one = len(off) == 1
+        return NothingToDo(f"Skipped: the {what} target{'' if one else 's'} {names} {'is' if one else 'are'} left out "
+                           f"of scheduled scans (\"Include in scheduled scans\" is unticked in Settings, Scan targets). "
+                           f"Scan now still scans {'it' if one else 'them'}.")
+    if ids:
+        return NothingToDo(f"Skipped: this scan job has no {what} target ticked (Settings, Scan schedule).")
+    return NothingToDo(f"Skipped: no {what} target is set up yet (Settings, Scan targets).")
 
 
 def _finish(db: Session, targets: list[ScanTarget], ok: bool, msg: str) -> None:
@@ -171,23 +237,26 @@ def run_ad(db: Session) -> str:
     if not targets:
         if settings.ad.get("server"):
             return ad.collect(db, {**settings.ad, "domain": dn_domain(settings.ad.get("base_dn", ""))})
-        return "No Active Directory targets configured."
+        raise nothing_to_do(db, *AD_KINDS, what="Active Directory")
     domains: dict[str, list[ScanTarget]] = {}
     scopes: dict[int, tuple] = {}
-    msgs = []
+    msgs, failed = [], 0
     for t in targets:
         try:
             scopes[t.id] = ad_scope(t)
         except ValueError as exc:
             _finish(db, [t], False, str(exc))
-            msgs.append(f"{t.value}: {exc}")
+            msgs.append(f"{t.value}: failed ({exc})")
+            failed += 1
             continue
         domains.setdefault(scopes[t.id][1], []).append(t)
     for dom, ts in domains.items():
         creds = _creds(db, ts, ("windows",)) or _creds(db, _targets(db, "ad_domain", all_scopes=True), ("windows",))
         if not creds:
-            _finish(db, ts, False, "No Windows credential assigned.")
-            msgs.append(f"{dom}: no credential")
+            names = ", ".join(_label(t) for t in ts)
+            _finish(db, ts, False, "No Windows credential is ticked on this target (Edit, Credentials to try).")
+            msgs.append(f"{dom}: failed (no Windows credential is ticked on the target {names})")
+            failed += 1
             continue
         servers = dc_candidates(db, dom, ts)
         sc = [scopes[t.id] for t in ts]
@@ -214,6 +283,9 @@ def run_ad(db: Session) -> str:
         if err:
             _finish(db, ts, False, short_error(err))
             msgs.append(f"{dom}: failed ({short_error(err)})")
+            failed += 1
+    if failed and failed == len(msgs):
+        raise RuntimeError("; ".join(msgs))
     return "; ".join(msgs)
 
 
@@ -272,9 +344,11 @@ def run_ip(db: Session) -> str:
     from . import progress, reach
     from .exclusions import Exclusions
     targets = _targets(db, "ip_range")
-    msgs = []
+    msgs, failed = [], 0
     if not targets and settings.snmp.get("targets"):
         msgs.append(snmp.collect(db, settings.snmp))
+    elif not targets:
+        raise nothing_to_do(db, "ip_range", what="IP range")
     for t in targets:
         if progress.stopped():
             break
@@ -320,8 +394,11 @@ def run_ip(db: Session) -> str:
             db.rollback()
             _finish(db, [t], False, short_error(exc))
             msgs.append(f"{t.value}: failed ({short_error(exc)})")
+            failed += 1
     moved = track_port_moves(db)
-    return ("; ".join(msgs) or "No IP range targets configured.") + (f" {moved} PCs moved port." if moved else "")
+    if failed and failed == len(msgs):
+        raise RuntimeError("; ".join(msgs))
+    return "; ".join(msgs) + (f" {moved} PCs moved port." if moved else "")
 
 
 # ------------------------------------------------------------------ WinRM endpoints
@@ -332,7 +409,9 @@ def winrm_cfg(db: Session) -> dict | None:
             return None
         creds = None
     else:
-        creds = _creds(db, targets, ("windows",))
+        # the scanned targets' own credentials first, then any target's (a target with none of its own)
+        creds = _creds(db, targets, ("windows",)) or \
+            _creds(db, _targets(db, *AD_KINDS, "ip_range", all_scopes=True), ("windows",))
         if not creds:
             return None
     par = getattr(SCOPE, "parallel", None)
@@ -365,16 +444,27 @@ def winrm_cfg(db: Session) -> dict | None:
             "include_ad": whole or bool(bases), "computer_bases": None if whole else (bases or None)}
 
 
+def why_no_winrm(db: Session) -> NothingToDo:
+    """winrm_cfg gave nothing: say why (no targets in this run, or no target has a Windows credential)."""
+    targets = _targets(db, *AD_KINDS, "ip_range")
+    if not targets:
+        return nothing_to_do(db, *AD_KINDS, "ip_range", what="Active Directory or IP range")
+    names = ", ".join(_label(t) for t in targets)
+    return NothingToDo(f"Skipped: no Windows credential is ticked on the target{'s' if len(targets) > 1 else ''} {names} "
+                       "(Settings, Scan targets, Edit, Credentials to try).")
+
+
 def run_pcs(db: Session, check_pending: bool) -> str:
     from .collectors import winrm
     cfg = winrm_cfg(db)
     if cfg is None:
-        return "No Windows credential configured."
+        raise why_no_winrm(db)
     if cfg.get("group") and not cfg.get("hosts"):
-        return f"The group {cfg['group']} has no computers."
+        raise NothingToDo(f"Skipped: the group {cfg['group']} has no computers.")
     if not cfg.get("hosts") and not cfg.get("include_ad", True) and not settings.winrm.get("user"):
-        return "Nothing to scan."
-    msg = winrm.collect_endpoints(db, cfg, check_pending=check_pending)
+        raise NothingToDo("Skipped: no computers to scan. Tick Computers on an AD target, add an AD OU of computers, "
+                          "or tick WinRM sweep on an IP range.")
+    msg = winrm.collect_endpoints(db, cfg, check_pending=check_pending, raise_if_all_failed=True)
     _reconcile(db)
     return msg
 
@@ -392,6 +482,6 @@ def run_dc_logons(db: Session) -> str:
     from .correlate import resolve_logon_hosts
     cfg = winrm_cfg(db)
     if cfg is None:
-        return "No Windows credential configured."
+        raise why_no_winrm(db)
     msg = winrm.collect_dc_logons(db, cfg)
     return msg + f", {resolve_logon_hosts(db)} matched to PCs by IP"

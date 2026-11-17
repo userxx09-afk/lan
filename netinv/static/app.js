@@ -86,7 +86,7 @@ loaders.overview = async () => {
       `${r.os.replace("Microsoft ", "")} ${r.version}`.trim());
   });
   table($("#runs"), s.runs, ["collector", "started", "ok", "message"], {
-    cell: { ok: (v) => `<span class="pill ${v ? "good" : v === false ? "bad" : "mute"}">${v ? "ok" : v === false ? "failed" : "running"}</span>`, started: fmtDate } });
+    cell: { ok: (v, r) => { const sk = v === false && /^Skipped/.test(r.message || ""); return `<span class="pill ${sk ? "warn" : v ? "good" : v === false ? "bad" : "mute"}">${sk ? "skipped" : v ? "ok" : v === false ? "failed" : "running"}</span>`; }, started: fmtDate } });
 };
 function renderAlerts() {
   const hide = $("#hidezero").checked;
@@ -591,6 +591,7 @@ async function runScriptDialog({ scriptId = null, hosts = [], group = null } = {
   } catch (e) { toast(errText(e), true); }
 }
 $("#runscript").onclick = () => runScriptDialog({ hosts: [current] });
+const openFails = new Set();   // live Scanning view: which "latest failures" lists are open (survives the refresh)
 // ------------------------------------------------------------ push the NetInventory Agent over WinRM (agentpush.py)
 async function pushAgentDialog(hosts, group = null) {
   let d;
@@ -599,10 +600,14 @@ async function pushAgentDialog(hosts, group = null) {
   const one = !group && hosts.length === 1 ? hosts[0] : null;
   const who = group ? `every computer in the group ${group}` : one || `${hosts.length} computers`;
   const f = await formModal(`<h3>Push the agent to ${esc(who)}</h3>
-    <p class="muted small">Installs (or updates) the NetInventory Agent over WinRM with the scan credential, the same way as other
+    <p class="muted small">Installs (or updates) the NetInventory Agent over WinRM with the account picked below, the same way as other
       deployments: no download on the PC and no enrollment token needed. Each PC gets a one-time ticket, is approved
       automatically, and only counts as done once its agent has reported to this server.</p>
-    ${d.credential ? "" : `<p class="pill bad longtext">No Windows credential is set up (Settings > Credentials): pushes will fail.</p>`}
+    <label>Install using <select name="credential_id">
+      <option value="">The scan credentials (from the scan targets)${d.credential ? "" : " (none set up)"}</option>
+      ${(d.accounts || []).map((a) => `<option value="${a.id}">${esc(a.name)}${a.username ? ` (${esc(a.username)})` : ""}</option>`).join("")}
+      <option value="0">This server's own Windows account: ${esc(d.service_account || "")}</option></select></label>
+    <p class="muted small">The account needs to be an administrator on the PCs. To use another admin account, add it in Settings, Credentials first.</p>
     <label>Server address the PCs use <input name="server_url" value="${esc(d.server)}" required></label>
     ${d.saved ? "" : `<p class="muted small">Check this: it's the name and port PCs reach this server on (not localhost). It's saved for later pushes.</p>`}
     <label>Agent runs as <select name="run_as"><option value="LOCALSERVICE">Local Service (least rights, recommended)</option>
@@ -614,7 +619,8 @@ async function pushAgentDialog(hosts, group = null) {
   const what = f.remove ? "Remove the agent from" : "Install the agent on";
   if (!(await confirmBox(`${what} ${who}?`))) return;
   try {
-    const r = await post("/api/agents/push", { hostnames: hosts, group, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove });
+    const r = await post("/api/agents/push", { hostnames: hosts, group, server_url: f.server_url, run_as: f.run_as, remove: !!f.remove,
+      credential_id: f.credential_id === "" || f.credential_id == null ? null : Number(f.credential_id) });
     toast(r.output, !r.ok);
     if (one && current === one) openDevice(one); else if (!group) loaders.computers();
   } catch (e) { toast(errText(e), true); }
@@ -1542,12 +1548,18 @@ loaders.scanning = async () => {
     const hosts = r.total ? `<b>${r.done}</b> of ${r.total} ${r.step === "dc_logons" ? "DCs" : "PCs"} done${r.failed ? `, <span class="bad">${r.failed} failed</span>` : ""} (${pct}%)` :
       `<span class="muted">${esc(STEP_LABEL[r.step] || r.step || "starting")}…</span>`;
     const cur = r.current.length ? `<div class="muted small">Now scanning: ${esc(r.current.join(", "))}${r.in_flight > r.current.length ? ` and ${r.in_flight - r.current.length} more` : ""}</div>` : "";
+    // why hosts failed, grouped (PCs with the same problem count together), and the latest failures by name
+    const why = (r.reasons || []).length ? `<div class="small"><b>Why they failed:</b><ul class="whylist">${r.reasons.map((x) =>
+      `<li><b>${x.count}</b> × <span class="code">${esc(x.reason)}</span></li>`).join("")}</ul>
+      <details data-fails="${esc(r.key)}" ${openFails.has(r.key) ? "open" : ""}><summary>Latest failures by computer</summary>
+      <div class="faillist">${(r.failures || []).map((f) => `<div><b>${esc(f.host)}</b> <span class="muted">${esc(f.reason)}</span></div>`).join("")}</div></details></div>` : "";
     return `<div class="runcard"><div class="top"><b>${esc(r.name)}</b>
         <span class="muted">${r.who ? `started by ${esc(r.who)}` : r.job_id ? "scheduled" : "scan now"} · running ${dur(r.elapsed)}${r.eta != null ? ` · about ${dur(r.eta)} left` : ""}</span>
         ${r.cancelling ? `<span class="pill warn">stopping…</span>` : ""}
         <span class="actions">${r.job_id && !r.cancelling ? `<button class="ghost" data-scancel="${r.job_id}">Cancel</button>` : ""}</span></div>
-      ${steps}<div class="pbar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}</div>`;
+      ${steps}<div class="pbar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}${why}</div>`;
   }).join("") : `<p class="muted">Nothing is scanning right now.</p>`;
+  $("#scanrunning").querySelectorAll("details[data-fails]").forEach((el) => el.ontoggle = () => el.open ? openFails.add(el.dataset.fails) : openFails.delete(el.dataset.fails));
   table($("#scanqueue"), d.queued.map((q) => ({ ...q, act: q.job_id })), ["position", "name", "waiting", "starts_in", "expected", "act"], {
     labels: { position: "#", waiting: "waiting for", starts_in: "should start", expected: "takes about", act: "" },
     cell: { waiting: (v) => dur(v), starts_in: (v) => v ? `in about ${dur(v)}` : "next free slot", expected: (v) => v ? dur(v) : "",
@@ -1558,7 +1570,7 @@ loaders.scanning = async () => {
   if (!d.upcoming.length) $("#scanupcoming").innerHTML = `<p class="muted">No scheduled jobs. Add them in Settings, Scan schedule.</p>`;
   table($("#scanrecent"), d.recent, ["finished", "name", "seconds", "ok", "result"], { labels: { seconds: "took", ok: "" },
     cell: { finished: fmtDate, seconds: (v) => dur(v), name: (v) => esc(JOB_LABEL[v] ? `Scan now: ${JOB_LABEL[v]}` : String(v).replace(/^job: /, "")),
-      ok: (v, r) => `<span class="pill ${r.cancelled ? "warn" : v ? "good" : "bad"}">${r.cancelled ? "cancelled" : v ? "ok" : "failed"}</span>`,
+      ok: (v, r) => { const sk = !v && /^Skipped/.test(r.result || ""); return `<span class="pill ${r.cancelled || sk ? "warn" : v ? "good" : "bad"}">${r.cancelled ? "cancelled" : sk ? "skipped" : v ? "ok" : "failed"}</span>`; },
       result: (v) => `<span class="longtext small">${esc(v || "")}</span>` } });
   $("#scanning").querySelectorAll("[data-scancel]").forEach((a) => a.onclick = async () => {
     if (!(await confirmBox("Cancel this scan? PCs already being scanned finish; the rest are skipped until the next run."))) return;
@@ -1899,19 +1911,24 @@ const THELP = {
   ad_user_path: ["corp.example.com/Staff/Office", "Only user accounts in this OU and the OUs below it are imported. No computers are read. Path as domain/OU/OU, or a DN like OU=Office,OU=Staff,DC=corp,DC=example,DC=com."],
   ip_range: ["10.0.0.0/24, 10.1.0.1-10.1.0.50", "Tick below what runs on these addresses. Only the ticked methods run, and each needs its credential."],
 };
-let creds = [];
+let creds = [], svcAccount = null;
+// credential id 0 = the Windows account NetInventory runs as (no stored password)
+const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
+const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
 loaders.settings = async () => {
   loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents();
-  const [c, t, s] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings")]);
-  creds = c; appSettings = s; loadCatalog();
-  table($("#credtable"), c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), ["name", "kind", "username", "secret", "edit"], {
-    labels: { edit: "" }, cell: { kind: (v) => esc(KIND[v] || v), secret: (v) => (v ? `<span class="pill good">stored</span>` : `<span class="pill warn">missing</span>`),
-      edit: (id) => `<a class="link" data-cedit="${id}">Edit</a> · <a class="link" data-ctest="${id}">Test</a> · <a class="link" data-cdel="${id}">Delete</a>` } });
+  const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
+  creds = c; appSettings = s; svcAccount = sa; loadCatalog();
+  if (sa && $("#svcacct")) $("#svcacct").textContent = sa.account;
+  table($("#credtable"), [...c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), { ...svcCred(), secret: "none", edit: 0 }], ["name", "kind", "username", "secret", "edit"], {
+    labels: { edit: "" }, cell: { kind: (v) => esc(v === "service" ? "Windows sign-in (WinRM + LDAP)" : KIND[v] || v),
+      secret: (v) => (v === "none" ? `<span class="pill mute">not needed</span>` : v ? `<span class="pill good">stored</span>` : `<span class="pill warn">missing</span>`),
+      edit: (id) => id === 0 ? `<a class="link" data-ctest="0">Test</a>` : `<a class="link" data-cedit="${id}">Edit</a> · <a class="link" data-ctest="${id}">Test</a> · <a class="link" data-cdel="${id}">Delete</a>` } });
   table($("#targettable"), t.map((x) => ({ ...x, credentials: x.credential_ids, edit: x.id })), ["kind", "value", "search_base", "server", "credentials", "enabled", "last_run", "last_result", "edit"], {
-    labels: { edit: "", last_result: "result", search_base: "searches" },
+    labels: { edit: "", last_result: "result", search_base: "searches", enabled: "in schedule" },
     cell: { kind: (v, r) => esc(TKIND[v] || v) + (r.collect ? `<div class="muted small">${esc(r.collect.map((m) => IPM_SHORT[m] || m).join(r.kind === "ip_range" ? ", " : " and "))}</div>` : ""),
-      search_base: (v, r) => r.scope_error ? `<span class="pill bad longtext">${esc(r.scope_error)}</span>` : v ? `<code class="small">${esc(v)}</code>` : r.kind === "ip_range" ? `<span class="muted">addresses</span>` : "", credentials: (ids) => esc(ids.map((i) => creds.find((c) => c.id === i)?.name || `#${i}`).join(", ") || "none"),
-      enabled: (v) => yesNo(v), last_run: fmtDate,
+      search_base: (v, r) => r.scope_error ? `<span class="pill bad longtext">${esc(r.scope_error)}</span>` : v ? `<code class="small">${esc(v)}</code>` : r.kind === "ip_range" ? `<span class="muted">addresses</span>` : "", credentials: (ids) => esc(ids.map(credName).join(", ") || "none"),
+      enabled: (v) => v ? `<span class="pill good">yes</span>` : `<span class="pill warn" title="Scan now still scans it">left out</span>`, last_run: fmtDate,
       // Full text, wrapped: errors are only useful whole. A run that worked but reached no Windows hosts is a warning.
       last_result: (v, r) => (v ? `<span class="pill longtext ${!r.last_ok ? "bad" : /(^|[;:] )0 hosts answer on WinRM/.test(v) ? "warn" : "good"}">${esc(v)}</span>` : ""),
       edit: (id) => `<a class="link" data-tscan="${id}">Scan now</a> · <a class="link" data-tedit="${id}">Edit</a> · <a class="link" data-tdel="${id}">Delete</a>` } });
@@ -1921,8 +1938,8 @@ loaders.settings = async () => {
     if (await confirmBox(`Delete the credential “${x.name}”? Scan targets using it will skip it.`)) { await api(`/api/credentials/${x.id}`, { method: "DELETE" }); loaders.settings(); }
   });
   $("#credtable").querySelectorAll("[data-ctest]").forEach((a) => a.onclick = async () => {
-    const x = c.find((y) => y.id === +a.dataset.ctest);
-    const host = await ask(x.kind === "windows" ? "Test against which domain controller or PC?" : "Test against which switch or router (IP or name)?");
+    const x = +a.dataset.ctest === 0 ? svcCred() : c.find((y) => y.id === +a.dataset.ctest);
+    const host = await ask(x.kind === "windows" || x.kind === "service" ? "Test against which domain controller or PC?" : "Test against which switch or router (IP or name)?");
     if (!host) return;
     toast(`Testing ${x.name} against ${host}…`);
     try { const r = await post(`/api/credentials/${x.id}/test`, { host }); toast(r.output, !r.ok); } catch (e) { toast(e.message, true); }
@@ -1972,8 +1989,9 @@ async function editTarget(x = {}) {
       ${Object.entries(IPM).map(([k, l]) => `<label><input type="checkbox" data-multi="1" name="methods" value="${k}" ${!x.collect || x.kind !== "ip_range" || x.collect.includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div>
     <label id="tserver">Domain controller (optional)<input name="server" value="${esc(x.server || "")}" placeholder="dc01.corp.example.com, blank = find one"></label>
     <label>Credentials to try, in order</label>
-    <div class="checks">${creds.map((c) => `<label><input type="checkbox" data-multi="1" name="credential_ids" value="${c.id}" ${(x.credential_ids || []).includes(c.id) ? "checked" : ""}> ${esc(c.name)} <span class="muted">${esc(KIND[c.kind])}</span></label>`).join("") || `<span class="muted">Add a credential first.</span>`}</div>
-    <label class="chk"><input type="checkbox" name="enabled" ${x.enabled === false ? "" : "checked"}> Enabled</label>`, true);
+    <div class="checks">${[...creds, svcCred()].map((c) => `<label><input type="checkbox" data-multi="1" name="credential_ids" value="${c.id}" ${(x.credential_ids || []).includes(c.id) ? "checked" : ""}> ${esc(c.name)} <span class="muted">${esc(c.kind === "service" ? `Windows sign-in as ${c.username}, no password` : KIND[c.kind])}</span></label>`).join("")}</div>
+    <label class="chk"><input type="checkbox" name="enabled" ${x.enabled === false ? "" : "checked"}> Include in scheduled scans</label>
+    <p class="hint">Untick to leave this target out of scheduled scans; Scan now still scans it. To pause a scan, untick Enabled on its job in Settings, Scan schedule.</p>`, true);
   kick();
   const f = await pending;
   if (!f) return;
@@ -2020,7 +2038,7 @@ async function loadJobs(targets) {
     const j = byId(a, "jhist"), h = await api(`/api/jobs/${j.id}/history`);
     drawer(`<h2>${esc(j.name)}</h2><p class="muted">${esc(j.schedule)} · ${esc(j.scope)}</p><div id="jobhist"></div>`);
     table($("#jobhist"), h, ["started", "seconds", "ok", "result"], { labels: { seconds: "took (s)" },
-      cell: { ok: (v) => `<span class="pill ${v ? "good" : v === false ? "bad" : "mute"}">${v ? "ok" : v === false ? "failed" : "running"}</span>`,
+      cell: { ok: (v, r) => { const sk = v === false && /^Skipped/.test(r.result || ""); return `<span class="pill ${sk ? "warn" : v ? "good" : v === false ? "bad" : "mute"}">${sk ? "skipped" : v ? "ok" : v === false ? "failed" : "running"}</span>`; },
         result: (v) => `<span class="longtext">${esc(v || "")}</span>` } });
   });
 }
