@@ -95,6 +95,26 @@ with TestClient(m.app) as c:
     assert r.json()["members"] == 2
     assert {g["name"]: g for g in c.get("/api/groups").json()["groups"]}["Pilot"]["kind"] == "manual"
 
+    # "Other field": any v_devices column, with is / is not / less / more / empty
+    with SessionLocal() as db:
+        big = sorted(h for h, d in devs.items() if d.ram_gb is not None and d.ram_gb > 8)
+        nomodel = sorted(h for h, d in devs.items() if not d.model)
+    pv = lambda *conds, match="all": c.post("/api/groups/preview", json={"name": "x", "match": match, "conditions": list(conds)})
+    r = pv({"field": "other", "column": "ram_gb", "op": "gt", "value": "8"})
+    assert r.status_code == 200 and r.json()["hostnames"] == big, (r.text, big)
+    assert pv({"field": "other", "column": "nope", "op": "is", "value": "x"}).status_code == 400
+    assert pv({"field": "other", "column": "groups", "op": "is", "value": "x"}).status_code == 400, "no self-reference"
+    assert pv({"field": "other", "column": "model", "op": "empty"}).json()["hostnames"] == nomodel
+    assert pv({"field": "other", "column": "model", "op": "is", "value": "optiplex*"}).json()["hostnames"] == optiplex
+    assert pv({"field": "other", "column": "model", "op": "not", "value": "OptiPlex"}).json()["count"] == len(devs) - len(optiplex)
+    r = c.post("/api/groups", json={"name": "Big RAM", "conditions": [{"field": "other", "column": "ram_gb", "op": "gt", "value": "8"}]})
+    assert r.json()["members"] == len(big)
+    g = {g["name"]: g for g in c.get("/api/groups").json()["groups"]}["Big RAM"]
+    assert g["rule"] == "ram_gb is more than 8" and g["conditions"][0]["column"] == "ram_gb", g
+    mem = c.get("/api/groups/Big%20RAM/members").json()["members"]
+    assert mem and all(k in mem[0] for k in ("os", "ip", "model", "ou")), mem[0]
+    assert c.delete("/api/groups/Big%20RAM").status_code == 200
+
     # scan jobs: a group limits PC scans to its members
     job = {"name": "OptiPlex nightly", "collectors": ["pcs"], "at_time": "02:00", "group_name": "Dell OptiPlex"}
     assert c.post("/api/jobs", json={**job, "group_name": "nope"}).status_code == 400

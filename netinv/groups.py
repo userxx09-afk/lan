@@ -43,7 +43,11 @@ FIELDS = {
     "ou": "AD OU",
     "os": "Operating system",
     "state": "State",
+    "other": "Other field...",
 }
+# "Other field": any column of the v_devices view (the Computers list / report builder fields).
+OTHER_OPS = {"is": "is", "not": "is not", "lt": "is less than", "gt": "is more than", "empty": "is empty",
+             "not_empty": "is not empty"}
 HINTS = {
     "hostname": "LAB-*, KIOSK?? (wildcards * and ?; plain text = contains)",
     "ip": "10.1.20.0/24, 10.1.20.10-80 or 10.1.20.5",
@@ -52,9 +56,10 @@ HINTS = {
     "ou": "corp.example.com/Sites/Office/PCs or OU=PCs,OU=Office,DC=corp,DC=example,DC=com (includes sub-OUs)",
     "os": "Windows 11, *Server 2019*",
     "state": "Active, Stock, Retired",
+    "other": "a value; wildcards * and ?, or a number or date (2026-01-31) for less / more than",
 }
 SHORT = {"hostname": "host name", "ip": "IP", "model": "model", "manufacturer": "manufacturer", "ou": "OU", "os": "OS",
-         "state": "state"}
+         "state": "state", "other": "field"}
 MAX_CONDITIONS = 20
 _lock = threading.Lock()
 _last_refresh = 0.0
@@ -70,16 +75,40 @@ def _ou_dn(v: str) -> str:
     return re.sub(r"\s*,\s*", ",", dn.strip()).lower()
 
 
-def validate(match: str, conditions: list[dict]) -> list[dict]:
+def device_columns(db) -> list[str]:
+    from .reports import columns
+    # groups is left out: a group defined by group membership could depend on itself and flip on every refresh
+    return [c for c in columns(db, "v_devices") if c not in ("id", "device_id", "groups")]
+
+
+def validate(match: str, conditions: list[dict], db=None) -> list[dict]:
     """Returns cleaned conditions, or raises ValueError with a message for the user."""
     from .exclusions import parse_ip
     if match not in ("all", "any"):
         raise ValueError("match must be all or any")
     out = []
+    cols = None
     for c in conditions or []:
         field, value, neg = c.get("field"), str(c.get("value") or "").strip(), bool(c.get("not"))
         if field not in FIELDS:
             raise ValueError("unknown condition type")
+        if field == "other":
+            col, op = str(c.get("column") or ""), str(c.get("op") or ("not" if neg else "is"))
+            if cols is None:
+                cols = device_columns(db) if db is not None else None
+            if not col or (cols is not None and col not in cols):
+                raise ValueError("pick the field for each \"Other field\" condition")
+            if op not in OTHER_OPS:
+                raise ValueError("unknown comparison")
+            if op in ("empty", "not_empty"):
+                out.append({"field": "other", "column": col, "op": op, "value": "", "not": False})
+                continue
+            if not value:
+                continue
+            if len(value) > 1000:
+                raise ValueError(f"{col}: value too long")
+            out.append({"field": "other", "column": col, "op": op, "value": value, "not": op == "not"})
+            continue
         if not value:
             continue
         if len(value) > 1000:
@@ -108,6 +137,12 @@ class _Cond:
         from .exclusions import parse_ip
         self.field, self.neg = c["field"], bool(c.get("not"))
         vals = _split(c["value"])
+        if self.field == "other":
+            self.column, self.op, self.neg = c["column"], c.get("op") or "is", False
+            self.raw = (c.get("value") or "").strip()
+            self.pats = [_bool_word(v) or (v.lower() if any(ch in v for ch in "*?[") else v.lower()) for v in vals]
+            self.wild = [any(ch in v for ch in "*?[") for v in vals]
+            return
         if self.field == "ip":
             self.ranges = [parse_ip(v) for v in vals]
         elif self.field == "ou":
@@ -121,6 +156,8 @@ class _Cond:
         return self._test(d) != self.neg
 
     def _test(self, d: dict) -> bool:
+        if self.field == "other":
+            return self._other(d.get("x", {}).get(self.column))
         if self.field == "ip":
             return any(a <= ip <= b for ip in d["ips"] for a, b in self.ranges)
         if self.field == "ou":
@@ -131,6 +168,52 @@ class _Cond:
             names = [x for x in (d["hostname"], d["fqdn"]) if x]
             return any(fnmatch.fnmatchcase(n.lower(), p) for n in names for p in self.pats)
         return bool(v) and any(fnmatch.fnmatchcase(v.lower(), p) for p in self.pats)
+
+
+    def _other(self, v) -> bool:
+        if self.op == "empty":
+            return v is None or str(v).strip() == ""
+        if self.op == "not_empty":
+            return not (v is None or str(v).strip() == "")
+        if v is None or str(v).strip() == "":
+            return self.op == "not"
+        if self.op in ("lt", "gt"):
+            a, b = _num(v), _num(self.raw)
+            if a is None or b is None:
+                a, b = str(v).strip().lower(), self.raw.lower()     # dates and text: ISO dates sort as text
+            return a < b if self.op == "lt" else a > b
+        sv = _bool_word(v) or str(v).strip().lower()
+        hit = any(fnmatch.fnmatchcase(sv, p) if w else
+                  (sv == p if isinstance(v, (bool, int, float)) or _bool_word(v) else p in sv)
+                  for p, w in zip(self.pats, self.wild))
+        return hit != (self.op == "not")
+
+
+def _bool_word(v) -> str | None:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    s = str(v).strip().lower()
+    return {"yes": "true", "no": "false", "true": "true", "false": "false"}.get(s)
+
+
+def _num(v):
+    if isinstance(v, bool):
+        return None
+    try:
+        return float(str(v).strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _extra(db, cols: set[str]) -> dict[str, dict]:
+    """hostname -> {column: value} from v_devices, for "Other field" conditions."""
+    from sqlalchemy import text
+    allowed = set(device_columns(db))
+    cols = sorted(c for c in cols if c in allowed)
+    if not cols:
+        return {}
+    q = "SELECT hostname, " + ", ".join(f'"{c}"' for c in cols) + " FROM v_devices"
+    return {r[0]: dict(zip(cols, r[1:])) for r in db.execute(text(q))}
 
 
 def _devices(db) -> list[dict]:
@@ -156,6 +239,10 @@ def evaluate(db, match: str, conditions: list[dict], devices: list[dict] | None 
     if not conds:
         return []
     devs = devices if devices is not None else _devices(db)
+    need = {c.column for c in conds if c.field == "other"}
+    if need:
+        ext = _extra(db, need)
+        devs = [{**d, "x": ext.get(d["hostname"], {})} for d in devs]
     agg = all if match == "all" else any
     return [d for d in devs if agg(c.test(d) for c in conds)]
 
@@ -222,6 +309,8 @@ def names(db) -> list[str]:
 
 
 def describe(match: str, conditions: list[dict]) -> str:
-    parts = [f"{SHORT.get(c['field'], c['field'])} {'is not' if c.get('not') else 'is'} {c['value']}"
+    parts = [f"{c['column']} {OTHER_OPS.get(c.get('op') or 'is', 'is')}{' ' + c['value'] if c.get('value') else ''}"
+             if c["field"] == "other" else
+             f"{SHORT.get(c['field'], c['field'])} {'is not' if c.get('not') else 'is'} {c['value']}"
              for c in conditions]
     return (" and " if match == "all" else " or ").join(parts)

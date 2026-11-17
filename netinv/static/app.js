@@ -1687,16 +1687,33 @@ loaders.groups = async () => {
 async function groupMembers(name) {
   const r = await api(`/api/groups/${encodeURIComponent(name)}/members`), g = grpData.groups.find((x) => x.name === name) || {};
   drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Computers where ${esc(g.rule)}` : "Computers added by hand"}</p><div id="gmemtab"></div>`);
-  table($("#gmemtab"), r.members, ["hostname", "how"], { sort: "hostname", cell: { hostname: hostLink } });
+  table($("#gmemtab"), r.members, ["hostname", "os", "ip", "model", "ou", "last_user", "how"], { sort: "hostname",
+    labels: { hostname: "name", os: "OS", ip: "IP address", last_user: "last user", ou: "OU" },
+    cell: { hostname: hostLink, last_user: userLink, os: (v) => esc((v || "").replace("Microsoft ", "")),
+      ou: (v) => `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>` } });
 }
 const condRow = (i, c = { field: "hostname", value: "", not: false }) => `<div class="row gcond" data-i="${i}">
   <select name="cf_${i}">${Object.entries(grpData.fields).map(([k, l]) => `<option value="${k}" ${k === c.field ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-  <select name="cn_${i}"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
+  <select name="co_${i}" class="g-other" title="Any field of the Computers list">${(grpData.columns || []).map((k) => `<option ${k === c.column ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
+  <select name="cn_${i}" class="g-std"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
+  <select name="cop_${i}" class="g-other">${Object.entries(grpData.other_ops || {}).map(([k, l]) => `<option value="${k}" ${k === (c.op || "is") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
   <input name="cv_${i}" value="${esc(c.value)}" placeholder="${esc(grpData.hints[c.field] || "")}" style="flex:1">
   <a class="link" data-rmcond="${i}" title="Remove this condition">×</a></div>`;
-const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => {
-  const i = r.dataset.i; return { field: form[`cf_${i}`].value, not: !!form[`cn_${i}`].value, value: form[`cv_${i}`].value };
-}).filter((c) => c.value.trim());
+// One condition from a row; "Other field" rows carry a column and a comparison.
+function condOf(form, i) {
+  const field = form[`cf_${i}`].value, value = form[`cv_${i}`].value;
+  if (field !== "other") return { field, not: !!form[`cn_${i}`].value, value };
+  const op = form[`cop_${i}`].value;
+  return { field, column: form[`co_${i}`].value, op, not: op === "not", value: ["empty", "not_empty"].includes(op) ? "" : value };
+}
+const condUsed = (c) => c.value.trim() || ["empty", "not_empty"].includes(c.op);
+const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => condOf(form, r.dataset.i)).filter(condUsed);
+function syncCond(row) {
+  const other = row.querySelector("[name^=cf_]").value === "other", op = row.querySelector("[name^=cop_]").value;
+  row.querySelectorAll(".g-other").forEach((e) => e.hidden = !other);
+  row.querySelector(".g-std").hidden = other;
+  row.querySelector("[name^=cv_]").hidden = other && ["empty", "not_empty"].includes(op);
+}
 async function editGroup(g = null, draft = null) {
   if (!Object.keys(grpData.fields).length) grpData = await api("/api/groups");
   const v = draft || g || { name: "", description: "", match: "all", conditions: [{ field: "ip", value: "", not: false }], kind: "rules" };
@@ -1711,6 +1728,7 @@ async function editGroup(g = null, draft = null) {
       <div id="gconds">${(v.conditions.length ? v.conditions : [{ field: "hostname", value: "" }]).map((c) => condRow(n++, c)).join("")}</div>
       <a class="link small" id="gaddcond">+ Add a condition</a>
       <p class="muted small">Several values in one box, separated by commas, mean "any of these". Text matches anywhere in the name unless you use the wildcards * and ?.
+        <i>Other field...</i> filters on any column of the Computers list (the same fields as the report builder), for example av_name, ram_gb less than 8, or warranty_end less than 2027-01-01.
         An OU includes the OUs under it. Members follow the inventory: a PC that moves OU, changes IP or is renamed joins or leaves after the next scan.</p></fieldset>
     <label>Always include these computers (optional; one per line or separated by commas)
       <textarea name="hosts" rows="3" placeholder="PC-0142">${esc(members.join("\n"))}</textarea></label>
@@ -1725,7 +1743,9 @@ async function editGroup(g = null, draft = null) {
     }, 350); };
     const wire = () => {
       form.querySelectorAll("[data-rmcond]").forEach((a) => a.onclick = () => { a.closest(".gcond").remove(); preview(); });
-      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; preview(); });
+      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond select[name^=cop_]").forEach((s) => s.onchange = () => { syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond").forEach(syncCond);
     };
     form.querySelector("#gaddcond").onclick = () => { form.querySelector("#gconds").insertAdjacentHTML("beforeend", condRow(n++)); wire(); };
     form.addEventListener("input", preview); form.addEventListener("change", preview);
@@ -1733,7 +1753,12 @@ async function editGroup(g = null, draft = null) {
   });
   if (!f) return;
   const body = { name: f.name, description: f.description, match: f.match, conditions: [], hostnames: splitHosts(f.hosts) };
-  for (const k of Object.keys(f)) if (k.startsWith("cf_")) { const i = k.slice(3); if ((f[`cv_${i}`] || "").trim()) body.conditions.push({ field: f[k], not: !!f[`cn_${i}`], value: f[`cv_${i}`] }); }
+  for (const k of Object.keys(f)) if (k.startsWith("cf_")) {
+    const i = k.slice(3), op = f[`cop_${i}`];
+    const c = f[k] === "other" ? { field: "other", column: f[`co_${i}`], op, not: op === "not", value: ["empty", "not_empty"].includes(op) ? "" : f[`cv_${i}`] }
+      : { field: f[k], not: !!f[`cn_${i}`], value: f[`cv_${i}`] };
+    if (condUsed(c)) body.conditions.push(c);
+  }
   try {
     const r = await post(`/api/groups${g ? `?old=${encodeURIComponent(g.name)}` : ""}`, body);
     toast(`Group saved: ${r.members} computer${r.members === 1 ? "" : "s"}.`); loaders.groups(); scriptData = null;
