@@ -1400,8 +1400,59 @@ def tls_csr(user=Depends(ui_auth), db=Depends(db_session)):
 
 
 class TlsIn(BaseModel):
-    data: str                 # base64 of the uploaded file
-    password: str | None = None
+    data: str | None = None       # base64 of the certificate file (or .pfx)
+    password: str | None = None   # .pfx password (or the key's, for a combined PEM)
+    format: str = "auto"          # tlscert.FORMATS
+    key: str | None = None        # base64 of a separate private key file
+    key_password: str | None = None
+    chain: str | None = None      # base64 of intermediates / CA chain (.pem bundle, .crt, .p7b)
+    thumbprint: str | None = None  # format "store": the certificate in Local Computer > Personal
+
+
+def _tls_parse(body: TlsIn) -> tuple[bytes, str | None, dict]:
+    """The upload (or store export) as install() arguments, after checking it parses and the key matches."""
+    import base64, binascii
+    from . import tlscert
+    def b64(v, what):
+        try:
+            return base64.b64decode(v) if v else None
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, f"the {what} upload is damaged; choose the file again")
+    try:
+        if body.format == "store":
+            data, pw = tlscert.store_export(body.thumbprint or "")
+        else:
+            data, pw = b64(body.data, "certificate"), body.password
+        kw = dict(key_data=b64(body.key, "key"), key_password=body.key_password, chain_data=b64(body.chain, "chain"))
+        p = tlscert.parse(body.format, data, pw, folder=str(_tls_folder()), **kw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return data, pw, {**kw, "fmt": body.format, "summary": p["summary"]}
+
+
+@app.get("/api/tls/formats", dependencies=UI)
+def tls_formats():
+    from . import tlscert
+    return {"formats": [{"id": k, "label": v} for k, v in tlscert.FORMATS.items()
+                        if k != "store" or tlscert.store_available()],
+            "store": tlscert.store_available()}
+
+
+@app.get("/api/tls/store", dependencies=UI)
+def tls_store():
+    from . import tlscert
+    if not tlscert.store_available():
+        return {"available": False, "certs": []}
+    try:
+        return {"available": True, "certs": tlscert.store_list()}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, f"couldn't read the Windows certificate store: {exc}")
+
+
+@app.post("/api/tls/check")
+def tls_check(body: TlsIn, user=Depends(ui_auth)):
+    """What the upload holds and whether it would install, without changing anything."""
+    return _tls_parse(body)[2]["summary"]
 
 
 def _restart_soon() -> None:
@@ -1415,15 +1466,18 @@ def _restart_soon() -> None:
 
 @app.post("/api/tls/import")
 def tls_import(body: TlsIn, user=Depends(ui_auth), db=Depends(db_session)):
-    import base64, os
+    import os
     from . import tlscert
     if not settings.tls_cert:
         raise HTTPException(400, "HTTPS isn't turned on in config.toml")
+    data, pw, kw = _tls_parse(body)
+    kw.pop("summary")
+    fmt = kw.pop("fmt")              # "store" arrives as a .pfx export, which install() reads as one
     try:
-        subject = tlscert.install(str(_tls_folder()), base64.b64decode(body.data), body.password)
+        subject = tlscert.install(str(_tls_folder()), data, pw, fmt, **kw)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    db.add(AuditLog(actor=user, action="tls.install", target="https", result=subject[:200]))
+    db.add(AuditLog(actor=user, action="tls.install", target="https", result=f"{body.format}: {subject}"[:200]))
     db.commit()
     as_service = os.name == "nt" and os.environ.get("NETINV_CONFIG")
     if as_service:
