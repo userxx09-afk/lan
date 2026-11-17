@@ -17,6 +17,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
+def _cn(fqdn: str, host: str) -> str:
+    """Common name: the FQDN if it fits the 64-character limit, else the short host name."""
+    return (fqdn if fqdn and len(fqdn) <= 64 else host)[:64]
+
+
 def make_self_signed(out: str, force: bool = False) -> str:
     folder = Path(out)
     crt, key = folder / "tls.crt", folder / "tls.key"
@@ -33,7 +38,7 @@ def make_self_signed(out: str, force: bool = False) -> str:
         pass
     sans = [x509.DNSName(n) for n in sorted(names) if n] + [x509.IPAddress(ipaddress.ip_address(i)) for i in sorted(ips)]
     k = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn or host),
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _cn(fqdn, host)),
                       x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NetInventory")])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(k.public_key())
@@ -84,7 +89,7 @@ def make_csr(folder: str) -> str:
         pass
     k = rsa.generate_private_key(public_exponent=65537, key_size=2048)   # AD CS Web Server templates expect RSA
     csr = (x509.CertificateSigningRequestBuilder()
-           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn or host)]))
+           .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _cn(fqdn, host))]))
            .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in names] +
                                                       [x509.IPAddress(ipaddress.ip_address(i)) for i in sorted(ips)]), critical=False)
            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)

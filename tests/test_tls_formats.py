@@ -17,6 +17,7 @@ from netinv import tlscert
 E, F = serialization.Encoding, serialization.PrivateFormat
 NOW = datetime.datetime.now(datetime.timezone.utc)
 HOST = socket.getfqdn() or socket.gethostname()
+CN = "netinv-test"            # CN is limited to 64 characters; CI runners have long FQDNs (HOST goes in the SAN)
 
 
 def name(cn):
@@ -37,7 +38,7 @@ def make(subject, key, issuer=None, issuer_key=None, ca=False, days=365, eku=Tru
 root_k = ec.generate_private_key(ec.SECP256R1()); root = make("Corp Root CA", root_k, ca=True)
 int_k = ec.generate_private_key(ec.SECP256R1()); inter = make("Corp Issuing CA", int_k, "Corp Root CA", root_k, ca=True)
 leaf_k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-leaf = make(HOST, leaf_k, "Corp Issuing CA", int_k)
+leaf = make(CN, leaf_k, "Corp Issuing CA", int_k)
 other_k = ec.generate_private_key(ec.SECP256R1())
 
 pem = lambda *cs: b"".join(c.public_bytes(E.PEM) for c in cs)
@@ -53,7 +54,7 @@ p7_der = pkcs7.serialize_certificates([inter, root], E.DER)
 
 def ok(fmt, data, password=None, key=None, key_password=None, chain=None, folder=None, chain_len=None):
     s = tlscert.parse(fmt, data, password, key, key_password, chain, folder)["summary"]
-    assert s["key_match"] and s["subject"] == f"CN={HOST}", (fmt, s)
+    assert s["key_match"] and s["subject"] == f"CN={CN}", (fmt, s)
     if chain_len is not None:
         assert len(s["chain"]) == chain_len, (fmt, s["chain"])
     return s
@@ -127,15 +128,15 @@ with tempfile.TemporaryDirectory() as d:
     tlscert.install(d, p7_pem, None, "request")
     assert not (Path(d) / "tls.pending.key").exists()
     chain = x509.load_pem_x509_certificates((Path(d) / "tls.crt").read_bytes())
-    assert [c.subject.rfc4514_string() for c in chain] == [f"CN={HOST}", "CN=Corp Issuing CA", "CN=Corp Root CA"]
+    assert [c.subject.rfc4514_string() for c in chain] == [f"CN={CN}", "CN=Corp Issuing CA", "CN=Corp Root CA"]
     key = serialization.load_pem_private_key((Path(d) / "tls.key").read_bytes(), None)
     assert tlscert._same_key(chain[0], key)
-    assert tlscert.info(str(Path(d) / "tls.crt"))["subject"] == f"CN={HOST}"
+    assert tlscert.info(str(Path(d) / "tls.crt"))["subject"] == f"CN={CN}"
 
 # warnings and refusals
-expired = make(HOST, leaf_k, days=-2)
+expired = make(CN, leaf_k, days=-2)
 bad("pem_key", pem(expired), "expired", key=k8)
-w = ok("pem_key", pem(make(HOST, leaf_k, "Corp Issuing CA", int_k, days=10, eku=False)), key=k8)["warnings"]
+w = ok("pem_key", pem(make(CN, leaf_k, "Corp Issuing CA", int_k, days=10, eku=False)), key=k8)["warnings"]
 assert any("expires in" in x for x in w) and any("Server Authentication" in x for x in w) and any("intermediate" in x for x in w), w
 bad("bogus", pem(leaf), "unknown certificate format")
 bad("auto", None, "choose the certificate file")
@@ -158,10 +159,10 @@ with tempfile.TemporaryDirectory() as d, TestClient(m.app) as c:
     r = c.post("/api/tls/import", json={"format": "pem_combined", "data": enc(pem(leaf) + k8)})
     assert r.status_code == 200 and "Installed" in r.json()["output"], r.text
     assert (Path(d) / "tls.crt").read_bytes() != before
-    assert c.get("/api/tls").json()["subject"] == f"CN={HOST}"
+    assert c.get("/api/tls").json()["subject"] == f"CN={CN}"
 
     tlscert.store_available = lambda: True
-    tlscert.store_list = lambda: [{"thumbprint": "AB" * 20, "subject": f"CN={HOST}", "issuer": "CN=Corp Issuing CA",
+    tlscert.store_list = lambda: [{"thumbprint": "AB" * 20, "subject": f"CN={CN}", "issuer": "CN=Corp Issuing CA",
                                    "not_after": leaf.not_valid_after_utc.isoformat(), "expired": False, "names": [HOST],
                                    "friendly": "", "server_auth": True}]
     tlscert.store_export = lambda tp: (pfx_pw, "pfxpw") if tp == "AB" * 20 else (_ for _ in ()).throw(ValueError("pick a certificate from the list"))
