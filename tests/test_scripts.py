@@ -43,12 +43,12 @@ with TestClient(m.app) as c:
     assert lst["scripts"][0]["name"] == "Flush DNS" and lst["languages"]["cmd"]
 
     # one PC from its page: sent at once, then the result comes back with the output
-    r = c.post(f"/api/devices/{hosts[0]}/fix", json={"action": "script", "value": str(sid)}).json()
+    r = c.post(f"/api/devices/{hosts[0]}/fix", json={"action": "script", "value": str(sid), "run_mode": "system"}).json()
     assert r["ok"], r
     assert sent and sent[-1][1] == "ipconfig /flushdns\r\necho done" and "'.cmd'" in sent[-1][2], sent[-1][2][:300]
     deps = c.get(f"/api/deployments?host={hosts[0]}").json()["rows"]
     d = next(x for x in deps if x["action"] == "script")
-    assert d["status"] == "running" and d["label"] == "Run script Flush DNS", d
+    assert d["status"] == "running" and d["label"] == "Run script Flush DNS (as System account)", d
     from netinv.db import Deployment, SessionLocal, utcnow
     with SessionLocal() as db:
         db.get(Deployment, d["id"]).next_try = utcnow()
@@ -70,15 +70,15 @@ with TestClient(m.app) as c:
         assert json.loads(again.payload)["body"].startswith("ipconfig"), again.payload
 
     # one-off command on many PCs, and on a group
-    r = c.post("/api/fix/bulk", json={"action": "script", "hostnames": hosts, "adhoc": {"language": "powershell", "body": "Get-Date", "timeout": 3}}).json()
+    r = c.post("/api/fix/bulk", json={"action": "script", "hostnames": hosts, "adhoc": {"language": "powershell", "body": "Get-Date", "timeout": 3}, "run_mode": "user"}).json()
     assert r["count"] == len(hosts), r
     assert c.post("/api/fix/bulk", json={"action": "script", "hostnames": hosts, "adhoc": {"body": "", "timeout": 3}}).status_code == 400
     assert c.post("/api/fix/bulk", json={"action": "script", "hostnames": []}).status_code == 400
     c.post(f"/api/devices/{hosts[1]}/groups", json={"name": "Lab"})
-    r = c.post("/api/fix/bulk", json={"action": "script", "group": "Lab", "value": str(sid)}).json()
+    r = c.post("/api/fix/bulk", json={"action": "script", "group": "Lab", "value": str(sid), "run_mode": "system"}).json()
     assert r["count"] == 1, r
     q = c.get("/api/deployments").json()["rows"]
-    assert sum(x["label"] == "Run command: Get-Date" for x in q) == len(hosts), [x["label"] for x in q]
+    assert sum(x["label"] == "Run command: Get-Date (as Currently logged on user)" for x in q) == len(hosts), [x["label"] for x in q]
 
     # deleting a script keeps queued pushes runnable
     assert c.delete(f"/api/scripts/{sid}").json()["ok"]

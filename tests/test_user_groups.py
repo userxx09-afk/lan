@@ -14,7 +14,7 @@ from netinv.db import AdUser, Device, LogonEvent, SessionLocal, set_setting, utc
 
 queued = []
 auth.auth_required = lambda: False      # the test sets a sign-in group but stays signed out
-fixes.run_many = lambda hosts, action, user, value=None, adhoc=None: queued.append(sorted(set(hosts))) or len(set(hosts))
+fixes.run_many = lambda hosts, action, user, value=None, adhoc=None, **kw: queued.append(sorted(set(hosts))) or len(set(hosts))
 
 with TestClient(m.app) as c:
     with SessionLocal() as db:

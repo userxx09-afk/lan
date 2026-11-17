@@ -65,6 +65,14 @@ def cred_cfg(c: Credential) -> dict:
 
 
 def _creds(db: Session, targets: list[ScanTarget], kinds: tuple[str, ...]) -> list[dict]:
+    cid = getattr(SCOPE, "cred_id", None)
+    if cid is not None and "windows" in kinds and targets:     # this scan run signs in with one picked account
+        if cid == SERVICE_CRED_ID:
+            return [service_cfg()]
+        c = db.get(Credential, cid)
+        if c and c.kind == "windows":
+            return [cred_cfg(c)]
+        raise RuntimeError("The account picked to sign in with for this scan no longer exists (Settings, Credentials).")
     seen, out = set(), []
     for t in targets:
         for cid in (t.credential_ids or "").split(","):
@@ -93,19 +101,22 @@ SCOPE = threading.local()
 
 
 def scoped(target_ids: list[int] | None, parallel: int | None = None, ip_methods: set[str] | None = None,
-           group: str | None = None, scheduled: bool = False):
+           group: str | None = None, scheduled: bool = False, cred_id: int | None = None):
     """Context manager: scans in this thread only see these targets (None = all), use this WinRM parallelism,
     on IP ranges run only these methods (None = each target's own), and PC scans only reach this group's computers.
     scheduled=True: a run started by the schedule, which leaves out targets with "Include in scheduled scans"
-    unticked. Scan now and Run now scan every target: that box only affects the schedule."""
+    unticked. Scan now and Run now scan every target: that box only affects the schedule.
+    cred_id: sign in to Windows (LDAP, WinRM) with only this account (0 = the server's own) instead of each
+    target's ticked credentials."""
     class _S:
         def __enter__(self):
             SCOPE.ids, SCOPE.parallel = (set(target_ids) if target_ids else None), parallel
             SCOPE.ip_methods = set(ip_methods) if ip_methods else None
             SCOPE.group = group or None
             SCOPE.scheduled = scheduled
+            SCOPE.cred_id = cred_id
         def __exit__(self, *a):
-            SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = SCOPE.group = None
+            SCOPE.ids = SCOPE.parallel = SCOPE.ip_methods = SCOPE.group = SCOPE.cred_id = None
             SCOPE.scheduled = False
     return _S()
 

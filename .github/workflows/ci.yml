@@ -49,6 +49,7 @@ jobs:
           python tests/test_remote.py
           python tests/test_logon_client.py
           python tests/test_scan_targets.py
+          python tests/test_run_as.py
           python tests/test_tls_formats.py
           python tests/test_jira.py
           python tests/test_computers_view.py
