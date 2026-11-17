@@ -123,6 +123,8 @@ button:disabled { opacity: .45; cursor: default; }
 .lifeform { display: grid; gap: 8px; margin-top: 8px; }
 .lifeform label { display: grid; grid-template-columns: 100px 1fr auto; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
 .lifeform button { justify-self: start; }
+.lifeform label.check { display: flex; gap: 8px; color: var(--text); }
+.lifeform label.check input { width: auto; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .chip { background: var(--accent-soft); color: var(--text); padding: 2px 10px; border-radius: 99px; font-size: 12.5px; }
 .chip a { cursor: pointer; color: var(--muted); margin-left: 4px; }

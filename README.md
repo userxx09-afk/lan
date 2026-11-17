@@ -435,6 +435,27 @@ can't point DameWare (and the technician's Windows logon) at an outside host. Li
 Check the switches against your DameWare version with `DWRCC.exe -?`. Browsers ask before opening the link; to skip the
 prompt for the NetInventory site, use the Edge/Chrome policy *AutoLaunchProtocolsFromOrigins*.
 
+## Jira (Settings > Jira)
+
+Create a Jira issue from a computer, a user or a dashboard alert, and see the related issues on the **Jira** tab of
+each computer and user page. Works with Jira Cloud (`https://yourcompany.atlassian.net`).
+
+Setup: in Settings > Jira enter the site, a Jira account's e-mail and an API token
+(id.atlassian.com > Security > API tokens). A dedicated service account that can create issues in the right
+projects works best; issues are created as that account. Pick a default project (*Find* lists the projects the account
+can create in) and issue type, save, then click *Test connection*. The token is encrypted on the server like the scan
+credentials and never shown again. The server needs outbound HTTPS to `*.atlassian.net`.
+
+- **Create Jira issue** (computer page, user page, alert drawer) opens a dialog prefilled with the inventory facts:
+  computer, OS, IP, model, serial, last user and switch port, or the user's name, e-mail, department and last PC, or
+  the alert and the computers in it. Edit anything before clicking OK. Nothing is sent to Jira until then, and no
+  passwords, keys or recovery keys are ever included. Each create is in the audit log.
+- Every issue gets the labels `netinv`, `netinv-<computer>` and/or `netinv-user-<username>` (alerts also
+  `netinv-alert-<rule>`) and a web link back to the NetInventory page.
+- The **Jira** tab lists the 25 most recently updated issues with those labels, issues the user reported (found by
+  their e-mail, which covers service desk requests), and, unless turned off in Settings, issues that mention the
+  computer or user name anywhere. *Open this search in Jira* opens the same JQL in Jira.
+
 ## Setup checklist for your environment
 
 **Service account** (for example `CORP\svc-netinv`):
