@@ -822,6 +822,18 @@ async function messageDialog(host, opts = {}) {
   } catch (e) { toast(errText(e), true); }
 }
 $("#pcmessage").onclick = () => messageDialog(current);
+$("#pcaudit").onclick = () => window.open(`/api/devices/${encodeURIComponent(current)}/audit`, "_blank");
+$("#pcshot").onclick = async () => {
+  const host = current;
+  if (!(await confirmBox(`Take a screenshot of the screen of whoever is signed in to ${host}? They see a notice that IT took it. It isn't stored on the server, and it's written to the audit log.`))) return;
+  toast(`Asking ${host} for a screenshot…`);
+  let r;
+  try { r = await post(`/api/devices/${encodeURIComponent(host)}/screenshot`, {}); } catch (e) { return toast(errText(e), true); }
+  if (!r.ok) return toast(r.output, true);
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+  formModal(`<h3>Screen of ${esc(host)}</h3>${r.shots.map((s) => `<p><b>${esc(s.user)}</b> · <a class="link" download="${esc(host)}-${esc(s.user)}-${stamp}.png" href="data:image/png;base64,${s.png}">Save image</a></p>
+    <img class="shot" src="data:image/png;base64,${s.png}" alt="Screen of ${esc(s.user)}">`).join("")}`, true);
+};
 
 async function loadSessions(el) {
   el.innerHTML = `<div class="toolbar"><button id="ssmsg">Message everyone</button><button class="ghost" id="ssref">Refresh</button>

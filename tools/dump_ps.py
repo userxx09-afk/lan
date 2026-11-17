@@ -72,6 +72,8 @@ seen.append(pctools.D + remote.FILE_INFO.replace("__PATH__", ""))
 for op in remote.FILE_OPS:
     remote.file_op(None, dev, "t", op, "C:\\Temp\\x", "y")
 remote.rename(None, dev, "t", "WS-NEW-01", {"user": "CORP\\svc", "password": "x"})
+remote.screenshot(None, dev, "t")
+seen.append(remote.SHOT_USER.replace("__OUT__", "C:\\Users\\Public\\netinv-shot-x"))
 
 from netinv import agentpush  # noqa: E402
 for s in (agentpush.INSTALL, agentpush.REMOVE):
