@@ -188,6 +188,9 @@ Over WinRM, live, on demand:
   the signed-in user; **Group Policy update** runs `gpupdate /force`.
 - **Install Windows updates** asks what to do if an update needs a restart: ask the user to restart (pop-up),
   restart 5 minutes after installing (with a countdown), or nothing (the PC shows "reboot pending").
+- **Active Directory**: the computer object read live (DN, enabled, description, location, managed by, groups);
+  edit description or location, move to another OU, add to or remove from a group, enable or disable the account,
+  and rename the computer (on the PC and in AD; takes effect at its next restart). Uses the saved Windows credential.
 - **Performance**: CPU, memory, disk activity, free space per drive, busiest processes and network throughput,
   refreshed every 10 s while the tab is open.
 - **Event logs**: any log (System, Application, Security, …) filtered by level, time span, source, event ID and

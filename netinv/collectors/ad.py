@@ -300,3 +300,76 @@ def bitlocker_keys(cfg: dict, computer_dn: str) -> list[dict]:
         return sorted(out, key=lambda x: x["created"], reverse=True)
     finally:
         conn.unbind()
+
+
+def _base(cfg: dict, dn: str) -> str:
+    return ",".join(p for p in dn.split(",") if p.strip().upper().startswith("DC="))
+
+
+def computer_info(cfg: dict, dn: str) -> dict:
+    conn = connect(cfg)
+    try:
+        conn.search(dn, "(objectClass=computer)", "BASE", attributes=["description", "userAccountControl", "memberOf", "location", "managedBy", "name"])
+        if not conn.entries:
+            raise RuntimeError("The computer object wasn't found in AD (moved or deleted?).")
+        d = conn.entries[0].entry_attributes_as_dict
+        uac = int((d.get("userAccountControl") or [0])[0] or 0)
+        return {"dn": dn, "name": (d.get("name") or [""])[0], "description": (d.get("description") or [""])[0] or "",
+                "location": (d.get("location") or [""])[0] or "", "managed_by": (d.get("managedBy") or [""])[0] or "",
+                "enabled": not (uac & UAC_DISABLED), "groups": sorted(d.get("memberOf") or [], key=str.lower)}
+    finally:
+        conn.unbind()
+
+
+def list_ous(cfg: dict, any_dn: str) -> list[str]:
+    conn = connect(cfg)
+    try:
+        base = _base(cfg, any_dn)
+        rows = _search(conn, base, "(|(objectClass=organizationalUnit)(objectClass=container))", ["distinguishedName"])
+        skip = ("CN=System,", "CN=Program Data,", "CN=ForeignSecurityPrincipals,", "CN=Managed Service Accounts,", "CN=LostAndFound,",
+                "CN=NTDS Quotas,", "CN=TPM Devices,", "CN=Keys,", "CN=Infrastructure,", "CN=Builtin,")
+        out = [e["dn"] for e in rows if not any(s.lower() in e["dn"].lower() + "," for s in skip)]
+        return sorted(out, key=lambda x: list(reversed(x.lower().split(","))))
+    finally:
+        conn.unbind()
+
+
+def find_groups(cfg: dict, any_dn: str, q: str) -> list[dict]:
+    from ldap3.utils.conv import escape_filter_chars
+    conn = connect(cfg)
+    try:
+        q = escape_filter_chars((q or "").strip()[:64])
+        flt = f"(&(objectClass=group)(|(cn=*{q}*)(sAMAccountName=*{q}*)))" if q else "(objectClass=group)"
+        conn.search(_base(cfg, any_dn), flt, SUBTREE, attributes=["cn", "description"], size_limit=50)
+        return [{"dn": e.entry_dn, "name": str(e.cn), "description": str(e.description) if e.description else ""} for e in conn.entries]
+    finally:
+        conn.unbind()
+
+
+def computer_action(cfg: dict, dn: str, op: str, value: str = "") -> str:
+    """op: description, location, enable, disable, move (value = target OU DN), add_group / remove_group (value = group DN).
+    Returns the computer's DN afterwards (it changes when moved)."""
+    from ldap3 import MODIFY_ADD, MODIFY_DELETE
+    conn = connect(cfg)
+    try:
+        new_dn = dn
+        if op in ("description", "location"):
+            ok = conn.modify(dn, {op: [(MODIFY_REPLACE, [value] if value else [])]})
+        elif op in ("enable", "disable"):
+            conn.search(dn, "(objectClass=*)", "BASE", attributes=["userAccountControl"])
+            uac = int(conn.entries[0].userAccountControl.value)
+            uac = uac & ~UAC_DISABLED if op == "enable" else uac | UAC_DISABLED
+            ok = conn.modify(dn, {"userAccountControl": [(MODIFY_REPLACE, [uac])]})
+        elif op == "move":
+            rdn = dn.split(",", 1)[0]
+            ok = conn.modify_dn(dn, rdn, new_superior=value)
+            new_dn = f"{rdn},{value}"
+        elif op in ("add_group", "remove_group"):
+            ok = conn.modify(value, {"member": [((MODIFY_ADD if op == "add_group" else MODIFY_DELETE), [dn])]})
+        else:
+            raise ValueError("unknown action")
+        if not ok:
+            raise RuntimeError(conn.result.get("message") or conn.result.get("description") or "AD refused the change")
+        return new_dn
+    finally:
+        conn.unbind()

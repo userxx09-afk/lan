@@ -694,3 +694,23 @@ def upload(db, dev: Device, who: str, folder: str, name: str, src: str, size: in
         _transfers.release()
     _record(db, dev, who, "file.upload", f"Upload {name} ({size} bytes) to {p}: {msg}", ok)
     return {"ok": ok, "output": msg}
+
+
+# ------------------------------------------------------------------ AD computer tools (rename runs on the PC; the rest is LDAP)
+PCNAME_RE = re.compile(r"^(?!\d+$)[A-Za-z0-9-]{1,15}$")
+RENAME = r'''
+$new = D '__NEW__'
+$cred = New-Object Management.Automation.PSCredential((D '__USER__'), (ConvertTo-SecureString (D '__PASS__') -AsPlainText -Force))
+Rename-Computer -NewName $new -DomainCredential $cred -Force -ErrorAction Stop -WarningAction SilentlyContinue
+@{ ok = $true; message = "renamed to $new; it takes effect at the next restart" } | ConvertTo-Json -Compress
+'''
+
+
+def rename(db, dev: Device, who: str, new: str, cred: dict) -> dict:
+    new = (new or "").strip().upper()
+    if not PCNAME_RE.match(new):
+        return {"ok": False, "output": "A computer name is up to 15 letters, digits and hyphens (not only digits)."}
+    if new == (dev.hostname or "").upper():
+        return {"ok": False, "output": "That's already its name."}
+    script = RENAME.replace("__NEW__", _b(new)).replace("__USER__", _b(cred.get("user") or "")).replace("__PASS__", _b(cred.get("password") or ""))
+    return _go(db, dev, who, "ad.rename", f"Rename {dev.hostname} to {new}", script)

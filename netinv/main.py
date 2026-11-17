@@ -25,7 +25,7 @@ from datetime import datetime
 from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, GroupDef, SavedReport, SessionLocal,
                  init_db, norm_host, norm_mac, utcnow)
-from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint
+from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint, log_change
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
@@ -866,6 +866,90 @@ def device_bitlocker_keys(hostname: str, user=Depends(ui_auth), db=Depends(db_se
     if keys is None:
         raise HTTPException(502, msg)
     return keys
+
+
+def _ad_cfg(db, dev):
+    from .scanning import ad_action_cfg
+    if not dev.ad_dn:
+        raise HTTPException(400, "This PC isn't in the AD data.")
+    try:
+        return ad_action_cfg(db, dev.ad_dn)
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+
+def _ad_call(fn):
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"Active Directory: {str(exc)[:300]}")
+
+
+@app.get("/api/devices/{hostname}/ad", dependencies=UI)
+def device_ad(hostname: str, db=Depends(db_session)):
+    from .collectors import ad as adc
+    dev = _device(db, hostname)
+    cfg = _ad_cfg(db, dev)
+    return _ad_call(lambda: adc.computer_info(cfg, dev.ad_dn))
+
+
+@app.get("/api/devices/{hostname}/ad/ous", dependencies=UI)
+def device_ad_ous(hostname: str, db=Depends(db_session)):
+    from .collectors import ad as adc
+    dev = _device(db, hostname)
+    cfg = _ad_cfg(db, dev)
+    return _ad_call(lambda: adc.list_ous(cfg, dev.ad_dn))
+
+
+@app.get("/api/devices/{hostname}/ad/groups", dependencies=UI)
+def device_ad_groups(hostname: str, q: str = "", db=Depends(db_session)):
+    from .collectors import ad as adc
+    dev = _device(db, hostname)
+    cfg = _ad_cfg(db, dev)
+    return _ad_call(lambda: adc.find_groups(cfg, dev.ad_dn, q))
+
+
+class AdOpIn(BaseModel):
+    op: str
+    value: str = ""
+
+
+@app.post("/api/devices/{hostname}/ad")
+def device_ad_change(hostname: str, body: AdOpIn, user=Depends(ui_auth), db=Depends(db_session)):
+    from .collectors import ad as adc
+    from . import remote
+    dev = _device(db, hostname)
+    cfg = _ad_cfg(db, dev)
+    op, value = body.op, (body.value or "").strip()
+    if op == "rename":
+        return _remote(lambda: remote.rename(db, dev, user, value, cfg))
+    base = adc._base(cfg, dev.ad_dn).lower()
+    if op not in ("description", "location", "enable", "disable", "move", "add_group", "remove_group"):
+        return {"ok": False, "output": "Unknown change."}
+    if len(value) > 1024 or any(ord(ch) < 32 for ch in value):
+        return {"ok": False, "output": "Value too long."}
+    if op in ("move", "add_group", "remove_group") and not (value.lower().endswith("," + base) and "=" in value.split(",")[0]):
+        return {"ok": False, "output": "Pick an OU or group from this computer's domain."}
+    labels = {"description": f"Set AD description to '{value}'", "location": f"Set AD location to '{value}'", "enable": "Enable the AD computer account",
+              "disable": "Disable the AD computer account", "move": f"Move to {value}", "add_group": f"Add to group {value}",
+              "remove_group": f"Remove from group {value}"}
+    try:
+        new_dn = adc.computer_action(cfg, dev.ad_dn, op, value)
+        ok, msg = True, "done"
+        if op == "move":
+            dev.ad_dn = new_dn
+        if op in ("enable", "disable"):
+            dev.ad_enabled = op == "enable"
+        if op == "description":
+            dev.ad_description = value
+    except Exception as exc:
+        ok, msg = False, f"Failed: {str(exc)[:300]}"
+    db.add(AuditLog(actor=user, action=f"ad.computer.{op}", target=f"computer:{dev.hostname}", result=f"{labels[op]}: {msg}"[:500]))
+    log_change(db, dev, "tool", f"{labels[op]}: {msg} (by {user})")
+    db.commit()
+    return {"ok": ok, "output": f"{labels[op]}: {msg}"}
 
 
 class FixIn(BaseModel):
