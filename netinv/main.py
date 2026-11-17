@@ -23,7 +23,7 @@ from .correlate import create_views
 from datetime import datetime
 
 from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
-from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, GroupDef, SavedReport, SessionLocal,
+from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, GroupDef, SavedReport, SessionLocal, UserGroup,
                  init_db, norm_host, norm_mac, utcnow)
 from .ingest import EndpointPayload, LogonIn, add_logons, apply_endpoint, log_change
 
@@ -159,10 +159,12 @@ class AuthIn(BaseModel):
     ad_domain: str | None = None
     ad_group: str | None = None
     ad_server: str | None = None
+    access_group: str | None = None     # a NetInventory user group (Groups tab) whose members may sign in
 
 
 def _auth_out(db) -> dict:
     return {"ad_domain": get_setting(db, "auth:ad_domain"), "ad_group": get_setting(db, "auth:ad_group"),
+            "access_group": get_setting(db, "auth:access_group"), "user_groups": groups.names(db, "users"),
             "ad_server": get_setting(db, "auth:ad_server"), "local_user": settings.ui_user or None,
             "local_enabled": auth.local_enabled(), "local_disabled_file": str(auth.local_disabled_file()),
             "https": bool(settings.tls_cert)}
@@ -180,8 +182,12 @@ def put_auth(body: AuthIn, actor=Depends(ui_auth), db=Depends(db_session)):
         if v and not __import__("re").fullmatch(r"[A-Za-z0-9 ._=,\-]{1,255}", v):
             raise HTTPException(400, f"{k} has characters that aren't allowed")
         set_setting(db, f"auth:{k}", v)
+    access = (body.access_group or "").strip() or None
+    if access and access not in groups.names(db, "users"):
+        raise HTTPException(400, f"there's no user group called {access} (Groups tab)")
+    set_setting(db, "auth:access_group", access)
     db.add(AuditLog(actor=actor, action="auth.save", target="sign-in",
-                    result=f"domain={body.ad_domain} group={body.ad_group} server={body.ad_server}"))
+                    result=f"domain={body.ad_domain} group={body.ad_group} user group={access} server={body.ad_server}"))
     db.commit()
     return _auth_out(db)
 
@@ -375,9 +381,11 @@ class Condition(BaseModel):
 class GroupIn(BaseModel):
     name: str
     description: str | None = None
+    kind: str = "computers"          # computers | users
     match: str = "all"
     conditions: list[Condition] = []
-    hostnames: list[str] = []        # always in the group, whatever the conditions say
+    hostnames: list[str] = []        # always in the group, whatever the conditions say (computer groups)
+    usernames: list[str] = []        # the same for user groups
 
 
 def _conds(body) -> list[dict]:
@@ -385,13 +393,17 @@ def _conds(body) -> list[dict]:
              **({"column": c.column, "op": c.op} if c.field == "other" else {})} for c in body.conditions]
 
 
-def _clean_conds(match: str, conds: list[dict], allow_empty: bool, db=None) -> list[dict]:
+def _clean_conds(match: str, conds: list[dict], allow_empty: bool, db=None, kind: str = "computers") -> list[dict]:
     if allow_empty and not any(str(c.get("value") or "").strip() or c.get("op") in ("empty", "not_empty") for c in conds):
         return []
     try:
-        return groups.validate(match, conds, db)
+        return groups.validate(match, conds, db, kind)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+def _norm_user(u: str) -> str:
+    return (u or "").strip().replace("/", "\\").split("\\")[-1].split("@")[0].lower()
 
 
 @app.get("/api/groups", dependencies=UI)
@@ -401,33 +413,73 @@ def groups_list(db=Depends(db_session)):
     counts = dict(db.execute(select(DeviceGroup.name, func.count()).group_by(DeviceGroup.name)).all())
     manual = dict(db.execute(select(DeviceGroup.name, func.count()).where(DeviceGroup.dynamic.is_not(True))
                              .group_by(DeviceGroup.name)).all())
+    ucounts = dict(db.execute(select(UserGroup.name, func.count()).group_by(UserGroup.name)).all())
+    umanual = dict(db.execute(select(UserGroup.name, func.count()).where(UserGroup.dynamic.is_not(True))
+                              .group_by(UserGroup.name)).all())
     defs = {g.name: g for g in db.scalars(select(GroupDef))}
     used: dict[str, list[str]] = {}
     for j in db.scalars(select(ScanJob).where(ScanJob.group_name.is_not(None))):
         used.setdefault(j.group_name, []).append(j.name)
+    signin = get_setting(db, "auth:access_group")
     out = []
-    for name in groups.names(db):
-        g, conds = defs.get(name), groups.conditions_of(defs[name]) if name in defs else []
-        out.append({"name": name, "description": g.description if g else None, "kind": "rules" if conds else "manual",
-                    "match": g.match if g else "all", "conditions": conds,
-                    "rule": groups.describe(g.match or "all", conds) if conds else "",
-                    "members": counts.get(name, 0), "manual": manual.get(name, 0), "scan_jobs": used.get(name, []),
-                    "updated": jobs._local(g.updated).isoformat(sep=" ", timespec="minutes") if g and g.updated else None,
-                    "who": g.who if g else None})
+    for of in groups.KINDS:
+        for name in groups.names(db, of):
+            g, conds = defs.get(name), groups.conditions_of(defs[name]) if name in defs else []
+            n, m = (ucounts, umanual) if of == "users" else (counts, manual)
+            out.append({"name": name, "of": of, "description": g.description if g else None,
+                        "kind": "rules" if conds else "manual",
+                        "match": g.match if g else "all", "conditions": conds,
+                        "rule": groups.describe(g.match or "all", conds) if conds else "",
+                        "members": n.get(name, 0), "manual": m.get(name, 0), "scan_jobs": used.get(name, []),
+                        "signin": of == "users" and name == signin,
+                        "updated": jobs._local(g.updated).isoformat(sep=" ", timespec="minutes") if g and g.updated else None,
+                        "who": g.who if g else None})
+    from sqlalchemy import func as _f
+    from .db import AdGroup
     return {"groups": out, "fields": groups.FIELDS, "hints": groups.HINTS, "other_ops": groups.OTHER_OPS,
-            "columns": groups.device_columns(db)}
+            "columns": groups.device_columns(db), "user_fields": groups.USER_FIELDS, "user_hints": groups.USER_HINTS,
+            "user_columns": groups.user_columns(db), "user_pc_days": groups.USER_PC_DAYS,
+            "ad_groups": db.scalar(select(_f.count()).select_from(AdGroup)) or 0}
+
+
+@app.get("/api/ad-groups", dependencies=UI)
+def ad_groups_search(q: str = "", db=Depends(db_session)):
+    """AD groups from the last import, for the group condition picker."""
+    from .db import AdGroup
+    st = select(AdGroup).order_by(AdGroup.name).limit(50)
+    if q.strip():
+        like = f"%{q.strip().lower()}%"
+        from sqlalchemy import func, or_
+        st = st.where(or_(func.lower(AdGroup.name).like(like), func.lower(AdGroup.sam).like(like)))
+    return [{"name": g.name, "dn": g.dn, "type": g.type, "description": g.description} for g in db.scalars(st)]
 
 
 @app.post("/api/groups/preview", dependencies=UI)
 def groups_preview(body: GroupIn, db=Depends(db_session)):
-    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db)
-    hits = groups.evaluate(db, body.match, conds) if conds else []
-    names = sorted({d["hostname"] for d in hits} | {norm_host(h) for h in body.hostnames if norm_host(h)})
-    return {"count": len(names), "rule_count": len(hits), "hostnames": names[:500]}
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db, kind=body.kind)
+    hits = groups.evaluate(db, body.match, conds, kind=body.kind) if conds else []
+    if body.kind == "users":
+        names = sorted({d["username"] for d in hits} | {_norm_user(u) for u in body.usernames if _norm_user(u)})
+    else:
+        names = sorted({d["hostname"] for d in hits} | {norm_host(h) for h in body.hostnames if norm_host(h)})
+    return {"count": len(names), "rule_count": len(hits), "hostnames": names[:500], "names": names[:500]}
 
 
 @app.get("/api/groups/{name}/members", dependencies=UI)
 def group_members(name: str, db=Depends(db_session)):
+    if groups.kind_of(db, name) == "users":
+        groups.users(db, name)
+        rows = db.execute(select(AdUser.username, UserGroup.dynamic).join(UserGroup, UserGroup.user_id == AdUser.id)
+                          .where(UserGroup.name == name).order_by(AdUser.username)).all()
+        info = {}
+        if rows:
+            info = {r["username"]: r for r in reports.run_query(
+                db, "v_users", fields=["username", "display_name", "department", "title", "ou", "enabled", "locked",
+                                       "last_computer"],
+                filters=[{"field": "username", "op": "in", "value": [u for u, _ in rows]}], limit=100000)["rows"]}
+        return {"of": "users", "members": [{**{k: v for k, v in (info.get(u) or {}).items()}, "username": u,
+                                            "how": "rules" if dyn else "added by hand"} for u, dyn in rows],
+                "computers": groups.hosts(db, name)}
     groups.hosts(db, name)
     rows = db.execute(select(Device.hostname, DeviceGroup.dynamic).join(DeviceGroup, DeviceGroup.device_id == Device.id)
                       .where(DeviceGroup.name == name).order_by(Device.hostname)).all()
@@ -436,7 +488,8 @@ def group_members(name: str, db=Depends(db_session)):
         info = {r["hostname"]: r for r in reports.run_query(
             db, "v_devices", fields=["hostname", "os", "ip", "model", "ou", "last_user"],
             filters=[{"field": "hostname", "op": "in", "value": [h for h, _ in rows]}], limit=100000)["rows"]}
-    return {"members": [{"hostname": h, "os": (info.get(h) or {}).get("os"), "ip": (info.get(h) or {}).get("ip"),
+    return {"of": "computers",
+            "members": [{"hostname": h, "os": (info.get(h) or {}).get("os"), "ip": (info.get(h) or {}).get("ip"),
                          "model": (info.get(h) or {}).get("model"), "ou": (info.get(h) or {}).get("ou"),
                          "last_user": (info.get(h) or {}).get("last_user"), "how": "rules" if dyn else "added by hand"}
                         for h, dyn in rows]}
@@ -445,50 +498,67 @@ def group_members(name: str, db=Depends(db_session)):
 @app.post("/api/groups")
 def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
     name = body.name.strip()
+    kind = body.kind
+    if kind not in groups.KINDS:
+        raise HTTPException(400, "a group holds computers or users")
     if not name or len(name) > 128 or "," in name:
         raise HTTPException(400, "give the group a name (up to 128 characters, no commas)")
     if body.match not in ("all", "any"):
         raise HTTPException(400, "match must be all or any")
-    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db)
-    hosts = {norm_host(h) for h in body.hostnames if norm_host(h)}
-    if not conds and not hosts:
-        raise HTTPException(400, "add at least one condition, or list the computers that belong in the group")
-    found = dict(db.execute(select(Device.hostname, Device.id).where(Device.hostname.in_(hosts))).all()) if hosts else {}
-    missing = sorted(hosts - set(found))
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db, kind=kind)
+    if kind == "users":
+        want = {_norm_user(u) for u in body.usernames if _norm_user(u)}
+        found = dict(db.execute(select(AdUser.username, AdUser.id).where(AdUser.username.in_(want))).all()) if want else {}
+        what = "users"
+    else:
+        want = {norm_host(h) for h in body.hostnames if norm_host(h)}
+        found = dict(db.execute(select(Device.hostname, Device.id).where(Device.hostname.in_(want))).all()) if want else {}
+        what = "computers"
+    if not conds and not want:
+        raise HTTPException(400, f"add at least one condition, or list the {what} that belong in the group")
+    missing = sorted(want - set(found))
     if missing:
-        raise HTTPException(400, f"not in the inventory: {', '.join(missing[:20])}{' ...' if len(missing) > 20 else ''}")
+        raise HTTPException(400, f"not in the {'AD user list' if kind == 'users' else 'inventory'}: "
+                                 f"{', '.join(missing[:20])}{' ...' if len(missing) > 20 else ''}")
     existing = set(groups.names(db))
     if old and old not in existing:
         raise HTTPException(404, "that group no longer exists")
+    if old and groups.kind_of(db, old) != kind:
+        raise HTTPException(400, f"that group holds {groups.kind_of(db, old)}; make a new group for {kind}")
     if name != old and name in existing:
         raise HTTPException(400, "another group already has that name")
-    if old and old != name:     # rename: memberships, scan jobs and the definition follow
-        for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == old)):
+    Row = UserGroup if kind == "users" else DeviceGroup
+    if old and old != name:     # rename: memberships, scan jobs, sign-in and the definition follow
+        for r in db.scalars(select(Row).where(Row.name == old)):
             r.name = name
         for j in db.scalars(select(ScanJob).where(ScanJob.group_name == old)):
             j.group_name = name
+        if kind == "users" and get_setting(db, "auth:access_group") == old:
+            set_setting(db, "auth:access_group", name)
     g = db.scalar(select(GroupDef).where(GroupDef.name == (old or name))) or GroupDef()
-    g.name, g.description, g.match = name, (body.description or "").strip()[:1000] or None, body.match
+    g.name, g.kind, g.description, g.match = name, kind, (body.description or "").strip()[:1000] or None, body.match
     g.conditions, g.who, g.updated = json.dumps(conds), actor, utcnow()
     db.add(g)
     db.flush()
+    key = (lambda r: r.user_id) if kind == "users" else (lambda r: r.device_id)
     # The list is the full set of hand-added members: drop the others, add the new ones.
-    for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == name, DeviceGroup.dynamic.is_not(True))):
-        if r.device_id not in found.values():
+    for r in db.scalars(select(Row).where(Row.name == name, Row.dynamic.is_not(True))):
+        if key(r) not in found.values():
             db.delete(r)
     db.flush()
-    have = {r.device_id: r for r in db.scalars(select(DeviceGroup).where(DeviceGroup.name == name))}
-    for did in found.values():
-        if did in have:
-            have[did].dynamic = False
+    have = {key(r): r for r in db.scalars(select(Row).where(Row.name == name))}
+    for oid in found.values():
+        if oid in have:
+            have[oid].dynamic = False
         else:
-            db.add(DeviceGroup(device_id=did, name=name, dynamic=False))
+            db.add(UserGroup(user_id=oid, name=name, dynamic=False) if kind == "users"
+                   else DeviceGroup(device_id=oid, name=name, dynamic=False))
     db.commit()
     n = groups.refresh(db, only=name).get(name, 0)
     db.add(AuditLog(actor=actor, action="group.save", target=f"group:{name[:100]}",
-                    result=(groups.describe(body.match, conds) if conds else "by hand")[:1000] + f"; {n} computers"))
+                    result=(groups.describe(body.match, conds) if conds else "by hand")[:1000] + f"; {n} {what}"))
     db.commit()
-    return {"ok": True, "members": n}
+    return {"ok": True, "members": n, "of": kind}
 
 
 @app.delete("/api/groups/{name}")
@@ -497,12 +567,54 @@ def group_delete(name: str, actor=Depends(ui_auth), db=Depends(db_session)):
     if jobs_using:
         raise HTTPException(400, f"the scan job{'s' if len(jobs_using) > 1 else ''} {', '.join(jobs_using)} "
                                  f"scan{'' if len(jobs_using) > 1 else 's'} this group: change or delete {'them' if len(jobs_using) > 1 else 'it'} first")
+    if get_setting(db, "auth:access_group") == name:
+        raise HTTPException(400, "this group decides who can sign in (Settings > Sign-in): pick another there first")
     from sqlalchemy import delete as sql_delete
     n = db.execute(sql_delete(DeviceGroup).where(DeviceGroup.name == name)).rowcount
+    n += db.execute(sql_delete(UserGroup).where(UserGroup.name == name)).rowcount
     db.execute(sql_delete(GroupDef).where(GroupDef.name == name))
     db.add(AuditLog(actor=actor, action="group.delete", target=f"group:{name[:100]}", result=f"{n} memberships removed"))
     db.commit()
     return {"ok": True}
+
+
+@app.post("/api/groups/{name}/users/{action}")
+def group_user_action(name: str, action: str, actor=Depends(ui_auth), db=Depends(db_session)):
+    """Unlock, enable, disable or 'must change password' for every user in a user group (AD writes, one by one)."""
+    from .collectors import ad as adc
+    from .scanning import ad_action_cfg
+    if action not in ("unlock", "must_change", "enable", "disable"):
+        raise HTTPException(404)
+    if groups.kind_of(db, name) != "users":
+        raise HTTPException(400, "that isn't a user group")
+    who = groups.users(db, name)
+    if len(who) > 500:
+        raise HTTPException(400, f"{len(who)} users: at most 500 at once")
+    ok = failed = 0
+    errors = []
+    for u in db.scalars(select(AdUser).where(AdUser.username.in_(who))):
+        if not u.dn or (action == "unlock" and not u.locked):
+            continue
+        try:
+            adc.user_action(ad_action_cfg(db, u.dn), u.dn, action)
+            ok += 1
+            if action == "unlock":
+                u.locked, u.bad_pwd_count = False, 0
+            elif action in ("enable", "disable"):
+                u.enabled = action == "enable"
+            res = "done"
+        except Exception as exc:
+            failed += 1
+            res = f"Failed: {exc}"
+            errors.append(f"{u.username}: {exc}")
+        db.add(AuditLog(actor=actor, action=f"user.{action}", target=f"user:{u.username}", result=f"{res} (group {name})"[:1000]))
+    db.commit()
+    verb = {"unlock": "unlocked", "must_change": "set to change password at next logon", "enable": "enabled",
+            "disable": "disabled"}[action]
+    msg = f"{ok} user{'s' if ok != 1 else ''} {verb}." + (f" {failed} failed: {'; '.join(errors[:3])}" if failed else "")
+    if action == "unlock" and not ok and not failed:
+        msg = "Nobody in the group is locked out."
+    return {"ok": not failed, "output": msg}
 
 
 @app.put("/api/devices/{hostname}/fields", dependencies=UI)
@@ -1478,7 +1590,8 @@ def user(username: str, db=Depends(db_session)):
                               sort="time", desc=True, limit=100)["rows"]
     return {"user": info[0] if info else {"username": u}, "in_ad": ad is not None,
             "groups": json.loads(ad.groups) if ad and ad.groups else [], "computers": computers,
-            "logons": logons, "audit": audit, "dn": ad.dn if ad else None}
+            "logons": logons, "audit": audit, "dn": ad.dn if ad else None,
+            "ni_groups": sorted(n for (n,) in db.execute(select(UserGroup.name).where(UserGroup.user_id == ad.id))) if ad else []}
 
 
 class UserAction(BaseModel):

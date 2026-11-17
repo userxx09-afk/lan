@@ -22,7 +22,7 @@ from ldap3 import ALL, MODIFY_REPLACE, NTLM, SUBTREE, Connection, Server, Tls
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db import AdUser, DomainController, norm_host, utcnow
+from ..db import AdGroup, AdUser, DomainController, norm_host, utcnow
 from ..ingest import get_or_create_device
 
 log = logging.getLogger(__name__)
@@ -110,7 +110,8 @@ def _search(conn, base, flt, attrs):
 
 
 COMPUTER_ATTRS = ["name", "dNSHostName", "operatingSystem", "operatingSystemVersion", "lastLogonTimestamp",
-                  "whenCreated", "userAccountControl", "distinguishedName", "description", "location", "managedBy"]
+                  "whenCreated", "userAccountControl", "distinguishedName", "description", "location", "managedBy",
+                  "memberOf"]
 USER_ATTRS = ["sAMAccountName", "displayName", "givenName", "sn", "initials", "userPrincipalName", "mail", "description",
               "title", "department", "company", "physicalDeliveryOfficeName", "telephoneNumber", "mobile", "manager",
               "distinguishedName", "objectSid", "scriptPath", "homeDirectory", "userAccountControl", "lockoutTime",
@@ -149,6 +150,7 @@ def collect(db: Session, cfg: dict) -> str:
             dev.ad_description = _attr(e, "description")
             dev.ad_location = _attr(e, "location")
             dev.ad_managed_by = _attr(e, "managedBy")
+            dev.ad_groups = json.dumps([str(g).lower() for g in (e["attributes"].get("memberOf") or [])])
             dev.ad_seen = now
             if dev.first_seen is None or (dev.ad_created and dev.ad_created < dev.first_seen):
                 dev.first_seen = dev.ad_created or now
@@ -172,14 +174,20 @@ def collect(db: Session, cfg: dict) -> str:
         dc.last_seen = now
 
     users = 0
-    if cfg.get("users", True):
-        groups = {}
-        for g in _search(conn, base, "(objectClass=group)", ["distinguishedName", "cn", "groupType", "description"]):
+    groups = {}
+    if want_computers or cfg.get("users", True):
+        # Every AD group, with the groups it is itself in: group conditions (Groups tab, sign-in) follow nesting.
+        for g in _search(conn, base, "(objectClass=group)", ["distinguishedName", "cn", "sAMAccountName", "groupType",
+                                                            "description", "memberOf"]):
             gt = int(_attr(g, "groupType") or 0)
             scope = "Universal" if gt & 8 else "Domain local" if gt & 4 else "Global" if gt & 2 else "Builtin"
             kind = "Security" if gt & 0x80000000 else "Distribution"
             groups[_attr(g, "distinguishedName").lower()] = {"name": _attr(g, "cn"), "type": f"{kind} - {scope.lower()}",
-                                                             "description": _attr(g, "description")}
+                                                             "description": _attr(g, "description"),
+                                                             "sam": _attr(g, "sAMAccountName"),
+                                                             "member_of": [str(x).lower() for x in g["attributes"].get("memberOf") or []]}
+        _save_groups(db, groups, now)
+    if cfg.get("users", True):
         for ubase in cfg.get("user_bases") or [base]:
             for e in _search(conn, ubase, "(&(objectCategory=person)(objectClass=user))", USER_ATTRS):
                 sam = (_attr(e, "sAMAccountName") or "").lower()
@@ -208,12 +216,28 @@ def collect(db: Session, cfg: dict) -> str:
                 u.last_logon = filetime_to_dt(_attr(e, "lastLogonTimestamp"))
                 u.bad_pwd_count = int(_attr(e, "badPwdCount") or 0)
                 u.created, u.changed = filetime_to_dt(_attr(e, "whenCreated")), filetime_to_dt(_attr(e, "whenChanged"))
-                u.groups = json.dumps([groups.get(dn.lower(), {"name": dn.split(",")[0].removeprefix("CN="), "type": ""})
-                                       for dn in member_of])
+                u.groups = json.dumps([{k: v for k, v in groups.get(dn.lower(), {"name": dn.split(",")[0].removeprefix("CN="),
+                                                                                 "type": ""}).items()
+                                        if k in ("name", "type", "description")} for dn in member_of])
+                u.group_dns = json.dumps([str(dn).lower() for dn in member_of])
                 u.last_scanned = now
                 users += 1
     conn.unbind()
     return f"{computers} computers, {len(dcs)} domain controllers, {users} users"
+
+
+def _save_groups(db: Session, groups: dict, now) -> None:
+    """Upserts the AD groups seen in this import. Groups gone from AD are dropped once no import has seen them for a week."""
+    have = {g.dn: g for g in db.scalars(select(AdGroup))}
+    for dn, g in groups.items():
+        row = have.get(dn) or AdGroup(dn=dn)
+        row.name, row.sam, row.type, row.description = g["name"], g.get("sam"), g["type"], g.get("description")
+        row.member_of, row.seen = json.dumps(g.get("member_of") or []), now
+        db.add(row)
+    for dn, row in have.items():
+        if dn not in groups and row.seen and row.seen < now - timedelta(days=7):
+            db.delete(row)
+    db.flush()
 
 
 def _config_dn(base: str) -> str:

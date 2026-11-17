@@ -85,7 +85,7 @@
 
   <section id="groups" class="tab">
     <div class="alerthead"><h2>Groups</h2>
-      <span class="muted">Groups built from rules (IP range, model, host name, AD OU...) update themselves as the inventory changes.</span></div>
+      <span class="muted">Groups of computers or users. Groups built from rules (IP range, model, AD OU, AD security group...) update themselves as the inventory and AD change.</span></div>
     <div class="gridbar"><div class="group"><button id="grpnew">New group</button>
       <input id="grpfilter" placeholder="Filter groups"></div></div>
     <div id="grptable"></div>
@@ -199,6 +199,7 @@
   </section>
 
   <section id="users" class="tab">
+    <div id="upresets" class="presets" hidden></div>
     <div class="toolbar"><input id="ufilter" placeholder="Filter by name, department, title, OU or last PC">
       <label class="muted">Show <select id="ustate"><option value="">All users</option><option value="enabled" selected>Enabled</option>
       <option value="disabled">Disabled</option><option value="locked">Locked out</option></select></label></div>
@@ -296,11 +297,13 @@
       </div>
       <div class="panel">
         <h3>Sign-in</h3>
-        <p class="muted">Let members of one AD group sign in with their own AD accounts. Actions are then audited under each person's name.
+        <p class="muted">Let members of an AD group, or of a NetInventory user group (Groups tab: by OU, AD security group, department...), sign in with their own AD accounts. Actions are then audited under each person's name.
           After the first successful AD sign-in, the local admin account turns off. If AD sign-in ever stops working, delete the file shown below on the server to turn the local admin back on.</p>
         <form id="authform" class="lifeform">
           <label>AD domain <input name="ad_domain" placeholder="corp.example.com"></label>
-          <label>Allowed group <input name="ad_group" placeholder="NetInventory Admins (name or distinguished name)"></label>
+          <label>Allowed AD group <input name="ad_group" placeholder="NetInventory Admins (name or distinguished name)"></label>
+          <label>Or members of this user group <select name="access_group"><option value="">(none)</option></select>
+            <span class="muted small">A user group from the Groups tab. Its OU, AD group and other conditions are checked live against AD at each sign-in.</span></label>
           <label>Domain controller <input name="ad_server" placeholder="optional: blank = find one"></label>
           <div class="row"><button>Save</button><button type="button" class="ghost" id="authtest">Test an AD sign-in</button></div>
         </form>

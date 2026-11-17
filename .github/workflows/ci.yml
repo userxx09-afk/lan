@@ -42,6 +42,7 @@ jobs:
           python tests/test_scripts.py
           python tests/test_pctools.py
           python tests/test_groups.py
+          python tests/test_user_groups.py
           python tests/test_agentpush.py
           python tests/test_instance.py
           python tests/test_report_drill.py

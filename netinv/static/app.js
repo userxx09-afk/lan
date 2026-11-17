@@ -1595,14 +1595,23 @@ async function dameware(host) {
 const yesNo = (v, bad) => (v === null || v === undefined ? "" : `<span class="pill ${v ? (bad ? "bad" : "good") : "mute"}">${v ? "Yes" : "No"}</span>`);
 const shortOu = (v) => `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>`;
 let userRows = [];
+let userOnly = null;     // { title, names: Set } when the list shows one user group (Groups > Show in Users)
 loaders.users = async () => {
   const r = await post("/api/query", { dataset: "v_users", sort: "username", limit: 50000 });
   userRows = r.rows; renderUsers();
 };
+function showUsers(names, title) {
+  userOnly = { title, names: new Set(names) }; $("#ustate").value = "";
+  showTab("users");
+}
 function renderUsers() {
-  const st = $("#ustate").value;
-  const rows = userRows.filter((u) => !st || (st === "enabled" ? u.enabled : st === "disabled" ? !u.enabled : u.locked));
-  table($("#utable"), rows, ["username", "display_name", "department", "title", "email", "ou", "enabled", "locked", "last_logon", "last_computer", "computer_count"], {
+  const st = $("#ustate").value, pe = $("#upresets");
+  pe.hidden = !userOnly;
+  pe.innerHTML = userOnly ? `<span class="muted">Showing</span><span class="chip">${esc(userOnly.title)} <a title="Show all users" id="uclearpreset">×</a></span>` : "";
+  if (userOnly) $("#uclearpreset").onclick = () => { userOnly = null; renderUsers(); };
+  const rows = userRows.filter((u) => (!userOnly || userOnly.names.has(u.username))
+    && (!st || (st === "enabled" ? u.enabled : st === "disabled" ? !u.enabled : u.locked)));
+  table($("#utable"), rows, ["username", "display_name", "department", "title", "email", "ou", "groups", "enabled", "locked", "last_logon", "last_computer", "computer_count"], {
     filterEl: $("#ufilter"), labels: { computer_count: "PCs", last_computer: "last PC" },
     cell: { username: userLink, last_computer: hostLink, ou: shortOu, enabled: (v) => yesNo(v), locked: (v) => (v ? `<span class="pill bad">Locked</span>` : ""),
       last_logon: (v) => `${esc(fmtDate(v))} <span class="muted">${ago(v)}</span>` } });
@@ -1667,6 +1676,7 @@ function renderUserTab(tab) {
           ${kvRow("Switch port", d.computers[0].switch_name ? `<b>${esc(d.computers[0].switch_name)}</b> ${esc(d.computers[0].switch_port)}` : "")}
           <div class="row" style="margin-top:8px"><button data-dw="${esc(d.computers[0].hostname)}">Remote control</button></div>` : `<p class="muted">No logons seen yet.</p>`}
         <h3>Groups</h3><div class="chips">${d.groups.slice(0, 12).map((g) => `<span class="chip">${esc(g.name)}</span>`).join("") || `<span class="muted">None</span>`}</div>
+        <h3>NetInventory groups</h3><div class="chips">${(d.ni_groups || []).map((g) => `<span class="chip">${esc(g)}</span>`).join("") || `<span class="muted">None</span>`}</div>
       </div></div>`;
   } else if (tab === "computers") {
     el.innerHTML = `<p class="muted">Computers this user logged on to, newest first (from DC and PC logon events).</p><div id="ucomp"></div>`;
@@ -2247,9 +2257,10 @@ async function loadAuth() {
   const a = await api("/api/auth");
   const f = $("#authform");
   f.ad_domain.value = a.ad_domain || ""; f.ad_group.value = a.ad_group || ""; f.ad_server.value = a.ad_server || "";
+  f.access_group.innerHTML = `<option value="">(none)</option>` + (a.user_groups || []).map((g) => `<option ${g === a.access_group ? "selected" : ""}>${esc(g)}</option>`).join("");
   $("#authstate").innerHTML = `${kvRow("Local admin", a.local_user ? (a.local_enabled ? `<span class="pill warn">on</span> ${esc(a.local_user)}`
       : `<span class="pill good">off</span> turned back on by deleting <code>${esc(a.local_disabled_file)}</code>`) : "not configured")}
-    ${kvRow("AD sign-in", a.ad_group ? `<span class="pill good">on</span> members of ${esc(a.ad_group)} in ${esc(a.ad_domain)}` : `<span class="pill mute">off</span>`)}
+    ${kvRow("AD sign-in", a.ad_group || a.access_group ? `<span class="pill good">on</span> ${[a.ad_group && `members of ${esc(a.ad_group)}`, a.access_group && `the user group ${esc(a.access_group)}`].filter(Boolean).join(" or ")} in ${esc(a.ad_domain)}` : `<span class="pill mute">off</span>`)}
     ${kvRow("HTTPS", a.https ? `<span class="pill good">on</span>` : `<span class="pill bad">off</span> passwords cross the network unencrypted`)}`;
   if (!f.ad_domain.value) {   // suggest the domain from an AD scan target
     try { const t = (await api("/api/targets")).find((x) => x.kind === "ad_domain"); if (t) f.ad_domain.placeholder = t.value; } catch {}
@@ -2290,19 +2301,26 @@ route(start);
 pollStatus();
 loadUpdate();
 
-// ------------------------------------------------------------ groups (by hand, or rule-based: IP range, model, host name, OU...)
+// ------------------------------------------------------------ groups of computers or users (by hand, or rule-based: IP range, OU, AD group...)
 let grpData = { groups: [], fields: {}, hints: {} };
+const gFields = (of) => (of === "users" ? grpData.user_fields : grpData.fields) || {};
+const gHints = (of) => (of === "users" ? grpData.user_hints : grpData.hints) || {};
+const gCols = (of) => (of === "users" ? grpData.user_columns : grpData.columns) || [];
 loaders.groups = async () => {
   grpData = await api("/api/groups");
-  table($("#grptable"), grpData.groups.map((g) => ({ ...g, act: g.name })), ["name", "kind", "rule", "members", "scan_jobs", "act"], {
+  table($("#grptable"), grpData.groups.map((g) => ({ ...g, act: g.name })), ["name", "of", "kind", "rule", "members", "scan_jobs", "act"], {
     sort: "name", filterEl: $("#grpfilter"),
-    labels: { kind: "type", rule: "conditions", scan_jobs: "scan jobs", act: "" },
+    labels: { of: "holds", kind: "type", rule: "conditions", scan_jobs: "used by", act: "" },
     cell: {
       name: (v, r) => `<a class="link" data-gmem="${esc(v)}">${esc(v)}</a>${r.description ? `<div class="muted small">${esc(r.description)}</div>` : ""}`,
+      of: (v) => v === "users" ? `<span class="pill warn">users</span>` : `<span class="pill mute">computers</span>`,
       kind: (v, r) => v === "rules" ? `<span class="pill good">rules</span>${r.manual ? ` <span class="muted small">+${r.manual} by hand</span>` : ""}` : `<span class="pill mute">by hand</span>`,
       rule: (v) => `<span class="longtext">${esc(v)}</span>`,
-      scan_jobs: (v) => esc((v || []).join(", ")),
-      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gconf="${esc(n)}">Configure</a> · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
+      scan_jobs: (v, r) => esc([...(v || []), ...(r.signin ? ["sign-in"] : [])].join(", ")),
+      act: (n, r) => (r.of === "users"
+        ? `<a class="link" data-gushow="${esc(n)}">Show in Users</a> · <a class="link" data-guact="${esc(n)}">Account actions</a> · <a class="link" data-gscript="${esc(n)}" title="On the computers these users signed in to in the last ${grpData.user_pc_days} days">Run script on their PCs</a> · <a class="link" data-gconf="${esc(n)}" title="On the computers these users signed in to in the last ${grpData.user_pc_days} days">Configure their PCs</a>`
+        : `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gconf="${esc(n)}">Configure</a>`)
+        + ` · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
     } });
   const el = $("#grptable"), byName = (n) => grpData.groups.find((g) => g.name === n);
   el.querySelectorAll("[data-gmem]").forEach((a) => a.onclick = () => groupMembers(a.dataset.gmem));
@@ -2311,30 +2329,54 @@ loaders.groups = async () => {
     if (!m.length) return toast("This group has no computers yet.", true);
     showComputers([{ field: "hostname", op: "in", value: m }], `Group ${a.dataset.gshow}`);
   });
+  el.querySelectorAll("[data-gushow]").forEach((a) => a.onclick = async () => {
+    const m = (await api(`/api/groups/${encodeURIComponent(a.dataset.gushow)}/members`)).members.map((x) => x.username);
+    if (!m.length) return toast("This group has no users yet.", true);
+    showUsers(m, `Group ${a.dataset.gushow}`);
+  });
+  el.querySelectorAll("[data-guact]").forEach((a) => a.onclick = () => groupUserAction(byName(a.dataset.guact)));
   el.querySelectorAll("[data-gscript]").forEach((a) => a.onclick = () => runScriptDialog({ group: a.dataset.gscript }));
   el.querySelectorAll("[data-gpush]").forEach((a) => a.onclick = () => pushAgentDialog([], a.dataset.gpush));
   el.querySelectorAll("[data-gconf]").forEach((a) => a.onclick = () => bulkToolDialog({ group: a.dataset.gconf }));
   el.querySelectorAll("[data-gedit]").forEach((a) => a.onclick = () => editGroup(byName(a.dataset.gedit)));
   el.querySelectorAll("[data-gdel]").forEach((a) => a.onclick = async () => {
-    const g = byName(a.dataset.gdel);
-    if (!(await confirmBox(`Delete the group "${g.name}"? Its ${g.members} computer${g.members === 1 ? "" : "s"} stay in the inventory; only the grouping goes.`))) return;
+    const g = byName(a.dataset.gdel), what = g.of === "users" ? "user" : "computer";
+    if (!(await confirmBox(`Delete the group "${g.name}"? Its ${g.members} ${what}${g.members === 1 ? "" : "s"} stay${g.members === 1 ? "s" : ""} in ${g.of === "users" ? "AD and the Users list" : "the inventory"}; only the grouping goes.`))) return;
     try { await api(`/api/groups/${encodeURIComponent(g.name)}`, { method: "DELETE" }); toast("Group deleted."); loaders.groups(); } catch (e) { toast(errText(e), true); }
   });
 };
+async function groupUserAction(g) {
+  const f = await formModal(`<h3>Account actions: ${esc(g.name)}</h3>
+    <p class="muted">Applies to each of the group's ${g.members} user${g.members === 1 ? "" : "s"} in Active Directory, one by one, with the saved Windows credential. Each change is in the audit log.</p>
+    <label>Action <select name="action"><option value="unlock">Unlock locked-out accounts</option><option value="must_change">Must change password at next logon</option>
+      <option value="enable">Enable accounts</option><option value="disable">Disable accounts</option></select></label>`, true);
+  if (!f) return;
+  if (["disable", "must_change"].includes(f.action) && !(await confirmBox(`${f.action === "disable" ? "Disable" : "Force a password change for"} ${g.members} account${g.members === 1 ? "" : "s"} in ${g.name}?`))) return;
+  try { const r = await post(`/api/groups/${encodeURIComponent(g.name)}/users/${f.action}`, {}); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+}
 async function groupMembers(name) {
   const r = await api(`/api/groups/${encodeURIComponent(name)}/members`), g = grpData.groups.find((x) => x.name === name) || {};
+  if (r.of === "users") {
+    drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Users where ${esc(g.rule)}` : "Users added by hand"}</p><div id="gmemtab"></div>
+      <h3>Their computers</h3><p class="muted small">Signed in to in the last ${grpData.user_pc_days} days: what Run script and Configure reach for this group.</p>
+      <div class="chips">${(r.computers || []).slice(0, 200).map((h) => `<span class="chip">${hostLink(h)}</span>`).join("") || `<span class="muted">None seen</span>`}</div>`);
+    table($("#gmemtab"), r.members, ["username", "display_name", "department", "title", "ou", "enabled", "locked", "how"], { sort: "username",
+      labels: { display_name: "name", ou: "OU" },
+      cell: { username: userLink, ou: shortOu, enabled: (v) => yesNo(v), locked: (v) => (v ? `<span class="pill bad">Locked</span>` : "") } });
+    return;
+  }
   drawer(`<h2>${esc(name)}</h2><p class="muted">${g.rule ? `Computers where ${esc(g.rule)}` : "Computers added by hand"}</p><div id="gmemtab"></div>`);
   table($("#gmemtab"), r.members, ["hostname", "os", "ip", "model", "ou", "last_user", "how"], { sort: "hostname",
     labels: { hostname: "name", os: "OS", ip: "IP address", last_user: "last user", ou: "OU" },
     cell: { hostname: hostLink, last_user: userLink, os: (v) => esc((v || "").replace("Microsoft ", "")),
       ou: (v) => `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>` } });
 }
-const condRow = (i, c = { field: "hostname", value: "", not: false }) => `<div class="row gcond" data-i="${i}">
-  <select name="cf_${i}">${Object.entries(grpData.fields).map(([k, l]) => `<option value="${k}" ${k === c.field ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-  <select name="co_${i}" class="g-other" title="Any field of the Computers list">${(grpData.columns || []).map((k) => `<option ${k === c.column ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
+const condRow = (of, i, c = { field: of === "users" ? "ou" : "hostname", value: "", not: false }) => `<div class="row gcond" data-i="${i}">
+  <select name="cf_${i}">${Object.entries(gFields(of)).map(([k, l]) => `<option value="${k}" ${k === c.field ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+  <select name="co_${i}" class="g-other" title="Any field of the ${of === "users" ? "Users" : "Computers"} list">${gCols(of).map((k) => `<option ${k === c.column ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
   <select name="cn_${i}" class="g-std"><option value="">is</option><option value="1" ${c.not ? "selected" : ""}>is not</option></select>
   <select name="cop_${i}" class="g-other">${Object.entries(grpData.other_ops || {}).map(([k, l]) => `<option value="${k}" ${k === (c.op || "is") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-  <input name="cv_${i}" value="${esc(c.value)}" placeholder="${esc(grpData.hints[c.field] || "")}" style="flex:1">
+  <input name="cv_${i}" value="${esc(c.value)}" placeholder="${esc(gHints(of)[c.field] || "")}" style="flex:1" list="adgrouplist" autocomplete="off">
   <a class="link" data-rmcond="${i}" title="Remove this condition">×</a></div>`;
 // One condition from a row; "Other field" rows carry a column and a comparison.
 function condOf(form, i) {
@@ -2346,50 +2388,88 @@ function condOf(form, i) {
 const condUsed = (c) => c.value.trim() || ["empty", "not_empty"].includes(c.op);
 const readConds = (form) => [...form.querySelectorAll(".gcond")].map((r) => condOf(form, r.dataset.i)).filter(condUsed);
 function syncCond(row) {
-  const other = row.querySelector("[name^=cf_]").value === "other", op = row.querySelector("[name^=cop_]").value;
+  const field = row.querySelector("[name^=cf_]").value, other = field === "other", op = row.querySelector("[name^=cop_]").value;
   row.querySelectorAll(".g-other").forEach((e) => e.hidden = !other);
   row.querySelector(".g-std").hidden = other;
-  row.querySelector("[name^=cv_]").hidden = other && ["empty", "not_empty"].includes(op);
+  const v = row.querySelector("[name^=cv_]");
+  v.hidden = other && ["empty", "not_empty"].includes(op);
+  if (field === "adgroup") v.setAttribute("list", "adgrouplist"); else v.removeAttribute("list");
 }
-async function editGroup(g = null, draft = null) {
+// Suggestions for AD group conditions, from the groups seen in the last AD import.
+let adgT;
+function adGroupSuggest(input) {
+  clearTimeout(adgT);
+  adgT = setTimeout(async () => {
+    const q = input.value.split(",").pop().trim();
+    try {
+      const gs = await api(`/api/ad-groups?q=${encodeURIComponent(q)}`);
+      const head = input.value.includes(",") ? input.value.slice(0, input.value.lastIndexOf(",") + 1) + " " : "";
+      $("#adgrouplist").innerHTML = gs.map((g) => `<option value="${esc(head + g.name)}">${esc(g.type || "")}${g.description ? " · " + esc(g.description) : ""}</option>`).join("");
+    } catch {}
+  }, 200);
+}
+async function editGroup(g = null, draft = null, of = null) {
   if (!Object.keys(grpData.fields).length) grpData = await api("/api/groups");
-  const v = draft || g || { name: "", description: "", match: "all", conditions: [{ field: "ip", value: "", not: false }], kind: "rules" };
-  let members = draft ? draft.hostnames : [];
-  if (g && !draft) members = (await api(`/api/groups/${encodeURIComponent(g.name)}/members`)).members.filter((m) => m.how !== "rules").map((m) => m.hostname);
+  of = (draft || g || {}).of || of || "computers";
+  const v = draft || g || { name: "", description: "", match: "all", conditions: [], kind: "rules" };
+  const noun = of === "users" ? "users" : "computers", Noun = of === "users" ? "Users" : "Computers";
+  let members = draft ? (of === "users" ? draft.usernames : draft.hostnames) : [];
+  if (g && !draft) members = (await api(`/api/groups/${encodeURIComponent(g.name)}/members`)).members.filter((m) => m.how !== "rules").map((m) => m.hostname || m.username);
   let n = 0;
-  const f = await formModal(`<h3>${g ? "Edit" : "New"} group</h3>
-    <label>Name <input name="name" value="${esc(v.name)}" placeholder="Lab PCs, 2nd floor, OptiPlex 7010" required></label>
+  const first = v.conditions.length ? v.conditions : [of === "users" ? { field: "ou", value: "" } : { field: "hostname", value: "" }];
+  const f = await formModal(`<h3>${g ? "Edit" : "New"} group of ${noun}</h3>
+    ${g || draft ? "" : `<label>Holds <select name="of"><option value="computers" ${of === "computers" ? "selected" : ""}>Computers</option><option value="users" ${of === "users" ? "selected" : ""}>Users (AD accounts)</option></select></label>`}
+    <label>Name <input name="name" value="${esc(v.name)}" placeholder="${of === "users" ? "Finance staff, Helpdesk, VPN users" : "Lab PCs, 2nd floor, OptiPlex 7010"}" required></label>
     <label>Description (optional) <input name="description" value="${esc(v.description || "")}"></label>
-    <fieldset><legend>Computers where <select name="match"><option value="all" ${v.match !== "any" ? "selected" : ""}>all of these match</option>
+    <fieldset><legend><span id="gnoun">${Noun}</span> where <select name="match"><option value="all" ${v.match !== "any" ? "selected" : ""}>all of these match</option>
         <option value="any" ${v.match === "any" ? "selected" : ""}>any of these matches</option></select></legend>
-      <div id="gconds">${(v.conditions.length ? v.conditions : [{ field: "hostname", value: "" }]).map((c) => condRow(n++, c)).join("")}</div>
+      <div id="gconds">${first.map((c) => condRow(of, n++, c)).join("")}</div>
       <a class="link small" id="gaddcond">+ Add a condition</a>
-      <p class="muted small">Several values in one box, separated by commas, mean "any of these". Text matches anywhere in the name unless you use the wildcards * and ?.
-        <i>Other field...</i> filters on any column of the Computers list (the same fields as the report builder), for example av_name, ram_gb less than 8, or warranty_end less than 2027-01-01.
-        An OU includes the OUs under it. Members follow the inventory: a PC that moves OU, changes IP or is renamed joins or leaves after the next scan.</p></fieldset>
-    <label>Always include these computers (optional; one per line or separated by commas)
-      <textarea name="hosts" rows="3" placeholder="PC-0142">${esc(members.join("\n"))}</textarea></label>
+      <datalist id="adgrouplist"></datalist>
+      <p class="muted small">Several values in one box, separated by commas, mean "any of these". Text matches anywhere unless you use the wildcards * and ?.
+        <b>AD OU</b> takes the ADUC path (corp.example.com/Staff/Finance) or a DN, and includes the OUs under it.
+        <b>AD group</b> takes a group name or DN; groups inside that group count too.${grpData.ad_groups ? "" : " (No AD groups imported yet: run the AD import once after updating so AD group conditions have data.)"}
+        <i>Other field...</i> filters on any column of the ${Noun} list.
+        Members follow AD and the inventory: ${of === "users" ? "a user who moves OU or joins an AD group" : "a PC that moves OU, changes IP or is renamed"} joins or leaves after the next scan.
+        ${of === "users" ? `Used for scripts or Configure, a user group means the computers its users signed in to in the last ${grpData.user_pc_days} days. Settings > Sign-in can let a user group sign in to NetInventory.` : ""}</p></fieldset>
+    <label>Always include these ${noun} (optional; one per line or separated by commas)
+      <textarea name="members" rows="3" placeholder="${of === "users" ? "jsmith" : "PC-0142"}">${esc(members.join("\n"))}</textarea></label>
     <div id="gprev" class="hint muted">Checking...</div>`, true, (form) => {
     let t;
+    const cur = () => (form.of ? form.of.value : of);
     const preview = () => { clearTimeout(t); t = setTimeout(async () => {
       if (!form.isConnected) return;
+      const k = cur(), list = splitHosts(form.members.value);
       try {
-        const r = await post("/api/groups/preview", { name: "x", match: form.match.value, conditions: readConds(form), hostnames: splitHosts(form.hosts.value) });
-        if (form.isConnected) $("#gprev").innerHTML = `<b>${r.count} computer${r.count === 1 ? "" : "s"}</b> right now${r.hostnames.length ? `: ${esc(r.hostnames.slice(0, 40).join(", "))}${r.count > 40 ? ", ..." : ""}` : ""}`;
+        const r = await post("/api/groups/preview", { name: "x", kind: k, match: form.match.value, conditions: readConds(form), hostnames: k === "users" ? [] : list, usernames: k === "users" ? list : [] });
+        const w = k === "users" ? "user" : "computer";
+        if (form.isConnected) $("#gprev").innerHTML = `<b>${r.count} ${w}${r.count === 1 ? "" : "s"}</b> right now${r.names.length ? `: ${esc(r.names.slice(0, 40).join(", "))}${r.count > 40 ? ", ..." : ""}` : ""}`;
       } catch (e) { if (form.isConnected) $("#gprev").textContent = errText(e); }
     }, 350); };
     const wire = () => {
       form.querySelectorAll("[data-rmcond]").forEach((a) => a.onclick = () => { a.closest(".gcond").remove(); preview(); });
-      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = grpData.hints[s.value] || ""; syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond select[name^=cf_]").forEach((s) => s.onchange = () => { form[`cv_${s.closest(".gcond").dataset.i}`].placeholder = gHints(cur())[s.value] || ""; syncCond(s.closest(".gcond")); preview(); });
       form.querySelectorAll(".gcond select[name^=cop_]").forEach((s) => s.onchange = () => { syncCond(s.closest(".gcond")); preview(); });
+      form.querySelectorAll(".gcond input[name^=cv_]").forEach((i) => i.oninput = () => { if (i.closest(".gcond").querySelector("[name^=cf_]").value === "adgroup") adGroupSuggest(i); });
       form.querySelectorAll(".gcond").forEach(syncCond);
     };
-    form.querySelector("#gaddcond").onclick = () => { form.querySelector("#gconds").insertAdjacentHTML("beforeend", condRow(n++)); wire(); };
+    if (form.of) form.of.onchange = () => {   // switching computers <-> users starts the conditions over
+      const k = form.of.value;
+      form.querySelector("#gconds").innerHTML = condRow(k, n++);
+      form.querySelector("h3").textContent = `New group of ${k}`;
+      form.querySelector("#gnoun").textContent = k === "users" ? "Users" : "Computers";
+      form.querySelector("textarea[name=members]").placeholder = k === "users" ? "jsmith" : "PC-0142";
+      wire(); preview();
+    };
+    form.querySelector("#gaddcond").onclick = () => { form.querySelector("#gconds").insertAdjacentHTML("beforeend", condRow(cur(), n++)); wire(); };
     form.addEventListener("input", preview); form.addEventListener("change", preview);
     wire(); preview();
   });
   if (!f) return;
-  const body = { name: f.name, description: f.description, match: f.match, conditions: [], hostnames: splitHosts(f.hosts) };
+  of = f.of || of;
+  const list = splitHosts(f.members);
+  const body = { name: f.name, description: f.description, kind: of, match: f.match, conditions: [],
+    hostnames: of === "users" ? [] : list, usernames: of === "users" ? list : [] };
   for (const k of Object.keys(f)) if (k.startsWith("cf_")) {
     const i = k.slice(3), op = f[`cop_${i}`];
     const c = f[k] === "other" ? { field: "other", column: f[`co_${i}`], op, not: op === "not", value: ["empty", "not_empty"].includes(op) ? "" : f[`cv_${i}`] }
@@ -2398,7 +2478,8 @@ async function editGroup(g = null, draft = null) {
   }
   try {
     const r = await post(`/api/groups${g ? `?old=${encodeURIComponent(g.name)}` : ""}`, body);
-    toast(`Group saved: ${r.members} computer${r.members === 1 ? "" : "s"}.`); loaders.groups(); scriptData = null;
-  } catch (e) { toast(errText(e), true); editGroup(g, body); }
+    const w = of === "users" ? "user" : "computer";
+    toast(`Group saved: ${r.members} ${w}${r.members === 1 ? "" : "s"}.`); loaders.groups(); scriptData = null;
+  } catch (e) { toast(errText(e), true); editGroup(g, { ...body, of }); }
 }
 $("#grpnew").onclick = () => editGroup();

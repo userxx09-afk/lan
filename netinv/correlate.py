@@ -129,7 +129,8 @@ VIEWS["v_users"] = """
            u.logon_script, u.home_directory, u.sid,
            (SELECT ud.hostname FROM v_user_devices ud WHERE ud.username = u.username ORDER BY ud.last_logon DESC LIMIT 1) AS last_computer,
            (SELECT MAX(ud.last_logon) FROM v_user_devices ud WHERE ud.username = u.username) AS last_computer_logon,
-           (SELECT COUNT(*) FROM v_user_devices ud WHERE ud.username = u.username) AS computer_count
+           (SELECT COUNT(*) FROM v_user_devices ud WHERE ud.username = u.username) AS computer_count,
+           (SELECT STRING_AGG_(g.name) FROM user_groups g WHERE g.user_id = u.id) AS groups
     FROM ad_users u
 """
 

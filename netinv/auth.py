@@ -5,6 +5,8 @@
 - AD sign-in: set the domain and group in Settings > Sign-in. Users sign in with their own AD username
   and password (``user``, ``DOMAIN\\user`` or ``user@domain``); NetInventory binds to a DC as them and checks
   they are in the group, nested membership included. The password is never stored.
+  Instead of (or as well as) the AD group, a NetInventory user group (Groups tab: by OU, AD security group,
+  department...) can be allowed. Its conditions are checked against the user's live AD entry at each sign-in.
 - Break-glass: after the first successful AD sign-in NetInventory writes ``local-login.disabled`` next to
   config.toml, which turns the local admin off. Delete that file to turn the local admin back on (for
   example when AD or the group is unavailable). It is written again on the next AD sign-in.
@@ -88,7 +90,7 @@ def auth_required() -> bool:
     if settings.ui_user:
         return True
     with SessionLocal() as db:
-        return bool(get_setting(db, "auth:ad_group"))
+        return bool(get_setting(db, "auth:ad_group") or get_setting(db, "auth:access_group"))
 
 
 # ------------------------------------------------------------------ lockout
@@ -120,10 +122,11 @@ def _clear(user: str) -> None:
 def ad_config(db) -> dict | None:
     from .db import get_setting
     group = get_setting(db, "auth:ad_group")
+    access = get_setting(db, "auth:access_group")
     domain = get_setting(db, "auth:ad_domain")
-    if not group or not domain:
+    if not (group or access) or not domain:
         return None
-    return {"group": group, "domain": domain.lower(), "server": get_setting(db, "auth:ad_server")}
+    return {"group": group, "access_group": access, "domain": domain.lower(), "server": get_setting(db, "auth:ad_server")}
 
 
 def _split_user(username: str, domain: str) -> tuple[str, str]:
@@ -156,24 +159,52 @@ def ad_login(db, username: str, password: str) -> str | None:
         return None
     try:
         base = domain_to_dn(cfg["domain"])
-        group_dn = cfg["group"]
-        if "DC=" not in group_dn.upper():
-            g = escape_filter_chars(group_dn)
-            conn.search(base, f"(&(objectClass=group)(|(cn={g})(sAMAccountName={g})))", attributes=["distinguishedName"])
-            if not conn.entries:
-                log.warning("AD sign-in: group %s not found", group_dn)
-                return None
-            group_dn = conn.entries[0].entry_dn
-        flt = (f"(&(objectCategory=person)(sAMAccountName={escape_filter_chars(sam)})"
-               f"(memberOf:1.2.840.113556.1.4.1941:={escape_filter_chars(group_dn)})"
-               f"(!(userAccountControl:1.2.840.113556.1.4.803:=2)))")
-        conn.search(base, flt, attributes=["sAMAccountName"])
-        if not conn.entries:
-            log.info("AD sign-in refused for %s: not in %s", sam, cfg["group"])
-            return None
-        return str(conn.entries[0].sAMAccountName).lower()
+        if cfg["group"] and _in_ad_group(conn, base, sam, cfg["group"]):
+            return sam.lower()
+        if cfg.get("access_group") and _in_user_group(db, conn, base, sam, cfg["access_group"]):
+            return sam.lower()
+        log.info("AD sign-in refused for %s: not in %s", sam,
+                 " or ".join(x for x in (cfg["group"], cfg.get("access_group") and f"user group {cfg['access_group']}") if x))
+        return None
     finally:
         conn.unbind()
+
+
+def _in_ad_group(conn, base: str, sam: str, group_dn: str) -> bool:
+    if "DC=" not in group_dn.upper():
+        g = escape_filter_chars(group_dn)
+        conn.search(base, f"(&(objectClass=group)(|(cn={g})(sAMAccountName={g})))", attributes=["distinguishedName"])
+        if not conn.entries:
+            log.warning("AD sign-in: group %s not found", group_dn)
+            return False
+        group_dn = conn.entries[0].entry_dn
+    flt = (f"(&(objectCategory=person)(sAMAccountName={escape_filter_chars(sam)})"
+           f"(memberOf:1.2.840.113556.1.4.1941:={escape_filter_chars(group_dn)})"
+           f"(!(userAccountControl:1.2.840.113556.1.4.803:=2)))")
+    conn.search(base, flt, attributes=["sAMAccountName"])
+    return bool(conn.entries)
+
+
+def _in_user_group(db, conn, base: str, sam: str, name: str) -> bool:
+    """Checks a NetInventory user group's conditions (OU, AD groups, department...) against the user's live AD entry."""
+    from . import groups
+    conn.search(base, f"(&(objectCategory=person)(sAMAccountName={escape_filter_chars(sam)}))",
+                attributes=["distinguishedName", "userPrincipalName", "displayName", "department", "title",
+                            "physicalDeliveryOfficeName", "company", "userAccountControl"])
+    if not conn.entries:
+        return False
+    e = conn.entries[0]
+    val = lambda a: (e[a].value if a in e.entry_attributes else None)
+    if int(val("userAccountControl") or 0) & 2:
+        return False
+    dn = e.entry_dn
+    conn.search(base, f"(&(objectClass=group)(member:1.2.840.113556.1.4.1941:={escape_filter_chars(dn)}))",
+                attributes=["cn"])
+    nested = [g.entry_dn for g in conn.entries]
+    ent = groups.user_entity(sam.lower(), dn, nested, upn=val("userPrincipalName"), name=val("displayName"),
+                             department=val("department"), title=val("title"), office=val("physicalDeliveryOfficeName"),
+                             company=val("company"), tree=groups._GroupTree(db), nested=True)
+    return groups.user_in_group(db, name, ent)
 
 
 # ------------------------------------------------------------------ login / sessions
