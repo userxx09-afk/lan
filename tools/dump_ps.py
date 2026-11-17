@@ -39,7 +39,7 @@ seen += [pctools.PROCESSES, pctools.SERVICES]
 for name in ("WU_SCRIPT", "WINGET_SCRIPT", "REMOVE_SCRIPT", "LAUNCH", "RESULT", "SCRIPT_RUNNER"):
     s = getattr(fixes, name)
     for k, v in {"__TIMEOUT__": "10", "__EXT__": ".ps1", "__NAME__": "x", "__SB64__": "", "__B64__": "", "__PKG__": "Vendor.App",
-                 "__KEY__": "{00000000-0000-0000-0000-000000000000}", "__MODE__": "remove"}.items():
+                 "__KEY__": "{00000000-0000-0000-0000-000000000000}", "__MODE__": "remove", "__AFTER__": "notify"}.items():
         s = s.replace(k, v)          # filled in the same way before a script is sent
     seen.append(s)
 
@@ -63,7 +63,7 @@ for kind, op, a in (("share", "add", {"name": "Scans", "path": r"D:\Scans", "acc
                     ("startup", "remove", {"name": "x", "kind": "registry", "location": r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"}),
                     ("startup", "remove", {"name": "x.lnk", "kind": "folder", "location": r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"}),
                     ("task", "run", {"path": "\\Vendor\\", "name": "x"}), ("net", "flushdns", {}), ("net", "registerdns", {}),
-                    ("net", "renew", {}), ("net", "gpupdate", {})):
+                    ("net", "renew", {}), ("net", "gpupdate", {}), ("defender", "quickscan", {}), ("defender", "signatures", {})):
     r = remote.change(None, dev, "t", kind, op, a)
     assert r["ok"], (kind, op, r)
 remote.files(None, dev, "C:\\Users")

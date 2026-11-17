@@ -149,6 +149,31 @@ with TestClient(m.app) as c:
     assert c.get(f"{u}/files/download", params={"path": "C:\\Temp\\big.iso"}).status_code == 400
     winrm.run_ps = fake
 
+    # security, group policy, Defender, BitLocker keys from AD, Windows Update restart choice
+    assert c.get(f"{u}/view/security").status_code == 200 and c.get(f"{u}/view/gpresult").status_code == 200
+    for op in ("quickscan", "fullscan", "signatures"):
+        assert ok("defender", op, {}), op
+    assert "MpCmdRun.exe" in sent[-3] and "-ScanType 2" in sent[-2]
+    from netinv.collectors import ad as adc
+    from netinv import fixes
+    import netinv.scanning as sc
+    from netinv.db import SessionLocal, Device, AuditLog
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        dn = db.scalar(select(Device.ad_dn).where(Device.hostname == h))
+    sc.ad_action_cfg = lambda db, dn: {"server": "dc1", "user": "CORP\\svc", "password": "x"}
+    adc.bitlocker_keys = lambda cfg, dn: [{"created": "2026-01-01", "key_id": "ABCD", "password": "111111-222222", "readable": True}]
+    r = c.get(f"{u}/bitlocker-keys")
+    if dn:
+        assert r.json()[0]["password"] == "111111-222222", r.text
+        with SessionLocal() as db:
+            assert db.scalar(select(AuditLog).where(AuditLog.action == "pc.bitlocker_keys").order_by(AuditLog.id.desc())).actor
+    else:
+        assert r.status_code == 400
+    assert fixes._validate("windows_updates", "restart")[1] == "restart"
+    assert fixes._validate("windows_updates", "bogus") == ("Install pending Windows updates", None)
+    assert "'notify' -eq 'notify'" in fixes.WU_SCRIPT.replace("__AFTER__", "notify")
+
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []
     assert any("Command (powershell)" in (x.get("detail") or x.get("text") or str(x)) for x in hist), hist[:3]

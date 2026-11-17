@@ -848,6 +848,26 @@ async def device_file_upload(hostname: str, path: str, name: str, request: Reque
             os.unlink(tmp)
 
 
+@app.get("/api/devices/{hostname}/bitlocker-keys")
+def device_bitlocker_keys(hostname: str, user=Depends(ui_auth), db=Depends(db_session)):
+    """BitLocker recovery keys from AD. Every look is written to the audit log."""
+    from .collectors import ad as adc
+    from .scanning import ad_action_cfg
+    dev = _device(db, hostname)
+    if not dev.ad_dn:
+        raise HTTPException(400, "This PC isn't in the AD data.")
+    try:
+        keys = adc.bitlocker_keys(ad_action_cfg(db, dev.ad_dn), dev.ad_dn)
+        msg = f"{len(keys)} key(s) shown" + ("" if all(k["readable"] for k in keys) else "; some unreadable (no permission)")
+    except Exception as exc:
+        keys, msg = None, f"Failed: {exc}"
+    db.add(AuditLog(actor=user, action="pc.bitlocker_keys", target=f"computer:{dev.hostname}", result=msg[:500]))
+    db.commit()
+    if keys is None:
+        raise HTTPException(502, msg)
+    return keys
+
+
 class FixIn(BaseModel):
     action: str
     value: str | None = None

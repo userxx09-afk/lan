@@ -15,8 +15,7 @@ from .pctools import _b, _list, _record, _run
 # Started from a one-off SYSTEM scheduled task so the WinRM call returns before the PC goes down (WinRM ends child
 # processes with the session, and a hibernate from inside the session would cut our own reply off).
 RUN_DETACHED = r'''
-function Start-Detached([string]$exe, [string]$arguments) {
-  $tn = 'NetInventory-Power'
+function Start-Detached([string]$exe, [string]$arguments, [string]$tn = 'NetInventory-Power') {
   $a = New-ScheduledTaskAction -Execute $exe -Argument $arguments
   $p = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -RunLevel Highest
   $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
@@ -383,6 +382,29 @@ $top = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction S
 @{ cpu_pct = [int]$cpu; mem_total_mb = [math]::Round($os.TotalVisibleMemorySize / 1KB); mem_free_mb = [math]::Round($os.FreePhysicalMemory / 1KB)
    disk_busy_pct = if ($pd) { [int]$pd.PercentDiskTime } else { $null }; disk_queue = if ($pd) { [int]$pd.CurrentDiskQueueLength } else { $null }
    disks = $disks; net = $net; top = $top; processes = @(Get-Process).Count; uptime_h = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1) } | ConvertTo-Json -Compress -Depth 3''',
+    "security": r'''
+$r = @{}
+$r.bitlocker = @(try { Get-BitLockerVolume -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ volume = $_.MountPoint; status = "$($_.VolumeStatus)"; protection = "$($_.ProtectionStatus)"
+  percent = [int]$_.EncryptionPercentage; method = "$($_.EncryptionMethod)"; protectors = (@($_.KeyProtector | ForEach-Object { "$($_.KeyProtectorType)" }) -join ', ') } } } catch { })
+$r.firewall = @(try { Get-NetFirewallProfile -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ profile = $_.Name; enabled = [bool]($_.Enabled -eq 1 -or "$($_.Enabled)" -eq 'True'); inbound = "$($_.DefaultInboundAction)"; outbound = "$($_.DefaultOutboundAction)" } } } catch { })
+$r.active_profile = (@(Get-NetConnectionProfile -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name): $($_.NetworkCategory)" }) -join '; ')
+$d = try { Get-MpComputerStatus -ErrorAction Stop } catch { $null }
+$r.defender = if ($d) { @{ running = [bool]$d.AMServiceEnabled; realtime = [bool]$d.RealTimeProtectionEnabled; tamper = [bool]$d.IsTamperProtected; mode = "$($d.AMRunningMode)"
+  signature_age_days = [int]$d.AntivirusSignatureAge; signature = "$($d.AntivirusSignatureVersion)"; engine = "$($d.AMEngineVersion)"
+  quick_scan = if ($d.QuickScanEndTime) { $d.QuickScanEndTime.ToUniversalTime().ToString('s') } else { '' }; full_scan = if ($d.FullScanEndTime) { $d.FullScanEndTime.ToUniversalTime().ToString('s') } else { '' }
+  threats = @(try { Get-MpThreatDetection -ErrorAction Stop | Select-Object -Last 20 | ForEach-Object { [pscustomobject]@{ time = $_.InitialDetectionTime.ToUniversalTime().ToString('s'); id = [int64]$_.ThreatID; resources = (@($_.Resources) -join '; '); action = [int]$_.ActionSuccess } } } catch { }) } } else { $null }
+$r.antivirus = @(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = $_.displayName; state = '0x{0:X6}' -f $_.productState } })
+$r.secure_boot = try { [bool](Confirm-SecureBootUEFI -ErrorAction Stop) } catch { $null }
+$t = try { Get-Tpm -ErrorAction Stop } catch { $null }
+$r.tpm = if ($t) { @{ present = [bool]$t.TpmPresent; ready = [bool]$t.TpmReady; enabled = [bool]$t.TpmEnabled } } else { $null }
+$r.uac = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue).EnableLUA
+$r | ConvertTo-Json -Compress -Depth 4''',
+    "gpresult": r'''
+$ErrorActionPreference = 'Continue'
+$u = "$((Get-CimInstance Win32_ComputerSystem).UserName)"
+$c = & gpresult.exe /r /scope computer 2>&1 | Out-String
+$us = if ($u) { & gpresult.exe /r /scope user /user $u 2>&1 | Out-String } else { '' }
+@{ computer = $c.Trim(); user = $us.Trim(); signed_in = $u } | ConvertTo-Json -Compress''',
 }
 EVENT_LEVELS = {"critical": 1, "error": 2, "warning": 3, "information": 4, "verbose": 5}
 LOG_RE = re.compile(r"^[\w\-/ .%]{1,200}$")
@@ -409,7 +431,7 @@ def view(db, dev: Device, name: str, **p) -> list | dict:
                   .replace("__TEXT__", _b((p.get("text") or "").replace("*", "")[:200])).replace("__HOURS__", str(hours))
                   .replace("__LEVELS__", ",".join(map(str, levels)) or "$null").replace("__ID__", str(eid)).replace("__MAX__", str(mx)))
     r = _run(db, dev, script)
-    return r if isinstance(r, dict) and name == "performance" else _list(r)
+    return r if isinstance(r, dict) and name in ("performance", "security", "gpresult") else _list(r)
 
 
 # ------------------------------------------------------------------ more live tabs: changes
@@ -510,6 +532,13 @@ Start-Sleep 1
 $t = Get-ScheduledTask -TaskPath $path -TaskName $name
 @{ ok = $true; message = "$($t.TaskName): $($t.State)" } | ConvertTo-Json -Compress'''
         detail = f"{op.capitalize()} scheduled task {a['path']}{a['name']}"
+    elif kind == "defender" and op in ("quickscan", "fullscan", "signatures"):
+        body = {
+            "quickscan": RUN_DETACHED + "Start-Detached \"$env:ProgramFiles\\Windows Defender\\MpCmdRun.exe\" '-Scan -ScanType 1' 'NetInventory-DefenderScan'\n@{ ok = $true; message = 'quick scan started (results in Security after it finishes)' } | ConvertTo-Json -Compress",
+            "fullscan": RUN_DETACHED + "Start-Detached \"$env:ProgramFiles\\Windows Defender\\MpCmdRun.exe\" '-Scan -ScanType 2' 'NetInventory-DefenderScan'\n@{ ok = $true; message = 'full scan started; it takes an hour or more' } | ConvertTo-Json -Compress",
+            "signatures": "Update-MpSignature -ErrorAction Stop\n$d = Get-MpComputerStatus\n@{ ok = $true; message = \"signatures now $($d.AntivirusSignatureVersion)\" } | ConvertTo-Json -Compress",
+        }[op]
+        detail = {"quickscan": "Defender quick scan", "fullscan": "Defender full scan", "signatures": "Update Defender signatures"}[op]
     elif kind == "net" and op in ("flushdns", "registerdns", "renew", "gpupdate"):
         body = {
             "flushdns": "Clear-DnsClientCache\n@{ ok = $true; message = 'DNS cache cleared' } | ConvertTo-Json -Compress",
