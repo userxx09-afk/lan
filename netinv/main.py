@@ -363,6 +363,8 @@ def remove_group(hostname: str, name: str, db=Depends(db_session)):
 class Condition(BaseModel):
     field: str
     value: str = ""
+    column: str | None = None       # "other": a v_devices column
+    op: str | None = None           # "other": is | not | lt | gt | empty | not_empty
     not_: bool = Field(False, alias="not")
     model_config = {"populate_by_name": True}
 
@@ -376,14 +378,15 @@ class GroupIn(BaseModel):
 
 
 def _conds(body) -> list[dict]:
-    return [{"field": c.field, "value": c.value, "not": c.not_} for c in body.conditions]
+    return [{"field": c.field, "value": c.value, "not": c.not_,
+             **({"column": c.column, "op": c.op} if c.field == "other" else {})} for c in body.conditions]
 
 
-def _clean_conds(match: str, conds: list[dict], allow_empty: bool) -> list[dict]:
-    if allow_empty and not any(str(c.get("value") or "").strip() for c in conds):
+def _clean_conds(match: str, conds: list[dict], allow_empty: bool, db=None) -> list[dict]:
+    if allow_empty and not any(str(c.get("value") or "").strip() or c.get("op") in ("empty", "not_empty") for c in conds):
         return []
     try:
-        return groups.validate(match, conds)
+        return groups.validate(match, conds, db)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
@@ -408,12 +411,13 @@ def groups_list(db=Depends(db_session)):
                     "members": counts.get(name, 0), "manual": manual.get(name, 0), "scan_jobs": used.get(name, []),
                     "updated": jobs._local(g.updated).isoformat(sep=" ", timespec="minutes") if g and g.updated else None,
                     "who": g.who if g else None})
-    return {"groups": out, "fields": groups.FIELDS, "hints": groups.HINTS}
+    return {"groups": out, "fields": groups.FIELDS, "hints": groups.HINTS, "other_ops": groups.OTHER_OPS,
+            "columns": groups.device_columns(db)}
 
 
 @app.post("/api/groups/preview", dependencies=UI)
 def groups_preview(body: GroupIn, db=Depends(db_session)):
-    conds = _clean_conds(body.match, _conds(body), allow_empty=True)
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db)
     hits = groups.evaluate(db, body.match, conds) if conds else []
     names = sorted({d["hostname"] for d in hits} | {norm_host(h) for h in body.hostnames if norm_host(h)})
     return {"count": len(names), "rule_count": len(hits), "hostnames": names[:500]}
@@ -424,7 +428,15 @@ def group_members(name: str, db=Depends(db_session)):
     groups.hosts(db, name)
     rows = db.execute(select(Device.hostname, DeviceGroup.dynamic).join(DeviceGroup, DeviceGroup.device_id == Device.id)
                       .where(DeviceGroup.name == name).order_by(Device.hostname)).all()
-    return {"members": [{"hostname": h, "how": "rules" if dyn else "added by hand"} for h, dyn in rows]}
+    info = {}
+    if rows:
+        info = {r["hostname"]: r for r in reports.run_query(
+            db, "v_devices", fields=["hostname", "os", "ip", "model", "ou", "last_user"],
+            filters=[{"field": "hostname", "op": "in", "value": [h for h, _ in rows]}], limit=100000)["rows"]}
+    return {"members": [{"hostname": h, "os": (info.get(h) or {}).get("os"), "ip": (info.get(h) or {}).get("ip"),
+                         "model": (info.get(h) or {}).get("model"), "ou": (info.get(h) or {}).get("ou"),
+                         "last_user": (info.get(h) or {}).get("last_user"), "how": "rules" if dyn else "added by hand"}
+                        for h, dyn in rows]}
 
 
 @app.post("/api/groups")
@@ -434,7 +446,7 @@ def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db
         raise HTTPException(400, "give the group a name (up to 128 characters, no commas)")
     if body.match not in ("all", "any"):
         raise HTTPException(400, "match must be all or any")
-    conds = _clean_conds(body.match, _conds(body), allow_empty=True)
+    conds = _clean_conds(body.match, _conds(body), allow_empty=True, db=db)
     hosts = {norm_host(h) for h in body.hostnames if norm_host(h)}
     if not conds and not hosts:
         raise HTTPException(400, "add at least one condition, or list the computers that belong in the group")

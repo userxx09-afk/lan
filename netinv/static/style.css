@@ -271,3 +271,10 @@ pre.code { background: var(--panel); border: 1px solid var(--line); border-radiu
 .regkeys a { overflow-wrap: anywhere; }
 #regpath.wide { flex: 1; min-width: 320px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 span.code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.gcond [hidden] { display: none; }
+.modal .box.wide:has(.gcond) { width: min(760px, 96vw); grid-template-columns: minmax(0, 1fr); max-height: 92vh; overflow: auto; }
+.gcond { justify-content: flex-start !important; align-items: center; }
+.gcond select, .gcond input { min-width: 0; }
+.gcond select[name^=cf_] { flex: 0 0 12em; } .gcond select[name^=co_] { flex: 0 1 12em; }
+.gcond input { flex: 1 1 8em !important; }
+.modal fieldset { min-width: 0; }
