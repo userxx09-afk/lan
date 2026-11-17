@@ -111,6 +111,15 @@
         <button class="act" id="pushagent">Install or update the agent</button>
         <h3>Power</h3>
         <button class="act danger" data-act="reboot">Reboot now</button>
+        <button class="act" data-pow="restart">Restart with a warning</button>
+        <button class="act danger" data-pow="shutdown">Shut down</button>
+        <button class="act" data-pow="abort">Cancel pending shutdown</button>
+        <button class="act" data-pow="hibernate">Hibernate</button>
+        <button class="act" data-pow="sleep">Sleep</button>
+        <button class="act" data-pow="lock">Lock screen</button>
+        <button class="act danger" data-pow="logoff_all">Log off everyone</button>
+        <h3>User</h3>
+        <button class="act" id="pcmessage">Send a pop-up message</button>
       </aside>
       <div class="assetmain">
         <div id="assettitle"></div>
@@ -125,6 +134,9 @@
           <button data-atab="registry">Registry</button>
           <button data-atab="printers">Printers &amp; drives</button>
           <button data-atab="accounts">Local accounts</button>
+          <button data-atab="sessions">Sessions</button>
+          <button data-atab="command">Command</button>
+          <button data-atab="wmi">WMI</button>
           <button data-atab="deployments">Deployments<i></i></button>
           <button data-atab="history">History<i></i></button>
           <button data-atab="comments">Comments<i></i></button>
@@ -187,6 +199,7 @@
         <h3>Remote</h3>
         <button class="act" data-uact="remote">Remote control (DameWare)</button>
         <button class="act" data-uact="rdp">Remote desktop to last PC</button>
+        <button class="act" data-uact="message">Send a pop-up message</button>
         <h3>Account</h3>
         <button class="act" data-uact="unlock">Unlock account</button>
         <button class="act" data-uact="reset_password">Reset password</button>
