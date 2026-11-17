@@ -109,7 +109,11 @@ DC_LOGON_SCRIPT = r'''
 $ErrorActionPreference = 'SilentlyContinue'
 $since = [datetime]::Parse('__SINCE__').ToLocalTime()
 $xp = "*[System[(EventID=4768 or EventID=4624) and TimeCreated[@SystemTime>='" + $since.ToUniversalTime().ToString('o') + "']]]"
-$out = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents __MAX__ | ForEach-Object {
+$err = $null
+$ev = @()
+try { $ev = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents __MAX__ -ErrorAction Stop) }
+catch { if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound') { $err = "$($_.Exception.Message)".Trim() } }
+$out = @($ev | ForEach-Object {
   $x = [xml]$_.ToXml(); $d = @{}; $x.Event.EventData.Data | ForEach-Object { $d[$_.Name] = $_.'#text' }
   $ip = ($d.IpAddress -replace '^::ffff:','')
   if ($_.Id -eq 4768 -and $d.Status -eq '0x0') {
@@ -118,14 +122,17 @@ $out = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents __MAX__ | Fo
     @{ time = $_.TimeCreated.ToUniversalTime().ToString('o'); username = $d.TargetUserName; hostname = $d.WorkstationName; ip = $ip; logon_type = 3 }
   }
 })
-ConvertTo-Json -InputObject $out -Depth 3 -Compress
+$who = $(try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" })
+ConvertTo-Json -InputObject @{ rows = $out; error = $err; who = $who } -Depth 4 -Compress
 '''
 
 
 def _client(host: str, cfg: dict) -> Client:
-    return Client(host, username=cfg["user"], password=cfg["password"],
+    # integrated: no username/password, so Negotiate signs in as the account this server runs as (Windows SSPI)
+    integ = bool(cfg.get("integrated"))
+    return Client(host, username=None if integ else cfg["user"], password=None if integ else cfg["password"],
                   ssl=cfg.get("use_ssl", False), cert_validation=cfg.get("verify_tls", True),
-                  auth=cfg.get("auth", "negotiate"), operation_timeout=cfg.get("timeout", 120),
+                  auth="negotiate" if integ else cfg.get("auth", "negotiate"), operation_timeout=cfg.get("timeout", 120),
                   read_timeout=cfg.get("timeout", 120) + 10, connection_timeout=cfg.get("connect_timeout", 10))
 
 
@@ -201,7 +208,7 @@ def _record_error(db: Session, host: str | None, exc: Exception) -> None:
         db.commit()
 
 
-def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> str:
+def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False, raise_if_all_failed: bool = False) -> str:
     targets = _targets(db, cfg)
     script = (ENDPOINT_SCRIPT.replace("__CHECK_PENDING__", "$true" if check_pending else "$false")
               .replace("__LOGON_DAYS__", str(int(cfg.get("local_logon_days", 14)))))
@@ -217,7 +224,9 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
             prog.host_start(host or addr)
         return run_ps(addr, cfg, script)
 
+    from collections import Counter
     ok, failed, denied, skipped = 0, [], 0, 0
+    why: Counter = Counter()
     pool = ThreadPoolExecutor(max_workers=cfg.get("parallel", 16))
     try:
         futs = {pool.submit(one, host, addr): (host, addr) for host, addr in targets}
@@ -234,7 +243,7 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
             except Exception as exc:
                 res = exc
             if prog:
-                prog.host_end(host or addr, not isinstance(res, Exception))
+                prog.host_end(host or addr, not isinstance(res, Exception), res if isinstance(res, Exception) else None)
                 if prog.stop.is_set():
                     for f in futs:
                         f.cancel()
@@ -253,6 +262,7 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
             except Exception as exc:
                 db.rollback()
                 failed.append(host or addr)
+                why[progress.short_reason(exc)] += 1
                 denied += classify_error(exc) == "access_denied"
                 _record_error(db, host, exc)
                 log.warning("WinRM %s failed: %s", host or addr, exc)
@@ -262,7 +272,11 @@ def collect_endpoints(db: Session, cfg: dict, check_pending: bool = False) -> st
     if skipped:
         msg += f"; cancelled, {skipped} not scanned"
     if failed:
-        msg += f"; {len(failed)} failed ({denied} access denied): {', '.join(sorted(failed)[:15])}"
+        msg += f"; {len(failed)} failed ({denied} access denied). Why: " + \
+            "; ".join(f"{n} × {r}" for r, n in why.most_common(5)) + f". For example: {', '.join(sorted(failed)[:10])}" + \
+            ". Each PC's own error is on its page and in Reports, Last scan times."
+    if raise_if_all_failed and targets and not ok and failed:      # a scan where every PC failed isn't "ok"
+        raise RuntimeError(msg)
     return msg
 
 
@@ -284,13 +298,30 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
         since = last or (utcnow() - timedelta(days=cfg.get("dc_initial_days", 7)))
         script = (DC_LOGON_SCRIPT.replace("__SINCE__", since.isoformat() + "Z")
                   .replace("__MAX__", str(int(cfg.get("dc_max_events", 50000)))))
+        addr = dc.fqdn or dc.hostname
         try:
-            rows = run_ps(dc.fqdn or dc.hostname, cfg, script) or []
+            res = run_ps(addr, cfg, script) or []
         except Exception as exc:
+            from ..scanning import short_error
             log.warning("DC %s logon pull failed: %s", dc.hostname, exc)
+            kind = classify_error(exc)
+            hint = {"access_denied": "the account was refused: it needs to be a Domain Admin, or in the DC's "
+                                     "Remote Management Users and Event Log Readers groups",
+                    "unreachable": f"WinRM (TCP 5985) on {addr} didn't answer from this server"}.get(kind, "")
+            errors.append(f"{dc.hostname}: {short_error(exc)}" + (f" ({hint})" if hint else ""))
             if prog:
-                prog.host_end(dc.hostname, False)
+                prog.host_end(dc.hostname, False, exc)
             continue
+        if isinstance(res, dict) and "rows" in res:
+            rows, who = res.get("rows") or [], res.get("who") or "?"
+            if res.get("error"):
+                errors.append(f"{dc.hostname}: connected as {who}, but reading the Security log failed: {res['error']} "
+                              "(the account needs to be in Event Log Readers on the DC, or a Domain Admin)")
+                if prog:
+                    prog.host_end(dc.hostname, False, f"Security log: {res['error']}")
+                continue
+        else:       # an older script shape
+            rows = res
         if isinstance(rows, dict):
             rows = [rows]
         try:
@@ -305,4 +336,10 @@ def collect_dc_logons(db: Session, cfg: dict) -> str:
             continue
         if prog:
             prog.host_end(dc.hostname, True)
-    return f"{total} logon events from {len(dcs)} DCs" + (f"; failed: {'; '.join(errors)}" if errors else "")
+    if not dcs:
+        from ..scanning import NothingToDo
+        raise NothingToDo("Skipped: no domain controllers known yet. Run the Active Directory import first; it finds them.")
+    msg = f"{total} logon events from {len(dcs) - len(errors)} of {len(dcs)} DCs" + (f"; failed: {'; '.join(errors)}" if errors else "")
+    if errors and len(errors) == len(dcs):
+        raise RuntimeError(msg)
+    return msg
