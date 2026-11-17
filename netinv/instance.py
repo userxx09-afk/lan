@@ -15,7 +15,7 @@ import uuid
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from . import __version__
 from .db import CollectorRun, ScanJob, ServerInstance, SessionLocal, utcnow
@@ -34,11 +34,14 @@ def ran_by() -> str:
 
 
 def beat(db) -> None:
-    row = db.get(ServerInstance, ID)
-    if row is None:
-        row = ServerInstance(id=ID, version=__version__[:32], host=HOST, pid=PID, code_path=CODE_PATH, started=STARTED)
-        db.add(row)
-    row.last_seen = utcnow()
+    from sqlalchemy.exc import IntegrityError
+    if db.execute(update(ServerInstance).where(ServerInstance.id == ID).values(last_seen=utcnow())).rowcount == 0:
+        db.add(ServerInstance(id=ID, version=__version__[:32], host=HOST, pid=PID, code_path=CODE_PATH,
+                              started=STARTED, last_seen=utcnow()))
+        try:
+            db.commit()
+        except IntegrityError:      # another thread of this process registered it first
+            db.rollback()
     db.execute(delete(ServerInstance).where(ServerInstance.last_seen < utcnow() - timedelta(days=7)))
     db.commit()
 
