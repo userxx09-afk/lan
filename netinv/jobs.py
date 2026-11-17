@@ -7,7 +7,7 @@ import time
 
 from .config import settings
 from .db import CollectorRun, ScanTarget, SessionLocal, get_setting, utcnow
-from . import progress, scanning
+from . import instance, progress, scanning
 
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
@@ -57,6 +57,7 @@ def _run_job(name: str) -> CollectorRun:
             log.exception("job %s failed", name)
             run.ok, run.message = False, short_error(exc)
         run.finished = utcnow()
+        run.ran_by = instance.ran_by()
         db.add(run)
         db.commit()
         _refresh_groups(db)
@@ -258,11 +259,13 @@ def _run_scan_job(job_id: int, who: str) -> None:
                 ok = False
                 msg = f"Cancelled by {prog.cancelled_by or 'someone'}. " + msg
             run.ok, run.message, run.finished = ok, msg[:4000], utcnow()
+            run.ran_by = instance.ran_by()
             db.add(run)
             _refresh_groups(db)
             job = db.get(ScanJob, job_id)
             if job:
                 job.last_ok, job.last_result = ok, msg[:4000]
+                job.ran_by, job.ran_at = instance.ran_by(), utcnow()
                 if not prog.stop.is_set():      # a cancelled run would make the next ETA too short
                     job.last_seconds = int(time.time() - started)
             db.commit()

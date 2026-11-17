@@ -1378,7 +1378,7 @@ async function loadJobs(targets) {
     ["name", "scope", "what", "schedule", "next", "last_run", "last_result", "act"], {
       labels: { what: "scans", next: "next run", last_result: "result", act: "" },
       cell: { next: stateCell, last_run: (v, r) => v ? `${fmtDate(v)}${r.last_seconds != null ? ` <span class="muted small">(${Math.round(r.last_seconds / 60)} min)</span>` : ""}` : "never",
-        last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}">${esc(v)}</span>` : "",
+        last_result: (v, r) => v ? `<span class="pill longtext ${r.last_ok ? "good" : "bad"}" title="${esc(r.ran_by ? `Ran on NetInventory ${r.ran_by}` : "Written by an older NetInventory version")}">${esc(v)}</span>` : "",
         act: (id) => `<a class="link" data-jrun="${id}">Run now</a> · <a class="link" data-jhist="${id}">History</a> · <a class="link" data-jedit="${id}">Edit</a> · <a class="link" data-jdel="${id}">Delete</a>` } });
   const byId = (a, k) => jobData.jobs.find((j) => j.id === +a.dataset[k]);
   $("#jobtable").querySelectorAll("[data-jrun]").forEach((a) => a.onclick = async () => {
@@ -1454,7 +1454,14 @@ async function loadUpdate(force = false) {
   $("#updbadge").hidden = !u.available;
   $("#updbadge").title = u.available ? `Version ${u.latest} is available (you have ${u.current})` : "";
   const when = u.checked ? `Last checked ${fmtDate(u.checked)}.` : "Not checked yet.";
+  const ins = u.instances || { running: [], old_process_results: [] };
+  const others = ins.running.filter((r) => !r.this);
+  const procs = ins.running.map((r) => `<div>${esc(r.version)} on ${esc(r.host)}, pid ${r.pid}${r.this ? ` <span class="muted">(this page)</span>` : ""}
+      <span class="muted small">since ${fmtDate(r.started)} · ${esc(r.path || "")}</span></div>`).join("");
+  const warn = (others.length ? `<p class="pill bad longtext">${others.length + 1} NetInventory server processes are running against this database. Each one runs the scan schedule, so results can come from the other one. Stop the extra one (see the list above), or reinstall to stop leftover processes on this server.</p>` : "")
+    + (ins.old_process_results.length ? `<p class="pill bad longtext">A NetInventory process from an older version is still running against this database: it wrote the last result of ${esc(ins.old_process_results.join(", "))} after this version started. Reinstall (repair) on this server stops leftover processes; if it keeps happening, another server is using this database.</p>` : "");
   $("#updinfo").innerHTML = `<div class="kvr"><span>This version</span><div><b>${esc(u.current)}</b></div></div>
+    <div class="kvr"><span>Running</span><div>${procs}</div></div>${warn}
     ${u.latest ? `<div class="kvr"><span>Newest</span><div>${esc(u.latest)} ${u.published ? `<span class="muted">published ${fmtDate(u.published)}</span>` : ""}
       ${u.available ? `<span class="pill warn">update available</span>` : `<span class="pill good">up to date</span>`}</div></div>` : ""}
     ${u.available && u.notes ? `<div class="kvr"><span>What's new</span><div class="longtext">${esc(u.notes)}</div></div>` : ""}
