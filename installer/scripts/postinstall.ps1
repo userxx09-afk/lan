@@ -265,6 +265,13 @@ if (Get-Service NetInventory -ErrorAction SilentlyContinue) {
     Run $svcExe @('uninstall') | Out-Null
     Start-Sleep 2
 }
+# Nothing from the old version may keep running: a leftover server process would keep the port and the scan
+# schedule, and the new service would fail to start behind it (stop-processes.ps1 explains).
+$stopOut = Native 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $InstallDir 'scripts\stop-processes.ps1'), '-InstallDir', $InstallDir)
+if ($stopOut) { Log $stopOut }
+if ($LASTEXITCODE -ne 0) { Fail "An old NetInventory process could not be stopped. Restart the server and run setup again. $stopOut" }
+Push-Location (Join-Path $InstallDir 'app')
+try { Log ("Installed code: " + (Native $Python @('-c', 'import netinv; print(netinv.__version__, netinv.__file__)'))) } finally { Pop-Location }
 Run $svcExe @('install') | Out-Null
 Run $svcExe @('start') | Out-Null
 Log 'NetInventory service installed and started'
@@ -294,6 +301,17 @@ while ((Get-Date) -lt $deadline) {
         }
     }
     Start-Sleep 2
+}
+# The port must be held by the new service's own Python, not by some other process.
+if ($up) {
+    $svcPid = (Get-CimInstance Win32_Service -Filter "Name='NetInventory'").ProcessId
+    $appPids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$svcPid" | ForEach-Object { $_.ProcessId })
+    foreach ($o in @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)) {
+        if ($appPids -notcontains $o) {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$o"
+            Log "WARNING: port $Port is also held by process $o ($($p.CommandLine)), not by the NetInventory service. Stop that program."
+        }
+    }
 }
 if ($up) { Log "Dashboard is answering on port $Port" }
 else { Log "WARNING: the service is running but not answering on port $Port after 3 minutes. It may still be starting; if ${scheme}://localhost:$Port/ doesn't open in a few minutes, see $DataDir\logs\NetInventory.err.log" }

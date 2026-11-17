@@ -43,6 +43,7 @@ jobs:
           python tests/test_pctools.py
           python tests/test_groups.py
           python tests/test_agentpush.py
+          python tests/test_instance.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
       - name: Agent inventory script matches the WinRM one
@@ -69,11 +70,11 @@ jobs:
           $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
           $notes = ("$env:NOTES" -split "`n")[0]
           .\installer\build.ps1 -Version $v -Notes $notes
-      - name: Agent scripts parse
+      - name: Agent and setup scripts parse
         shell: powershell
         run: |
           $bad = 0
-          foreach ($f in Get-ChildItem netinv\agent\*.ps1) {
+          foreach ($f in @(Get-ChildItem netinv\agent\*.ps1) + @(Get-ChildItem installer\scripts\*.ps1)) {
             $err = $null; [void][Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
             if ($err) { $bad++; $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
           }

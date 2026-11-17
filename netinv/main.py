@@ -46,6 +46,8 @@ async def lifespan(app: FastAPI):
         if get_setting(db, "update:message") and not updater.status(db)["available"]:
             set_setting(db, "update:message", None)
             db.commit()
+    from . import instance
+    threading.Thread(target=instance.loop, args=(_stop,), daemon=True).start()
     threading.Thread(target=updater.loop, args=(_stop,), daemon=True).start()
     threading.Thread(target=catalog.loop, args=(_stop,), daemon=True).start()
     threading.Thread(target=fixes.loop, args=(_stop,), daemon=True).start()
@@ -1480,7 +1482,8 @@ def _job_out(j: ScanJob, tnames: dict) -> dict:
             "schedule": jobs.describe(j), "state": jobs.JOB_STATE.get(j.id),
             "next_run": nxt.isoformat(sep=" ", timespec="minutes") if nxt else None,
             "last_run": jobs._local(j.last_run).isoformat(sep=" ", timespec="minutes") if j.last_run else None,
-            "last_ok": j.last_ok, "last_result": j.last_result, "last_seconds": j.last_seconds}
+            "last_ok": j.last_ok, "last_result": j.last_result, "last_seconds": j.last_seconds,
+            "ran_by": j.ran_by if j.ran_at and (not j.last_run or j.ran_at >= j.last_run) else None}
 
 
 @app.get("/api/jobs", dependencies=UI)
@@ -1749,12 +1752,14 @@ def agents_push(body: AgentPushIn, user=Depends(ui_auth)):
 # ----------------------------------------------------------------- software updates (see updater.py)
 @app.get("/api/update", dependencies=UI)
 def update_status(db=Depends(db_session)):
-    return updater.status(db)
+    from . import instance
+    return {**updater.status(db), "instances": instance.status(db)}
 
 
 @app.post("/api/update/check", dependencies=UI)
 def update_check(db=Depends(db_session)):
-    return updater.check(db)
+    from . import instance
+    return {**updater.check(db), "instances": instance.status(db)}
 
 
 class UpdateIn(BaseModel):
