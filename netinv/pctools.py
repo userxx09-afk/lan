@@ -6,6 +6,9 @@ before they go into a script, so nothing typed in the browser reaches PowerShell
 """
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
+
 import re
 
 from .actions import _addr
@@ -45,9 +48,22 @@ Get-CimInstance Win32_Service | ForEach-Object {
 '''
 
 
+_signed_in = threading.local()
+
+
+@contextmanager
+def signed_in_as(cfg: dict | None):
+    """Within this block (one deployment in this thread), tools sign in with cfg instead of the scan credentials."""
+    _signed_in.cfg = cfg
+    try:
+        yield
+    finally:
+        _signed_in.cfg = None
+
+
 def _cfg(db):
     from .scanning import winrm_cfg
-    cfg = winrm_cfg(db)
+    cfg = getattr(_signed_in, "cfg", None) or winrm_cfg(db)
     if not cfg:
         raise PermissionError("No Windows credential is configured (Settings > Credentials).")
     return cfg

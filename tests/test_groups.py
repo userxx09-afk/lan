@@ -12,7 +12,7 @@ from netinv import fixes, groups, scanning
 from netinv.db import Device, DeviceNic, ScanJob, SessionLocal
 
 queued = []
-fixes.run_many = lambda hosts, action, user, value=None, adhoc=None: queued.append(sorted(set(hosts))) or len(set(hosts))
+fixes.run_many = lambda hosts, action, user, value=None, adhoc=None, **kw: queued.append(sorted(set(hosts))) or len(set(hosts))
 
 with TestClient(m.app) as c:
     with SessionLocal() as db:

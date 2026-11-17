@@ -7,7 +7,10 @@ written to the audit log and the PC's history.
 - start_service: start Microsoft Defender Antivirus, Windows Update or BITS if it is stopped (never changes a
   service that a policy disabled).
 - reboot / cancel_reboot: restart in 5 minutes or tonight at the configured hour, with a notice to the signed-in user.
-- script: a saved script (Software > Scripts) or a one-off command, PowerShell or command prompt, run as SYSTEM.
+- script: a saved script (Software > Scripts) or a one-off command, PowerShell or command prompt. Its run mode
+  says who it runs as on the PC (RUN_MODES): the signed-in user, the account that signed in over WinRM (the scan
+  credentials or the account picked when deploying), or SYSTEM. A saved script can fix its mode, or leave it to
+  "Select on deployment" (the default) so whoever deploys it picks the least privileged one that does the job.
   The exact text is stored with the deployment when it's queued, so an edit later never changes what an approved
   push runs; its output and exit code are the result.
 
@@ -37,6 +40,10 @@ SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Up
 ACTIONS = {"tool", "windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script",
            "agent_install", "agent_remove"}
 LANGS = {"powershell": "PowerShell", "cmd": "Command prompt"}
+# Who a script runs as on the PC, least privileged first. "select" is only stored on a saved script: it means ask.
+RUN_MODES = {"user": "Currently logged on user", "account": "Scanning credentials", "system": "System account"}
+SCRIPT_MODES = {"select": "Select on deployment", **RUN_MODES}
+NOUSER = "NI-NOUSER"        # marker: run as the logged-on user, but nobody is signed in (wait and retry)
 MAX_SCRIPT = 100_000
 KEY_RE = re.compile(r"^[A-Za-z0-9{}\-_. ]{1,128}$")      # an Uninstall registry key name (MSI product code or app id)
 _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fix")
@@ -150,16 +157,16 @@ $res
 SCRIPT_RUNNER = r"""
 $res = @{ ok = $false }
 try {
-  $dir = Join-Path $env:ProgramData 'NetInventory\fix'
+  $dir = $env:TEMP
   $ext = '__EXT__'
-  $f = Join-Path $dir ('__NAME__-script' + $ext)
-  $out = Join-Path $dir '__NAME__-out.txt'
+  $f = Join-Path $dir ('netinv-__NAME__-script' + $ext)
+  $out = Join-Path $dir 'netinv-__NAME__-out.txt'
   $code = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__SB64__'))
   if ($ext -eq '.cmd') { [IO.File]::WriteAllText($f, $code, [Text.Encoding]::Default) }
   else { [IO.File]::WriteAllText($f, $code, (New-Object Text.UTF8Encoding $true)) }
   if ($ext -eq '.cmd') { $exe = "$env:SystemRoot\System32\cmd.exe"; $a = "/d /c `"$f`"" }
   else { $exe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; $a = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$f`"" }
-  $p = Start-Process $exe -ArgumentList $a -RedirectStandardOutput $out -RedirectStandardError "$out.err" -PassThru
+  $p = Start-Process $exe -ArgumentList $a -RedirectStandardOutput $out -RedirectStandardError "$out.err" -PassThru -NoNewWindow
   if (-not $p.WaitForExit(__TIMEOUT__ * 60000)) {
     try { & taskkill.exe /PID $p.Id /T /F | Out-Null } catch {}
     $res.exit = -1; $res.message = 'Stopped: still running after __TIMEOUT__ minutes'
@@ -173,27 +180,68 @@ try {
 $res
 """
 
-# Writes the script to the PC, runs it as SYSTEM from a one-off task, and returns at once.
+# Writes the script to the PC, runs it from a one-off task (as SYSTEM, the signed-in user or the account that signed
+# in: __REG__, see _principal), and returns at once. Tasks that don't run as SYSTEM write their result to fix\u,
+# which ordinary users may write to; the script itself stays in fix (read-only for them).
 LAUNCH = r'''
 $ErrorActionPreference = 'Stop'
+function D($s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $dir = Join-Path $env:ProgramData 'NetInventory\fix'
 New-Item -ItemType Directory $dir -Force | Out-Null
 $name = '__NAME__'
+$mode = '__MODE__'
+$rdir = $dir
+if ($mode -ne 'system') {
+  $rdir = Join-Path $dir 'u'
+  New-Item -ItemType Directory $rdir -Force | Out-Null
+  & icacls.exe $rdir /grant '*S-1-5-32-545:(OI)(CI)M' /Q | Out-Null
+}
 $body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__B64__'))
-$wrap = "`$r = & { $body }`r`n`$r.finished = (Get-Date).ToString('o')`r`n`$r | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 '$dir\$name.json'"
-Remove-Item "$dir\$name.json" -ErrorAction SilentlyContinue
+$wrap = "`$r = & { $body }`r`n`$r.finished = (Get-Date).ToString('o')`r`n`$r.ran_as = [Security.Principal.WindowsIdentity]::GetCurrent().Name`r`n`$r | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 '$rdir\$name.json'"
+Remove-Item "$dir\$name.json", "$dir\u\$name.json" -ErrorAction SilentlyContinue
 Set-Content -LiteralPath "$dir\$name.ps1" -Value $wrap -Encoding UTF8
 $task = "NetInventory fix $name"
-$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$dir\$name.ps1`""
-$p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dir\$name.ps1`""
 $st = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Settings $st -Force | Out-Null
+__REG__
 Start-ScheduledTask -TaskName $task
-'{"ok": true}'
+@{ ok = $true; runs_as = "$runsAs" } | ConvertTo-Json -Compress
+'''
+
+# The task's principal for each run mode.
+REG_SYSTEM = r'''
+$p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Settings $st -Force | Out-Null
+$runsAs = 'SYSTEM'
+'''
+# The user at the console, or else whoever owns an Explorer (a remote desktop session). Runs with their own rights.
+REG_USER = r'''
+$u = "$((Get-CimInstance Win32_ComputerSystem).UserName)"
+if (-not $u) {
+  $o = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1 | Invoke-CimMethod -MethodName GetOwner
+  if ($o -and $o.User) { $u = "$($o.Domain)\$($o.User)" }
+}
+if (-not $u) { throw '__NOUSER__: nobody is signed in to this PC' }
+$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Settings $st -Force | Out-Null
+$runsAs = $u
+'''
+# The account that signed in. With its password the task has network access (file shares); the server's own account
+# has no stored password, so it runs as S4U (local access only).
+REG_ACCOUNT_PW = r'''
+Register-ScheduledTask -TaskName $task -Action $a -Settings $st -User (D '__USER__') -Password (D '__PASS__') -RunLevel Highest -Force | Out-Null
+$runsAs = D '__USER__'
+'''
+REG_ACCOUNT_S4U = r'''
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$p = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Highest
+Register-ScheduledTask -TaskName $task -Action $a -Principal $p -Settings $st -Force | Out-Null
+$runsAs = "$me (no network access)"
 '''
 
 RESULT = r'''
 $f = Join-Path $env:ProgramData 'NetInventory\fix\__NAME__.json'
+if (-not (Test-Path $f)) { $f = Join-Path $env:ProgramData 'NetInventory\fix\u\__NAME__.json' }
 $t = Get-ScheduledTask -TaskName 'NetInventory fix __NAME__' -ErrorAction SilentlyContinue
 $state = if ($t) { "$($t.State)" } else { 'missing' }
 if (Test-Path $f) {
@@ -340,15 +388,56 @@ def _sw_name(db, hostname: str, code: str) -> str | None:
     return db.scalar(select(Software.name).join(Device).where(Device.hostname == hostname, Software.product_code == code))
 
 
+def run_mode_for(db, action: str, value: str | None, asked: str | None, snapshot_mode: str | None = None) -> str | None:
+    """Who a script runs as: the saved script's own mode, or (Select on deployment, one-off commands) the one picked
+    when deploying. None for other actions (they run as SYSTEM or in the WinRM session)."""
+    from .db import Script
+    if action != "script":
+        return None
+    if snapshot_mode:                    # Retry: exactly as before
+        return snapshot_mode
+    fixed = None
+    if value and str(value).isdigit():
+        sc = db.get(Script, int(value))
+        fixed = sc.run_mode if sc and sc.run_mode in RUN_MODES else None
+    if fixed:
+        return fixed
+    if asked not in RUN_MODES:
+        raise ValueError("Pick who the script runs as: the logged-on user, the scanning credentials or the System account.")
+    return asked
+
+
+def run_as_label(run_mode: str | None, cred_name: str | None = None) -> str:
+    if run_mode == "account" and cred_name:
+        return cred_name
+    return RUN_MODES.get(run_mode or "system", "System account")
+
+
+def cred_name(db, cid: int | None) -> str | None:
+    from .db import Credential
+    from .scanning import SERVICE_CRED_ID
+    if cid is None:
+        return None
+    if cid == SERVICE_CRED_ID:
+        return "This server's own account"
+    c = db.get(Credential, cid)
+    return c.name if c else f"credential #{cid} (deleted)"
+
+
 def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, adhoc: dict | None = None,
-            snapshot: tuple[str, str] | None = None, cred_id: int | None = None):
-    """snapshot = (label, payload) re-runs exactly what an earlier script push ran (Retry)."""
+            snapshot: tuple[str, str] | None = None, cred_id: int | None = None, run_mode: str | None = None):
+    """snapshot = (label, payload) re-runs exactly what an earlier script push ran (Retry). run_mode: scripts only,
+    already resolved by run_mode_for."""
     from .db import Deployment, utcnow
     from datetime import timedelta
     label, value = _validate(action, value)
     payload = None
     if action == "script":
         label, payload = snapshot if snapshot else script_payload(db, value, adhoc)[:2]
+        run_mode = run_mode if run_mode in RUN_MODES else "system"
+        label = re.sub(r" \(as [^()]*\)$", "", label)[:200] + f" (as {run_as_label(run_mode, cred_name(db, cred_id))})"
+    else:
+        run_mode = None
     if action == "tool":
         label, payload = snapshot if snapshot else tool_payload(adhoc)
     if action in ("app_uninstall", "app_repair"):
@@ -358,7 +447,8 @@ def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, 
         label = f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {name}"
     now = utcnow()
     dep = Deployment(hostname=hostname, action=action, value=value, label=label, who=who, status="queued", payload=payload,
-                     created=now, next_try=now, expires=now + timedelta(days=queue_days(db)), cred_id=cred_id)
+                     created=now, next_try=now, expires=now + timedelta(days=queue_days(db)), cred_id=cred_id,
+                     run_mode=run_mode)
     db.add(dep)
     _audit(db, who, action, hostname, f"queued: {label}" + (f" ({_digest(payload)})" if payload else ""))
     db.commit()
@@ -376,8 +466,9 @@ def _execute(db, dev: Device, dep) -> str:
     addr = _addr(dev)
     action, value = dep.action, dep.value
     if action == "tool":
-        from . import remote
-        return remote.bulk_run(db, dev, dep.who or "?", json.loads(dep.payload or "{}"))
+        from . import pctools, remote
+        with pctools.signed_in_as(cfg):      # the account picked for this push, not just the scan credentials
+            return remote.bulk_run(db, dev, dep.who or "?", json.loads(dep.payload or "{}"))
     if action == "windows_updates":
         _launch(addr, cfg, _task_name(action), WU_SCRIPT.replace("__AFTER__", value if value in WU_AFTER else "none"))
         return "Started. Windows is downloading and installing the updates."
@@ -401,8 +492,10 @@ def _execute(db, dev: Device, dep) -> str:
         body = (SCRIPT_RUNNER.replace("__EXT__", ".cmd" if p["language"] == "cmd" else ".ps1").replace("__NAME__", _dep_task(dep))
                 .replace("__TIMEOUT__", str(int(p["timeout"])))
                 .replace("__SB64__", base64.b64encode(p["body"].encode("utf-8")).decode()))
-        _launch(addr, cfg, _dep_task(dep), body)
-        return f"Started ({LANGS[p['language']]}, as SYSTEM, up to {p['timeout']} min)."
+        mode = dep.run_mode if dep.run_mode in RUN_MODES else "system"
+        r = _launch(addr, cfg, _dep_task(dep), body, mode)
+        who = (r or {}).get("runs_as") or run_as_label(mode)
+        return f"Started ({LANGS[p['language']]}, as {who}, up to {p['timeout']} min)."
     if action == "start_service":
         r = run_ps(addr, cfg, f"""
 $s = Get-Service -Name '{value}' -ErrorAction SilentlyContinue
@@ -459,6 +552,12 @@ def attempt(db, dep) -> dict:
         out = _execute(db, dev, dep)
     except Exception as exc:
         msg = str(exc).split("\n")[0][:300]
+        if NOUSER in msg and dep.expires and now < dep.expires:
+            dep.status, dep.next_try = "queued", now + timedelta(minutes=OFFLINE_RETRY_MIN)
+            dep.message = f"Waiting for someone to sign in to {dev.hostname} (it runs as the logged-on user); tried {dep.attempts}x."
+            db.commit()
+            return {"ok": True, "output": f"Nobody is signed in to {dev.hostname}. Queued: it runs as soon as someone signs in "
+                                          f"(until {dep.expires:%Y-%m-%d %H:%M} UTC). See Software > Deployments."}
         if classify_error(exc) == "unreachable" and dep.expires and now < dep.expires:
             dep.status, dep.next_try = "queued", now + timedelta(minutes=OFFLINE_RETRY_MIN)
             dep.message = f"PC not reachable ({msg}). Waiting for it to come online; tried {dep.attempts}x."
@@ -484,26 +583,41 @@ def attempt(db, dep) -> dict:
     return {"ok": True, "output": out}
 
 
-def run(db, dev: Device, action: str, who: str, value: str | None = None, adhoc: dict | None = None) -> dict:
+def run(db, dev: Device, action: str, who: str, value: str | None = None, adhoc: dict | None = None,
+        cred_id: int | None = None, run_mode: str | None = None) -> dict:
     """One PC, from its page: queue it and send it right away, so the answer is immediate."""
     try:
-        dep = enqueue(db, dev.hostname, action, who, value, adhoc)
-    except ValueError as exc:
+        check_cred(db, cred_id)
+        mode = run_mode_for(db, action, value, run_mode)
+        dep = enqueue(db, dev.hostname, action, who, value, adhoc, cred_id=cred_id, run_mode=mode)
+    except (ValueError, PermissionError) as exc:
         return {"ok": False, "output": str(exc)}
-    if not _cfg(db):
+    if not _cfg(db, dep):
         dep.status, dep.message = "failed", "No Windows credential is configured (Settings > Credentials)."
         db.commit()
         return {"ok": False, "output": dep.message}
     return attempt(db, dep)
 
 
+def check_cred(db, cred_id: int | None) -> None:
+    """A 'Sign in with' account picked in the UI must still exist (and be a Windows one)."""
+    if cred_id is not None:
+        try:
+            cred_for_push(db, cred_id)
+        except PermissionError:
+            raise ValueError("The account picked to sign in with no longer exists (Settings, Credentials).")
+
+
 def run_many(hostnames: list[str], action: str, who: str, value: str | None = None, adhoc: dict | None = None,
-             snapshot: tuple[str, str] | None = None, cred_id: int | None = None) -> int:
+             snapshot: tuple[str, str] | None = None, cred_id: int | None = None, run_mode: str | None = None,
+             snapshot_mode: str | None = None) -> int:
     """Queue a push to many PCs; the dispatcher sends them a few at a time. Returns how many were queued."""
     from .db import norm_host
     hosts = list(dict.fromkeys(norm_host(h) for h in hostnames))
     with SessionLocal() as db:
         _validate(action, value)
+        check_cred(db, cred_id)
+        mode = run_mode_for(db, action, value, run_mode, snapshot_mode)
         if action == "script" and not snapshot:      # one snapshot for every PC, so they all run the same text
             snapshot = script_payload(db, value, adhoc)[:2]
         if action == "tool" and not snapshot:
@@ -513,7 +627,7 @@ def run_many(hostnames: list[str], action: str, who: str, value: str | None = No
         for h in hosts:
             if h in known:
                 try:
-                    enqueue(db, h, action, who, value, snapshot=snapshot, cred_id=cred_id)
+                    enqueue(db, h, action, who, value, snapshot=snapshot, cred_id=cred_id, run_mode=mode)
                     queued += 1
                 except ValueError:
                     db.rollback()      # e.g. that program isn't on this PC
@@ -522,10 +636,31 @@ def run_many(hostnames: list[str], action: str, who: str, value: str | None = No
     return len(known)
 
 
-def _launch(addr: str, cfg: dict, name: str, body: str) -> None:
-    from .collectors.winrm import run_ps
-    b64 = base64.b64encode(body.encode("utf-8")).decode()
-    run_ps(addr, cfg, LAUNCH.replace("__NAME__", name).replace("__B64__", b64))
+def _b64(s: str) -> str:
+    return base64.b64encode((s or "").encode("utf-8")).decode()
+
+
+def _launch(addr: str, cfg: dict, name: str, body: str, mode: str = "system") -> dict:
+    """Start the one-off task on the PC. mode (RUN_MODES) picks its principal. 'account' runs it as whichever account
+    signs in, so each credential is tried with its own task definition."""
+    from .collectors.winrm import classify_error, run_ps
+    script = LAUNCH.replace("__NAME__", name).replace("__B64__", _b64(body)).replace("__MODE__", mode)
+    if mode == "user":
+        return run_ps(addr, cfg, script.replace("__REG__", REG_USER.replace("__NOUSER__", NOUSER)))
+    if mode != "account":
+        return run_ps(addr, cfg, script.replace("__REG__", REG_SYSTEM))
+    creds = cfg.get("creds") or [{"user": cfg.get("user"), "password": cfg.get("password")}]
+    last = None
+    for c in creds:
+        reg = (REG_ACCOUNT_PW.replace("__USER__", _b64(c["user"])).replace("__PASS__", _b64(c.get("password")))
+               if c.get("user") and c.get("password") and not c.get("integrated") else REG_ACCOUNT_S4U)
+        try:
+            return run_ps(addr, {**cfg, "creds": [c]}, script.replace("__REG__", reg))
+        except Exception as exc:
+            last = exc
+            if classify_error(exc) != "access_denied":
+                break
+    raise last
 
 
 def check(db, dev: Device, name: str, dep=None) -> dict:

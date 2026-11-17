@@ -242,12 +242,34 @@ Keep a library of PowerShell or command prompt scripts, and run one, or a one-of
 - the PCs you select in Computers: *Run script* above the list;
 - every PC in a group, or a typed list of names: *Run…* next to a script.
 
-Scripts run as SYSTEM, hidden, with a time limit (1-240 minutes), through the deployment queue: a few PCs at a time,
+Scripts run hidden, with a time limit (1-240 minutes), through the deployment queue: a few PCs at a time,
 and offline PCs get it when they come back online. Exit code 0 counts as success. Each run's output (the last 3,500
 characters) and exit code are in Software > Deployments (click the name to see the output and exactly what ran) and
 the PC's History. The script's text is copied into each push when it's queued, so editing or deleting the script
 later never changes what an approved push runs; *Retry* runs the same text again. Saving and running scripts are in
 the audit log, with a fingerprint (SHA-256) of the text.
+
+### Run mode: who a script runs as (0.26)
+
+Each script has a **Run mode** (edit it in Software > Scripts), like a deployment package's:
+
+| Run mode | Runs as on the PC | Notes |
+|---|---|---|
+| **Select on deployment** (default) | asked each time you deploy | the Run as list starts on *Currently logged on user*; you can also pick any saved Windows credential |
+| Currently logged on user | the person signed in, with their own rights (not elevated) | a scheduled task in their session; if nobody is signed in, the push waits (like an offline PC) until someone signs in or the queue deadline passes |
+| Scanning credentials | the account that signs in over WinRM (the scan targets' ticked accounts) | runs with that account's password, so it can reach file shares |
+| System account | the PC's SYSTEM account | full rights on the PC, no network identity except the computer account (how every script ran before 0.26) |
+
+Picking a saved credential when deploying signs in *and* runs as that account. Picking *This server's own account*
+runs it without a stored password (S4U), so it has no access to file shares. The Run as column in Software >
+Deployments, and the deployment's name, show who each push ran as. *Retry* uses the same account again.
+Scripts saved before 0.26 are set to *Select on deployment*.
+
+The other deployments (app updates, uninstall/repair, Windows updates, services, reboots, Configure…, Push agent)
+have a **Sign in with** choice in their dialog: the scanning credentials (default), any saved Windows credential, or
+this server's own account. Installs and Windows updates still run as SYSTEM on the PC, because Windows only allows
+that; the account only signs in to start them. Configure… changes and power actions run with the rights of the
+account picked. Active Directory changes keep using the saved AD credential.
 
 ## Groups (Groups tab)
 
@@ -349,6 +371,11 @@ hand*. For example: the front office OU every 30 minutes during the day, everyth
 Load controls: *PCs scanned at once over WinRM* per job (default 16), and *at most N jobs at once* for the whole server
 (default 1). A job never overlaps itself, and jobs over the limit wait in a queue, first in line first. Exclusions apply
 to every job. **Run now**, enable/disable, last and next run and a per-job **History** are in the table.
+
+**Sign in with** on a scan job picks the Windows account it uses for AD, PC inventory and DC logons: *Scanning
+credentials* (each target's ticked accounts, the default) or one saved account (or this server's own account).
+*Run now* asks which account to use for that run only, starting on the job's own setting. The job's result says
+which account it signed in as. SNMP keeps its community strings.
 
 ### Live status and uptime
 
