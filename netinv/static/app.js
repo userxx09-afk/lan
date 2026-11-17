@@ -122,6 +122,10 @@ async function openAlert(id) {
     $("#alhosts").onclick = () => { $("#drawer").hidden = true; showComputers([{ field: "hostname", op: "in", value: hosts }], a.title); };
   }
   $("#altable").querySelectorAll("[data-host]").forEach((x) => x.onclick = () => { $("#drawer").hidden = true; openDevice(x.dataset.host); });
+  if (a.rows.length) {
+    $("#altable").insertAdjacentHTML("beforebegin", `<p><button class="ghost" id="aljira">Create Jira issue for this alert</button></p>`);
+    $("#aljira").onclick = () => jiraDialog("alert", id);
+  }
 }
 const exportLinks = (base) => ["xlsx", "csv", "xml"].map((f) => `<a class="link small" href="${base}/${f}" download>${{ xlsx: "Excel", csv: "CSV", xml: "XML" }[f]}</a>`).join(" · ");
 document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = async () => {
@@ -440,6 +444,8 @@ function renderAssetTab(d, tab) {
     el.innerHTML = `<form id="cform" class="cform"><textarea name="t" rows="3" placeholder="Add a note about this computer"></textarea><button>Add comment</button></form>
       ${d.comments.map((c) => `<div class="comment"><div class="muted">${esc(c.author || "")} · ${esc(c.created)}</div>${esc(c.text)}</div>`).join("") || `<p class="muted">No comments yet.</p>`}`;
     $("#cform").onsubmit = async (e) => { e.preventDefault(); const t = e.target.t.value.trim(); if (t) { await post(`/api/devices/${current}/comments`, { text: t }); openDevice(current); } };
+  } else if (tab === "jira") {
+    jiraTab(el, "pc", current);
   }
 }
 document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
@@ -893,6 +899,8 @@ async function messageDialog(host, opts = {}) {
   } catch (e) { toast(errText(e), true); }
 }
 $("#pcmessage").onclick = () => messageDialog(current);
+$("#pcjira").onclick = () => jiraDialog("pc", current);
+$("#userjira").onclick = () => jiraDialog("user", curUser);
 $("#pcaudit").onclick = () => window.open(`/api/devices/${encodeURIComponent(current)}/audit`, "_blank");
 $("#pcshot").onclick = async () => {
   const host = current;
@@ -1774,6 +1782,8 @@ function renderUserTab(tab) {
   } else if (tab === "audit") {
     el.innerHTML = `<p class="muted">Actions taken on this account from NetInventory.</p><div id="uaudit"></div>`;
     table($("#uaudit"), d.audit, ["time", "actor", "action", "result"], { cell: { result: (v) => `<span class="longtext ${/^Failed/.test(v || "") ? "pill bad" : ""}">${esc(v)}</span>` } });
+  } else if (tab === "jira") {
+    jiraTab(el, "user", curUser);
   }
   el.querySelectorAll("[data-dw]").forEach((b) => b.onclick = () => dameware(b.dataset.dw));
 }
@@ -1995,7 +2005,7 @@ let creds = [], svcAccount = null;
 const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
 const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
   if (sa && $("#svcacct")) $("#svcacct").textContent = sa.account;
@@ -2639,3 +2649,96 @@ async function editGroup(g = null, draft = null, of = null) {
   } catch (e) { toast(errText(e), true); editGroup(g, { ...body, of }); }
 }
 $("#grpnew").onclick = () => editGroup();
+
+// ------------------------------------------------------------ Jira
+const JIRA_CAT = { new: "mute", indeterminate: "warn", done: "good" };
+async function jiraTypes(select, project, want) {
+  if (!project) return;
+  try {
+    const types = await api(`/api/jira/issuetypes?project=${encodeURIComponent(project)}`);
+    const pick = want && types.includes(want) ? want : types.includes("Task") ? "Task" : types[0];
+    select.innerHTML = types.map((t) => `<option ${t === pick ? "selected" : ""}>${esc(t)}</option>`).join("");
+  } catch (e) { toast(errText(e), true); }
+}
+async function jiraDialog(kind, ref) {
+  let d;
+  try { d = await api(`/api/jira/draft?kind=${kind}&ref=${encodeURIComponent(ref)}`); } catch (e) { return toast(errText(e), true); }
+  if (!d.enabled) return toast("Jira isn't set up yet: add the site, account and API token in Settings > Jira.", true);
+  const f = await formModal(`<h3>Create Jira issue</h3>
+    <p class="hint">Labels ${d.labels.map((l) => `<code>${esc(l)}</code>`).join(" ")} and a link back to NetInventory are added, so it shows on the Jira tab.</p>
+    <label>Project <input name="project" value="${esc(d.project || "")}" placeholder="project key, like IT" required></label>
+    <label>Issue type <select name="issue_type"><option>${esc(d.issue_type || "Task")}</option></select></label>
+    <label>Summary <input name="summary" value="${esc(d.summary)}" maxlength="250" required></label>
+    <label>Description <textarea name="description" rows="12">${esc(d.description)}</textarea></label>`, true, (form) => {
+    jiraTypes(form.issue_type, d.project, d.issue_type);
+    form.project.onchange = () => { form.project.value = form.project.value.trim().toUpperCase(); jiraTypes(form.issue_type, form.project.value, d.issue_type); };
+    const s = form.summary; s.focus(); s.setSelectionRange(s.value.length, s.value.length);
+  });
+  if (!f) return;
+  try {
+    const r = await post("/api/jira/issue", { kind, ref, ...f });
+    toast(r.output);
+    drawer(`<h2>Created ${esc(r.key)}</h2><p><a class="link" href="${esc(r.url)}" target="_blank" rel="noopener">Open ${esc(r.key)} in Jira</a></p>
+      <p class="muted">It's on the Jira tab of ${kind === "alert" ? "each computer in it" : "this page"} from now on.</p>`);
+    const t = document.querySelector(".tab.active")?.id;
+    if ((t === "asset" && $("#assettabs .active")?.dataset.atab === "jira") || (t === "userpage" && $("#usertabs .active")?.dataset.utab === "jira")) refreshActive();
+  } catch (e) { toast(errText(e), true); }
+}
+async function jiraTab(el, kind, ref) {
+  el.innerHTML = `<p class="muted"><span class="spinner tiny"></span> Asking Jira…</p>`;
+  const tabBtn = document.querySelector(kind === "pc" ? `#assettabs [data-atab=jira] i` : `#usertabs [data-utab=jira] i`);
+  let r;
+  try { r = await api(`/api/jira/related?kind=${kind}&ref=${encodeURIComponent(ref)}`); } catch (e) { return toolErr(el, e); }
+  if (!r.enabled) {
+    el.innerHTML = `<p class="muted">Jira isn't set up yet. Add the site, account and API token in <a class="link" id="jiraset">Settings &gt; Jira</a>.</p>`;
+    $("#jiraset").onclick = () => showTab("settings");
+    return;
+  }
+  const open = r.issues.filter((i) => i.status_cat !== "done").length;
+  if (tabBtn) tabBtn.textContent = open ? ` ${open}` : "";
+  el.innerHTML = `<div class="libbar"><button id="jtnew">Create Jira issue</button>
+    <span class="muted">${r.issues.length ? `${r.issues.length} most recently updated, ${open} not done` : "No related issues found."}</span>
+    <span style="margin-left:auto"></span><a class="link small" href="${esc(r.search_url)}" target="_blank" rel="noopener">Open this search in Jira</a></div>
+    <p class="muted small">Issues labelled from NetInventory${kind === "user" ? ", issues this user reported" : ""}, and issues that mention the name (if turned on in Settings).</p>
+    <div id="jtlist"></div>`;
+  $("#jtnew").onclick = () => jiraDialog(kind, ref);
+  if (r.issues.length) table($("#jtlist"), r.issues, ["key", "summary", "status", "type", "assignee", "reporter", "updated"], { cell: {
+    key: (v, i) => `<a class="link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(v)}</a>`,
+    status: (v, i) => `<span class="pill ${JIRA_CAT[i.status_cat] || "mute"}">${esc(v)}</span>` } });
+}
+async function loadJira() {
+  const c = await api("/api/jira/settings"), f = $("#jiraform");
+  f.site.value = c.site || ""; f.email.value = c.email || ""; f.token.value = ""; f.project.value = c.project || "";
+  f.match_text.checked = c.match_text;
+  f.issue_type.innerHTML = `<option value="">Task</option>${c.issue_type ? `<option selected>${esc(c.issue_type)}</option>` : ""}`;
+  $("#jiraclear").hidden = !c.token_set;
+  $("#jirastate").innerHTML = kvRow("Status", c.site && c.email && c.token_set ? `<span class="pill good">set up</span> ${esc(c.site)} as ${esc(c.email)}`
+    : `<span class="pill mute">off</span> needs the site, an account e-mail and an API token`);
+  if (c.token_set && c.project) jiraTypes(f.issue_type, c.project, c.issue_type);
+}
+const jiraBody = (f) => ({ site: f.site.value, email: f.email.value, token: f.token.value || null, project: f.project.value,
+  issue_type: f.issue_type.value, match_text: f.match_text.checked });
+$("#jiraform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api("/api/jira/settings", { method: "PUT", body: JSON.stringify(jiraBody(e.target)) }); toast("Jira settings saved. Use Test connection to check them."); loadJira(); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#jiratest").onclick = async () => {
+  try { const r = await post("/api/jira/test", {}); toast(r.output, !r.ok); } catch (er) { toast(errText(er), true); }
+};
+$("#jiraclear").onclick = async () => {
+  if (!(await confirmBox("Remove the saved Jira API token? Creating issues and the Jira tabs stop working until a new one is saved."))) return;
+  try { await api("/api/jira/settings", { method: "PUT", body: JSON.stringify({ ...jiraBody($("#jiraform")), token: null, clear_token: true }) }); loadJira(); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#jirapick").onclick = async () => {
+  const f = $("#jiraform");
+  let list;
+  try { list = await api(`/api/jira/projects?q=${encodeURIComponent(f.project.value.trim())}`); } catch (er) { return toast(`${errText(er)} (save the site, account and token first)`, true); }
+  if (!list.length) return toast("No Jira projects match. Try part of the name or key.", true);
+  const pick = await formModal(`<h3>Pick the default project</h3><label>Project <select name="p">${list.map((p) => `<option value="${esc(p.key)}">${esc(p.key)}: ${esc(p.name)}</option>`).join("")}</select></label>`);
+  if (!pick) return;
+  f.project.value = pick.p;
+  jiraTypes(f.issue_type, pick.p, null);
+};
+$("#jiraform").project.onchange = (e) => { e.target.value = e.target.value.trim().toUpperCase(); };
