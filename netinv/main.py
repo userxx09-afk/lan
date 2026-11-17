@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jobs, library, reports, scanning, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, reports, scanning, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
@@ -1440,8 +1440,59 @@ def tls_csr(user=Depends(ui_auth), db=Depends(db_session)):
 
 
 class TlsIn(BaseModel):
-    data: str                 # base64 of the uploaded file
-    password: str | None = None
+    data: str | None = None       # base64 of the certificate file (or .pfx)
+    password: str | None = None   # .pfx password (or the key's, for a combined PEM)
+    format: str = "auto"          # tlscert.FORMATS
+    key: str | None = None        # base64 of a separate private key file
+    key_password: str | None = None
+    chain: str | None = None      # base64 of intermediates / CA chain (.pem bundle, .crt, .p7b)
+    thumbprint: str | None = None  # format "store": the certificate in Local Computer > Personal
+
+
+def _tls_parse(body: TlsIn) -> tuple[bytes, str | None, dict]:
+    """The upload (or store export) as install() arguments, after checking it parses and the key matches."""
+    import base64, binascii
+    from . import tlscert
+    def b64(v, what):
+        try:
+            return base64.b64decode(v) if v else None
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, f"the {what} upload is damaged; choose the file again")
+    try:
+        if body.format == "store":
+            data, pw = tlscert.store_export(body.thumbprint or "")
+        else:
+            data, pw = b64(body.data, "certificate"), body.password
+        kw = dict(key_data=b64(body.key, "key"), key_password=body.key_password, chain_data=b64(body.chain, "chain"))
+        p = tlscert.parse(body.format, data, pw, folder=str(_tls_folder()), **kw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return data, pw, {**kw, "fmt": body.format, "summary": p["summary"]}
+
+
+@app.get("/api/tls/formats", dependencies=UI)
+def tls_formats():
+    from . import tlscert
+    return {"formats": [{"id": k, "label": v} for k, v in tlscert.FORMATS.items()
+                        if k != "store" or tlscert.store_available()],
+            "store": tlscert.store_available()}
+
+
+@app.get("/api/tls/store", dependencies=UI)
+def tls_store():
+    from . import tlscert
+    if not tlscert.store_available():
+        return {"available": False, "certs": []}
+    try:
+        return {"available": True, "certs": tlscert.store_list()}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, f"couldn't read the Windows certificate store: {exc}")
+
+
+@app.post("/api/tls/check")
+def tls_check(body: TlsIn, user=Depends(ui_auth)):
+    """What the upload holds and whether it would install, without changing anything."""
+    return _tls_parse(body)[2]["summary"]
 
 
 def _restart_soon() -> None:
@@ -1455,15 +1506,18 @@ def _restart_soon() -> None:
 
 @app.post("/api/tls/import")
 def tls_import(body: TlsIn, user=Depends(ui_auth), db=Depends(db_session)):
-    import base64, os
+    import os
     from . import tlscert
     if not settings.tls_cert:
         raise HTTPException(400, "HTTPS isn't turned on in config.toml")
+    data, pw, kw = _tls_parse(body)
+    kw.pop("summary")
+    fmt = kw.pop("fmt")              # "store" arrives as a .pfx export, which install() reads as one
     try:
-        subject = tlscert.install(str(_tls_folder()), base64.b64decode(body.data), body.password)
+        subject = tlscert.install(str(_tls_folder()), data, pw, fmt, **kw)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    db.add(AuditLog(actor=user, action="tls.install", target="https", result=subject[:200]))
+    db.add(AuditLog(actor=user, action="tls.install", target="https", result=f"{body.format}: {subject}"[:200]))
     db.commit()
     as_service = os.name == "nt" and os.environ.get("NETINV_CONFIG")
     if as_service:
@@ -1668,6 +1722,130 @@ def user_action(username: str, action: str, body: UserAction, actor=Depends(ui_a
     db.add(AuditLog(actor=actor, action=f"user.{action}", target=f"user:{u.username}", result=msg))
     db.commit()
     return {"ok": ok, "output": msg}
+
+
+# ----------------------------------------------------------------- Jira
+class JiraSettingsIn(BaseModel):
+    site: str | None = None
+    email: str | None = None
+    token: str | None = None            # write-only: blank keeps the saved one
+    clear_token: bool = False
+    project: str | None = None
+    issue_type: str | None = None
+    match_text: bool = True
+
+
+def _jira(fn, *a, **kw):
+    try:
+        return fn(*a, **kw)
+    except jira.JiraError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/jira/settings", dependencies=UI)
+def jira_settings(db=Depends(db_session)):
+    return jira.config(db)
+
+
+@app.put("/api/jira/settings")
+def put_jira_settings(body: JiraSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        jira.save(db, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    c = jira.config(db)
+    db.add(AuditLog(actor=actor, action="jira.settings", target="jira",
+                    result=f"site={c['site']} account={c['email']} project={c['project']} type={c['issue_type']} "
+                           f"token={'changed' if body.token else 'cleared' if body.clear_token else 'kept'}"))
+    db.commit()
+    return c
+
+
+@app.post("/api/jira/test")
+def jira_test(actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        return {"ok": True, "output": jira.test(db)}
+    except jira.JiraError as exc:
+        return {"ok": False, "output": str(exc)}
+
+
+@app.get("/api/jira/projects", dependencies=UI)
+def jira_projects(q: str = "", db=Depends(db_session)):
+    return _jira(jira.projects, db, q)
+
+
+@app.get("/api/jira/issuetypes", dependencies=UI)
+def jira_issue_types(project: str, db=Depends(db_session)):
+    return _jira(jira.issue_types, db, project)
+
+
+def _jira_subject(db, kind: str, ref: str) -> dict:
+    """The draft for the Create dialog: summary, description, labels and the NetInventory page it links back to."""
+    if kind == "pc":
+        dev = _device(db, ref)
+        return jira.draft_pc(reports.run_query(db, "v_devices", filters=[{"field": "hostname", "op": "eq", "value": dev.hostname}], limit=1)["rows"][0])
+    if kind == "user":
+        u = ref.split("\\")[-1].lower()
+        info = reports.run_query(db, "v_users", filters=[{"field": "username", "op": "eq", "value": u}], limit=1)["rows"]
+        last = db.execute(text("SELECT hostname FROM v_user_devices WHERE username = :u ORDER BY last_logon DESC LIMIT 1"), {"u": u}).scalar()
+        return jira.draft_user(info[0] if info else {"username": u}, last)
+    if kind == "alert":
+        try:
+            return jira.draft_alert(alerts.rows(db, ref))
+        except KeyError:
+            raise HTTPException(404, "unknown alert")
+    raise HTTPException(404)
+
+
+@app.get("/api/jira/draft", dependencies=UI)
+def jira_draft(kind: str, ref: str, db=Depends(db_session)):
+    d = _jira_subject(db, kind, ref)
+    c = jira.config(db)
+    return {**d, "project": c["project"], "issue_type": c["issue_type"], "enabled": jira.enabled(db)}
+
+
+class JiraIssueIn(BaseModel):
+    kind: str
+    ref: str
+    project: str | None = None
+    issue_type: str | None = None
+    summary: str
+    description: str = Field("", max_length=30000)
+
+
+@app.post("/api/jira/issue")
+def jira_create(body: JiraIssueIn, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    d = _jira_subject(db, body.kind, body.ref)       # labels and back-link come from the server, not the browser
+    from .agentpush import server_url
+    link = f"{server_url(db, str(request.base_url))}/{d['path']}"
+    target = {"pc": f"computer:{norm_host(body.ref)}", "user": f"user:{body.ref.split(chr(92))[-1].lower()}"}.get(body.kind, f"alert:{body.ref}")
+    try:
+        r = jira.create(db, body.project, body.issue_type, body.summary, body.description, d["labels"], link, d["link_title"])
+    except jira.JiraError as exc:
+        db.add(AuditLog(actor=actor, action="jira.create", target=target, result=f"failed: {exc}"[:500]))
+        db.commit()
+        raise HTTPException(400, str(exc))
+    db.add(AuditLog(actor=actor, action="jira.create", target=target, result=f"{r['key']} {body.summary[:200]}"))
+    db.commit()
+    return {"ok": True, **r, "output": f"Created {r['key']} in Jira."}
+
+
+@app.get("/api/jira/related", dependencies=UI)
+def jira_related(kind: str, ref: str, db=Depends(db_session)):
+    if not jira.enabled(db):
+        return {"enabled": False, "issues": []}
+    if kind == "pc":
+        name, account = _device(db, ref).hostname, None
+    elif kind == "user":
+        name = ref.split("\\")[-1].lower()
+        ad = db.scalar(select(AdUser).where(AdUser.username == name))
+        account = jira.find_account(db, ad.email if ad else None)
+    else:
+        raise HTTPException(404)
+    jql = _jira(jira.related_jql, db, kind, name, account)
+    site = get_setting(db, "jira:site")
+    return {"enabled": True, "issues": _jira(jira.search, db, jql), "jql": jql,
+            "search_url": f"{site}/issues/?jql={__import__('urllib.parse').parse.quote(jql)}"}
 
 
 # ----------------------------------------------------------------- alerts + report library

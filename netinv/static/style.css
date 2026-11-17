@@ -123,11 +123,18 @@ button:disabled { opacity: .45; cursor: default; }
 .lifeform { display: grid; gap: 8px; margin-top: 8px; }
 .lifeform label { display: grid; grid-template-columns: 100px 1fr auto; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
 .lifeform button { justify-self: start; }
+.lifeform label.check { display: flex; gap: 8px; color: var(--text); }
+.lifeform label.check input { width: auto; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .chip { background: var(--accent-soft); color: var(--text); padding: 2px 10px; border-radius: 99px; font-size: 12.5px; }
 .chip a { cursor: pointer; color: var(--muted); margin-left: 4px; }
 .inline { display: flex; gap: 6px; flex-wrap: wrap; } .inline input { flex: 1; min-width: 100px; }
-.tlsform { margin-top: 10px; } .tlshelp { margin: 8px 0; } .tlshelp p { margin: 6px 0; }
+.tlsform { margin-top: 10px; display: grid; gap: 6px; max-width: 640px; }
+.tlsform .tlsfmt { display: grid; gap: 4px; } .tlsform .tlsrow { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 8px; align-items: center; }
+.tlsform .tlsrow > span { color: var(--muted); font-size: 12.5px; } .tlsform p.small { margin: 0; }
+#tlspreview .kvr { grid-template-columns: 120px minmax(0, 1fr); } #tlspreview { margin-top: 6px; }
+@media (max-width: 600px) { .tlsform .tlsrow { grid-template-columns: 1fr; gap: 2px; } }
+ .tlshelp { margin: 8px 0; } .tlshelp p { margin: 6px 0; }
 a.button { display: inline-block; text-decoration: none; font: inherit; border-radius: 6px; padding: 7px 12px; cursor: pointer; }
 a.button.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
 .exclform { margin: 10px 0; } .exclform input[name=value] { flex: 3; min-width: 220px; } .exclfilter { margin-bottom: 8px; } .exclfilter input { max-width: 340px; }

@@ -95,7 +95,14 @@ auto_install = false    # true installs new versions without waiting for a click
   dashboard runs on `https://<server>:<port>/`. Browsers warn about a self-signed certificate. To stop that, go to
   Settings > HTTPS certificate: download the certificate and trust it on PCs by GPO (Trusted Root Certification
   Authorities), or create a request for AD CS (`certreq -submit -attrib "CertificateTemplate:WebServer" ...`) and install
-  the certificate it returns, or upload a .pfx. NetInventory never sends HSTS. If Edge or Chrome says a server "uses HSTS"
+  the certificate it returns, or install a certificate you already have. *Format* offers: **Detect from the file**,
+  **PFX / PKCS#12** (.pfx/.p12 with its password), **Certificate for the request made here** (.cer/.crt/.pem in PEM or
+  DER, or a .p7b chain), **Certificate + separate private key** (.crt/.cer/.pem + .key: PKCS#8, RSA or EC, encrypted
+  keys take a password), **One PEM file with certificate and key**, and on Windows **From this server's certificate
+  store** (Local Computer > Personal, key must be exportable). Intermediate/CA certificates can be added as an optional
+  chain file (.pem bundle, .crt or .p7b). *Check* shows the subject, names, validity, chain and whether the key matches
+  (plus warnings: wrong server name, no Server Authentication usage, expiring soon, chain missing) before anything is
+  changed; *Install certificate* checks again, keeps the old files as tls.crt.bak / tls.key.bak, and restarts the service. NetInventory never sends HSTS. If Edge or Chrome says a server "uses HSTS"
   and offers no way past the warning, it remembered HSTS from another site that used the same server name: delete the name
   under `edge://net-internals/#hsts` (or `chrome://net-internals/#hsts`), Delete domain security policies.
 - **Scanning exclusions:** Settings > Scanning exclusions lists IP addresses or ranges, host names (wildcards), AD OUs
@@ -434,6 +441,27 @@ single-label computer names, private IP addresses and names ending in an allowed
 can't point DameWare (and the technician's Windows logon) at an outside host. Links never contain passwords.
 Check the switches against your DameWare version with `DWRCC.exe -?`. Browsers ask before opening the link; to skip the
 prompt for the NetInventory site, use the Edge/Chrome policy *AutoLaunchProtocolsFromOrigins*.
+
+## Jira (Settings > Jira)
+
+Create a Jira issue from a computer, a user or a dashboard alert, and see the related issues on the **Jira** tab of
+each computer and user page. Works with Jira Cloud (`https://yourcompany.atlassian.net`).
+
+Setup: in Settings > Jira enter the site, a Jira account's e-mail and an API token
+(id.atlassian.com > Security > API tokens). A dedicated service account that can create issues in the right
+projects works best; issues are created as that account. Pick a default project (*Find* lists the projects the account
+can create in) and issue type, save, then click *Test connection*. The token is encrypted on the server like the scan
+credentials and never shown again. The server needs outbound HTTPS to `*.atlassian.net`.
+
+- **Create Jira issue** (computer page, user page, alert drawer) opens a dialog prefilled with the inventory facts:
+  computer, OS, IP, model, serial, last user and switch port, or the user's name, e-mail, department and last PC, or
+  the alert and the computers in it. Edit anything before clicking OK. Nothing is sent to Jira until then, and no
+  passwords, keys or recovery keys are ever included. Each create is in the audit log.
+- Every issue gets the labels `netinv`, `netinv-<computer>` and/or `netinv-user-<username>` (alerts also
+  `netinv-alert-<rule>`) and a web link back to the NetInventory page.
+- The **Jira** tab lists the 25 most recently updated issues with those labels, issues the user reported (found by
+  their e-mail, which covers service desk requests), and, unless turned off in Settings, issues that mention the
+  computer or user name anywhere. *Open this search in Jira* opens the same JQL in Jira.
 
 ## Setup checklist for your environment
 

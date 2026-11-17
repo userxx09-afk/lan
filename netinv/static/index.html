@@ -128,6 +128,8 @@
         <button class="act" id="pcshot">Screenshot of the user's screen</button>
         <h3>Report</h3>
         <button class="act" id="pcaudit">Audit report (printable)</button>
+        <h3>Jira</h3>
+        <button class="act" id="pcjira">Create Jira issue</button>
       </aside>
       <div class="assetmain">
         <div id="assettitle"></div>
@@ -157,6 +159,7 @@
           <button data-atab="deployments">Deployments<i></i></button>
           <button data-atab="history">History<i></i></button>
           <button data-atab="comments">Comments<i></i></button>
+          <button data-atab="jira">Jira<i></i></button>
         </nav>
         <div id="assetbody"></div>
       </div>
@@ -227,6 +230,8 @@
         <h3>Copy</h3>
         <button class="act" data-uact="copy_email">Copy e-mail address</button>
         <button class="act" data-uact="copy_dn">Copy distinguished name</button>
+        <h3>Jira</h3>
+        <button class="act" id="userjira">Create Jira issue</button>
       </aside>
       <div class="assetmain">
         <div id="usertitle"></div>
@@ -236,6 +241,7 @@
           <button data-utab="groups">Groups<i></i></button>
           <button data-utab="logons">Logons<i></i></button>
           <button data-utab="audit">Audit<i></i></button>
+          <button data-utab="jira">Jira<i></i></button>
         </nav>
         <div id="userbody"></div>
       </div>
@@ -313,6 +319,23 @@
         </form>
         <div id="authstate" class="muted"></div>
       </div>
+      <div class="panel" id="jirapanel">
+        <h3>Jira</h3>
+        <p class="muted">Create Jira issues from a computer, a user or an alert, and see the issues related to each one on its Jira tab.
+          Use a Jira account's e-mail and an API token (<a class="link" href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com &gt; Security &gt; API tokens</a>);
+          a dedicated service account with access to the right projects works best. The token is encrypted on this server and never shown again.
+          Nothing is sent to Jira until someone clicks Create, and only inventory facts go in, never passwords or recovery keys.</p>
+        <form id="jiraform" class="lifeform">
+          <label>Jira site <input name="site" placeholder="https://yourcompany.atlassian.net"></label>
+          <label>Account e-mail <input name="email" autocomplete="off" placeholder="svc-netinventory@example.org"></label>
+          <label>API token <input name="token" type="password" autocomplete="new-password" placeholder="blank = keep the saved token"></label>
+          <label>Default project <span class="row"><input name="project" placeholder="project key, like IT" style="flex:1"><button type="button" class="ghost" id="jirapick">Find</button></span></label>
+          <label>Default issue type <select name="issue_type"><option value="">Task</option></select></label>
+          <label class="check"><input type="checkbox" name="match_text"> Also show issues that mention the computer or user name (not only ones created here)</label>
+          <div class="row"><button>Save</button><button type="button" class="ghost" id="jiratest">Test connection</button><button type="button" class="ghost danger" id="jiraclear" hidden>Remove token</button></div>
+        </form>
+        <div id="jirastate" class="muted"></div>
+      </div>
       <div class="panel" id="agentpanel">
         <h3>NetInventory Agent (optional)</h3>
         <p class="muted">For laptops and PCs that WinRM can't reach. A tiny scheduled task (as LOCAL SERVICE) sends a signed heartbeat every 5 minutes and the inventory once a day or when you click Rescan.
@@ -330,13 +353,35 @@
           <p><b>Or use a certificate from your AD Certificate Services.</b> Click <i>Create request for AD CS</i> to download NetInventory.req (the key stays on this server), then on any domain PC run
             <code>certreq -submit -attrib "CertificateTemplate:WebServer" NetInventory.req NetInventory.cer</code>
             (or paste the request into your CA's <code>/certsrv</code> page), and install the .cer it returns with <i>Install certificate</i>. Domain PCs already trust your CA, so no GPO is needed.</p>
-          <p><b>Or upload a .pfx</b> exported with its private key from any CA.</p>
+          <p><b>Or install a certificate you already have</b> in any of the formats below.</p>
         </details>
         <div class="row"><a class="button ghost" href="/api/tls/cert.cer" id="tlsdl">Download certificate</a><button class="ghost" id="tlscsr">Create request for AD CS</button></div>
-        <form id="tlsform" class="inline tlsform">
-          <input type="file" name="file" accept=".cer,.crt,.pem,.pfx,.p12" required>
-          <input type="password" name="password" placeholder=".pfx password (if any)" autocomplete="new-password">
-          <button>Install certificate</button>
+        <form id="tlsform" class="tlsform">
+          <label class="tlsfmt">Format
+            <select name="format" id="tlsfmt">
+              <option value="auto">Detect from the file</option>
+              <option value="pfx">PFX / PKCS#12 (.pfx, .p12) with its password</option>
+              <option value="request">Certificate for the request made here (.cer, .crt, .pem, .p7b)</option>
+              <option value="pem_key">Certificate + separate private key (.crt/.cer/.pem + .key)</option>
+              <option value="pem_combined">One PEM file with certificate and key (.pem)</option>
+              <option value="store" id="tlsfmtstore" hidden>From this server's Windows certificate store</option>
+            </select>
+          </label>
+          <p class="muted small" id="tlsfmthint"></p>
+          <div class="tlsrow" data-for="auto pfx request pem_key pem_combined"><span id="tlscertlabel">Certificate file</span>
+            <input type="file" name="file" accept=".pfx,.p12,.cer,.crt,.pem,.der,.p7b,.p7c,.key"></div>
+          <div class="tlsrow" data-for="auto pfx"><span>.pfx password</span>
+            <input type="password" name="password" placeholder="leave empty if none" autocomplete="new-password"></div>
+          <div class="tlsrow" data-for="auto pem_key"><span>Private key file</span>
+            <input type="file" name="key" accept=".key,.pem,.der"></div>
+          <div class="tlsrow" data-for="auto pem_key pem_combined"><span>Key password</span>
+            <input type="password" name="key_password" placeholder="only if the key is encrypted" autocomplete="new-password"></div>
+          <div class="tlsrow" data-for="auto request pem_key pem_combined"><span>Chain (optional)</span>
+            <input type="file" name="chain" accept=".pem,.crt,.cer,.p7b,.p7c"></div>
+          <div class="tlsrow" data-for="store"><span>Certificate</span>
+            <select name="thumbprint" id="tlsstore"><option value="">Loading…</option></select></div>
+          <div class="row"><button type="button" class="ghost" id="tlscheck">Check</button><button>Install certificate</button></div>
+          <div id="tlspreview"></div>
         </form>
       </div>
       <div class="panel">
