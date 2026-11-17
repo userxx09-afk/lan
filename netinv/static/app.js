@@ -24,7 +24,7 @@ function table(el, rows, cols, opts = {}) {
     let data = f ? rows.filter((r) => cols.some((c) => String(r[c] ?? "").toLowerCase().includes(f))) : rows.slice();
     if (sortKey) data.sort((a, b) => (a[sortKey] ?? "") > (b[sortKey] ?? "") ? dir : (a[sortKey] ?? "") < (b[sortKey] ?? "") ? -dir : 0);
     const head = cols.map((c) => `<th data-k="${c}">${esc(opts.labels?.[c] ?? c.replaceAll("_", " "))}${sortKey === c ? (dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("");
-    const body = data.slice(0, 2000).map((r) => `<tr>${cols.map((c) => {
+    const body = data.slice(0, 2000).map((r, i) => `<tr${opts.rowClick ? ` data-ri="${i}" class="clickrow" title="${esc(opts.rowTitle || "")}"` : ""}>${cols.map((c) => {
       const v = r[c];
       const cell = opts.cell?.[c] ? opts.cell[c](v, r) : esc(/(_seen|logon|_report|_patch|_boot|time|collected|polled|created)/.test(c) ? fmtDate(v) : v);
       return `<td class="${typeof v === "number" ? "num" : ""}">${cell}</td>`;
@@ -34,6 +34,9 @@ function table(el, rows, cols, opts = {}) {
     el.querySelectorAll("th").forEach((th) => th.onclick = () => { dir = sortKey === th.dataset.k ? -dir : 1; sortKey = th.dataset.k; render(); });
     el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
     el.querySelectorAll("[data-user]").forEach((a) => a.onclick = () => openUser(a.dataset.user));
+    if (opts.rowClick) el.querySelectorAll("tr[data-ri]").forEach((tr) => tr.onclick = (e) => {
+      if (!e.target.closest("[data-host],[data-user]")) opts.rowClick(data[+tr.dataset.ri]);
+    });
   };
   if (opts.filterEl) opts.filterEl.oninput = render;
   render();
@@ -1195,6 +1198,7 @@ function setSpec(spec) {
   $("#filters").innerHTML = "";
   (spec.filters || []).forEach(addFilter);
   $("#result").innerHTML = "";
+  $("#resbar").hidden = true;
 }
 function addFilter(f = {}) {
   const row = document.createElement("div");
@@ -1216,7 +1220,10 @@ async function runReport() {
   try {
     const r = await post("/api/query", spec());
     table($("#result"), r.rows, r.columns, { cell: { hostname: hostLink, username: userLink } });
-  } catch (e) { $("#result").innerHTML = `<p class="pill bad">${esc(e.message)}</p>`; }
+    $("#resbar").innerHTML = "";
+    listButton($("#resbar"), r.rows, r.rows.length ? spec() : null, $("#rname").value.trim() || "Report");
+    $("#resbar").hidden = !$("#resbar").children.length;
+  } catch (e) { $("#resbar").hidden = true; $("#result").innerHTML = `<p class="pill bad">${esc(e.message)}</p>`; }
 }
 $("#run").onclick = runReport;
 $("#csv").onclick = () => download("/api/export/csv", spec());
@@ -1254,9 +1261,38 @@ async function runLibrary(id) {
     const r = await api(`/api/library/${id}`);
     $("#libtitle").innerHTML = `<div class="libbar"><b>${esc(meta.name)}</b><span class="muted">${r.rows.length} row${r.rows.length === 1 ? "" : "s"}</span>
       ${exportLinks(`/api/library/${id}/export`)}${meta.kind === "spec" ? ` <button class="ghost" id="tobuilder">Open in report builder</button>` : ""}</div>`;
-    table($("#libresult"), r.rows, r.columns, { cell: LINKS });
+    const libBar = $("#libtitle .libbar");
+    if (meta.drill) {
+      // Summary report: each row (an OS, a model, an app...) opens the Computers list narrowed to the PCs it counts.
+      const n = meta.drill.count;
+      table($("#libresult"), r.rows, r.columns, { cell: { ...LINKS, [n]: (v) => `<a class="link">${esc(v)} ›</a>` },
+        rowTitle: "Show these computers in the Computers list", rowClick: (row) => drillLibrary(id, row) });
+      libBar.insertAdjacentHTML("beforeend", `<span class="muted small">Click a row to list those computers.</span>`);
+    } else {
+      table($("#libresult"), r.rows, r.columns, { cell: LINKS });
+      listButton(libBar, r.rows, meta.spec, meta.name);
+    }
     if ($("#tobuilder")) $("#tobuilder").onclick = async () => { repTab("builder"); await loaders.reports(); setSpec(meta.spec); $("#rname").value = ""; runReport(); };
   } catch (e) { $("#libresult").innerHTML = `<p class="pill bad">${esc(e.message)}</p>`; }
+}
+
+async function drillLibrary(id, row) {
+  try {
+    const d = await post(`/api/library/${id}/drill`, { row });
+    if (!d.filters.length) return toast("No computers match this row any more.", true);
+    showComputers(d.filters, d.title);
+  } catch (e) { toast(errText(e), true); }
+}
+// "Show in Computers list" for a report whose rows are computers: a report on v_devices passes its own filters
+// (so the list stays live and pages past 2000 rows); any other report passes the host names it returned.
+function listButton(bar, rows, sp, title) {
+  const hosts = [...new Set(rows.map((r) => r.hostname).filter(Boolean))];
+  const direct = sp?.dataset === "v_devices";
+  if (!bar || (!direct && !hosts.length)) return;
+  bar.insertAdjacentHTML("beforeend", `<button class="ghost" data-tolist>Show ${direct ? "" : hosts.length + " "}in Computers list</button>`);
+  bar.querySelector("[data-tolist]").onclick = () => showComputers(direct
+    ? (sp.filters || []).filter((f) => f.field && (f.value !== "" || ["empty", "not_empty"].includes(f.op)))
+    : [{ field: "hostname", op: "in", value: hosts }], title);
 }
 
 // ------------------------------------------------------------ settings: credentials, scan targets, schedule, DameWare

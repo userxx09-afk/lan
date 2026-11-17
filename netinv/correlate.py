@@ -65,7 +65,8 @@ VIEWS: dict[str, str] = {
     # One wide row per PC: the "pull this field and that" table.
     "v_devices": """
         SELECT d.hostname, d.fqdn,
-               COALESCE(d.os_caption, d.ad_os) AS os, d.os_display_version, d.os_build,
+               COALESCE(d.os_caption, d.ad_os) AS os, COALESCE(d.os_display_version, AD_DISPLAY_VERSION_) AS os_display_version,
+               d.os_build,
                d.manufacturer, d.model, d.serial, d.cpu, d.ram_gb,
                d.ad_enabled, d.ad_last_logon, d.ad_created, d.ad_dn,
                d.current_user,
@@ -144,6 +145,19 @@ VIEWS["v_audit"] = """
 VIEWS["v_changes"] = """
     SELECT c.time, d.hostname, c.kind, c.detail FROM change_events c JOIN devices d ON d.id = c.device_id
 """
+
+# PCs that were only read from AD (no WinRM/agent inventory yet) have no DisplayVersion, only AD's
+# operatingSystemVersion, e.g. "10.0 (22631)". Map the build number to the release name so reports
+# like "Computers by OS and version" aren't blank for them. Builds missing here show AD's string as is.
+AD_BUILDS = {
+    "10240": "1507", "10586": "1511", "14393": "1607", "15063": "1703", "16299": "1709", "17134": "1803",
+    "17763": "1809", "18362": "1903", "18363": "1909", "19041": "2004", "19042": "20H2", "19043": "21H1",
+    "19044": "21H2", "19045": "22H2", "20348": "21H2", "22000": "21H2", "22621": "22H2", "22631": "23H2",
+    "25398": "23H2", "26100": "24H2", "26200": "25H2",
+}
+AD_DISPLAY_VERSION = ("CASE " + " ".join(f"WHEN d.ad_os_version LIKE '%({b})%' THEN '{v}'" for b, v in AD_BUILDS.items())
+                      + " WHEN d.ad_os_version LIKE '%(%)%' THEN d.ad_os_version END")
+VIEWS["v_devices"] = VIEWS["v_devices"].replace("AD_DISPLAY_VERSION_", AD_DISPLAY_VERSION)
 
 VIEW_ORDER = ["v_port_map", "v_user_devices", "v_disks", "v_software", "v_updates", "v_logons",
               "v_switch_ports", "v_network_devices", "v_domain_controllers", "v_devices", "v_changes",

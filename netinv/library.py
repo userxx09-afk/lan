@@ -53,7 +53,7 @@ LIBRARY: list[tuple[str, str, str, dict]] = [
     ("as_groups", "Assets", "Computers by group", {"sql": "SELECT g.name AS group_name, COUNT(*) AS computers FROM device_groups g GROUP BY g.name ORDER BY computers DESC"}),
     ("as_av", "Assets", "Antivirus status", {"spec": S("v_devices", ["hostname", "role", "av_name", "av_enabled", "av_up_to_date", "inventory_last_collected"], sort="av_name")}),
 
-    ("os_versions", "Operating system", "Computers by OS and version", {"sql": "SELECT os, os_display_version AS version, COUNT(*) AS computers FROM v_devices GROUP BY os, os_display_version ORDER BY computers DESC"}),
+    ("os_versions", "Operating system", "Computers by OS and version", {"sql": "SELECT COALESCE(os, '(not reported)') AS os, os_display_version AS version, COUNT(*) AS computers FROM v_devices GROUP BY 1, 2 ORDER BY computers DESC"}),
     ("os_builds", "Operating system", "Computers by build", {"sql": "SELECT os, os_display_version AS version, os_build AS build, COUNT(*) AS computers FROM v_devices WHERE os_build IS NOT NULL GROUP BY 1,2,3 ORDER BY 1,2,3"}),
     ("os_pending", "Operating system", "Pending Windows updates", {"spec": S("v_updates", ["hostname", "kb", "title", "severity"], [F("status", "eq", "pending")], "hostname")}),
     ("os_uptime", "Operating system", "Uptime more than 30 days", {"spec": S("v_devices", ["hostname", "os", "last_boot", "last_user"], [F("last_boot", "lt", "30d")], "last_boot")}),
@@ -81,9 +81,66 @@ LIBRARY: list[tuple[str, str, str, dict]] = [
 ]
 
 
+# Drill-down for the summary reports (one row per OS, model, app...): clicking a row opens the Computers list
+# narrowed to the PCs counted in it. "keys" maps a report column to the column it came from in "ds";
+# "map" turns a shown label back into the stored value (None = empty); "where" repeats the report's own
+# condition; "count" is the column that holds the number of computers (shown as a link).
+NOT_REPORTED = "(not reported)"
+DRILL: dict[str, dict] = {
+    "os_versions": {"ds": "v_devices", "keys": {"os": "os", "version": "os_display_version"},
+                    "map": {"os": {NOT_REPORTED: None}}, "count": "computers"},
+    "os_builds": {"ds": "v_devices", "keys": {"os": "os", "version": "os_display_version", "build": "os_build"}, "count": "computers"},
+    "as_models": {"ds": "v_devices", "keys": {"manufacturer": "manufacturer", "model": "model"}, "count": "computers"},
+    "as_dup_serial": {"ds": "v_devices", "keys": {"serial": "serial"}, "count": "computers"},
+    "ad_comp_enabled": {"ds": "v_devices", "keys": {"state": "ad_enabled"}, "map": {"state": {"Enabled": "1", "Disabled": "0"}},
+                        "count": "computers"},
+    "as_groups": {"ds": "group", "keys": {"group_name": "name"}, "count": "computers"},
+    "sw_titles": {"ds": "v_software", "keys": {"name": "name", "publisher": "publisher"}, "count": "computers"},
+    "sw_versions": {"ds": "v_software", "keys": {"name": "name", "version": "version"}, "count": "computers"},
+    "sw_outdated_apps": {"ds": "v_software", "keys": {"name": "name", "catalog_id": "catalog_id"},
+                         "where": "status = 'outdated'", "count": "computers_behind"},
+    "sw_unknown": {"ds": "v_software", "keys": {"name": "name", "publisher": "publisher"},
+                   "where": "(status = 'unknown' OR status IS NULL)", "count": "computers"},
+    "sw_catalog_status": {"ds": "v_software", "keys": {"status": "status"}, "map": {"status": {"not checked": None}},
+                          "count": "computers"},
+    "net_per_switch": {"ds": "v_port_map", "keys": {"switch_name": "switch_name"}, "count": "known_computers"},
+}
+
+
 def catalog() -> list[dict]:
-    return [{"id": i, "category": c, "name": n, "kind": "spec" if "spec" in d else "sql", "spec": d.get("spec")}
+    return [{"id": i, "category": c, "name": n, "kind": "spec" if "spec" in d else "sql", "spec": d.get("spec"),
+             "drill": {"count": DRILL[i]["count"]} if i in DRILL else None}
             for i, c, n, d in LIBRARY]
+
+
+def drill(db: Session, rid: str, row: dict) -> dict:
+    """Computers-list filters for one row of a summary report: column filters when the report reads v_devices
+    (so the list stays live), otherwise the matching host names."""
+    if rid not in DRILL:
+        raise KeyError(rid)
+    d = DRILL[rid]
+    vals = {}
+    for k, col in d["keys"].items():
+        v = row.get(k)
+        v = d.get("map", {}).get(k, {}).get(v, v)
+        vals[col] = None if v in (None, "") else v
+    title = " ".join(str(row.get(k)) for k in d["keys"] if row.get(k) not in (None, "")) or "(blank)"
+    if d["ds"] == "v_devices":
+        return {"title": title, "filters": [{"field": c, "op": "empty"} if v is None else {"field": c, "op": "eq", "value": v}
+                                            for c, v in vals.items()]}
+    if d["ds"] == "group":
+        from . import groups
+        hosts = groups.hosts(db, vals["name"] or "")
+        db.commit()
+    else:
+        where, params = ["hostname IS NOT NULL"] + ([d["where"]] if d.get("where") else []), {}
+        for i, (c, v) in enumerate(vals.items()):
+            where.append(f'"{c}" IS NULL' if v is None else f'"{c}" = :k{i}')
+            if v is not None:
+                params[f"k{i}"] = v
+        hosts = [h for (h,) in db.execute(text(f"SELECT DISTINCT hostname FROM {d['ds']} WHERE " + " AND ".join(where)
+                                                + " ORDER BY hostname"), params)]
+    return {"title": title, "filters": [{"field": "hostname", "op": "in", "value": hosts}] if hosts else [], "count": len(hosts)}
 
 
 def run(db: Session, rid: str) -> dict:
