@@ -98,6 +98,7 @@ VIEWS: dict[str, str] = {
                (SELECT STRING_AGG_(g.name) FROM device_groups g WHERE g.device_id = d.id) AS groups,
                (SELECT COUNT(*) FROM v_logons l WHERE l.hostname = d.hostname) AS logon_events,
                CASE WHEN d.ad_dn IS NULL THEN NULL ELSE SUBSTR(d.ad_dn, STRPOS_(d.ad_dn, ',') + 1) END AS ou,
+               DOMAIN_ AS domain,
                CASE WHEN LOWER(COALESCE(d.os_caption, d.ad_os, '')) LIKE '%server%' THEN 'Server' ELSE 'Workstation' END AS role,
                d.av_name, d.av_enabled, d.av_up_to_date, d.scan_error_kind, d.scan_error, d.scan_error_time,
                d.ad_description, d.ad_location,
@@ -162,7 +163,12 @@ AD_BUILDS = {
 }
 AD_DISPLAY_VERSION = ("CASE " + " ".join(f"WHEN d.ad_os_version LIKE '%({b})%' THEN '{v}'" for b, v in AD_BUILDS.items())
                       + " WHEN d.ad_os_version LIKE '%(%)%' THEN d.ad_os_version END")
-VIEWS["v_devices"] = VIEWS["v_devices"].replace("AD_DISPLAY_VERSION_", AD_DISPLAY_VERSION)
+# The PC's AD domain: the DC= parts of its distinguished name (CN=PC1,OU=PCs,DC=corp,DC=example,DC=com ->
+# corp.example.com), else the DNS suffix of its FQDN (pc1.corp.example.com -> corp.example.com).
+DOMAIN = ("CASE WHEN STRPOS_(UPPER(COALESCE(d.ad_dn, '')), 'DC=') > 0 THEN "
+          "LOWER(REPLACE(REPLACE(SUBSTR(UPPER(d.ad_dn), STRPOS_(UPPER(d.ad_dn), 'DC=')), ',DC=', '.'), 'DC=', '')) "
+          "WHEN STRPOS_(COALESCE(d.fqdn, ''), '.') > 0 THEN LOWER(SUBSTR(d.fqdn, STRPOS_(d.fqdn, '.') + 1)) END")
+VIEWS["v_devices"] = VIEWS["v_devices"].replace("AD_DISPLAY_VERSION_", AD_DISPLAY_VERSION).replace("DOMAIN_", DOMAIN)
 
 VIEW_ORDER = ["v_port_map", "v_user_devices", "v_disks", "v_software", "v_updates", "v_logons",
               "v_switch_ports", "v_network_devices", "v_domain_controllers", "v_devices", "v_changes",

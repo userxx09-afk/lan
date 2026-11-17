@@ -309,3 +309,11 @@ fieldset.bulkf { border: 0; padding: 0; margin: 0; }
 .whylist li { margin: 2px 0; word-break: break-word; }
 .faillist { max-height: 260px; overflow: auto; margin-top: 4px; font-size: 12px; }
 .faillist div { padding: 2px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.15)); word-break: break-word; }
+
+/* Computers column picker */
+.colpicker ol { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+.colpicker li { display: flex; gap: 10px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.colpicker li:last-child { border-bottom: 0; }
+.colpicker li span { flex: 1; }
+.colpicker li.fixed { color: var(--muted); }
+.colpicker li a[hidden] { visibility: hidden; display: inline !important; }

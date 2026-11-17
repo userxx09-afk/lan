@@ -133,18 +133,51 @@ document.querySelectorAll("[data-collect]").forEach((b) => b.onclick = async () 
 });
 
 // ------------------------------------------------------------ asset grid (server-side paging + per-column filters)
-const GRID_COLS = [
-  ["hostname", "Name"], ["uptime", "Uptime"], ["os", "OS"], ["os_display_version", "Version"], ["last_user", "Last user"], ["model", "Model"],
-  ["manufacturer", "Manufacturer"], ["ip", "IP address"], ["mac", "MAC address"], ["switch_name", "Switch"],
-  ["switch_port", "Port"], ["ou", "OU"], ["groups", "Groups"], ["state", "State"], ["min_disk_pct_free", "Disk free"],
-  ["pending_updates", "Updates"], ["first_seen", "First seen"], ["last_seen", "Last seen"], ["inventory_last_collected", "Last scan"],
-  ["agent_status", "Agent"],
-];
-const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, preset: [], selected: new Set(), total: 0, rows: [] };
+// Columns the Computers list shows by default. Each user can add and remove columns (Columns… button);
+// the choice is saved on the server per signed-in user, so it follows them to any PC.
+const DEFAULT_COLS = ["hostname", "uptime", "os", "os_display_version", "last_user", "model", "manufacturer", "ip", "mac",
+  "switch_name", "switch_port", "ou", "groups", "state", "min_disk_pct_free", "pending_updates", "first_seen", "last_seen",
+  "inventory_last_collected", "agent_status"];
+const COL_LABELS = {
+  hostname: "Name", uptime: "Uptime", os: "OS", os_display_version: "Version", last_user: "Last user", model: "Model",
+  manufacturer: "Manufacturer", ip: "IP address", mac: "MAC address", switch_name: "Switch", switch_port: "Port", ou: "OU",
+  groups: "Groups", state: "State", min_disk_pct_free: "Disk free", pending_updates: "Updates", first_seen: "First seen",
+  last_seen: "Last seen", inventory_last_collected: "Last scan", agent_status: "Agent", domain: "Domain", fqdn: "FQDN",
+  os_build: "OS build", serial: "Serial number", cpu: "CPU", ram_gb: "RAM (GB)", gpu: "GPU", ad_enabled: "AD enabled",
+  ad_last_logon: "AD last logon", ad_created: "AD created", ad_dn: "AD distinguished name", current_user: "Signed-in user",
+  last_user_logon: "Last user logon", last_boot: "Last boot", pending_reboot: "Reboot pending", last_patch_installed: "Last patch",
+  c_free_gb: "C: free (GB)", min_disk_free_gb: "Least disk free (GB)", software_count: "Apps", vlan: "VLAN",
+  port_last_seen: "Port last seen", asset_location: "Asset location", purchase_date: "Purchased", warranty_end: "Warranty ends",
+  logon_events: "Logon events", role: "Role", av_name: "Antivirus", av_enabled: "AV on", av_up_to_date: "AV up to date",
+  scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
+  ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
+  agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks",
+};
+const HIDDEN_COLS = new Set(["online_checked", "online_changed", "online_via", "agent_note"]);   // shown via the status dot / tooltips
+const BOOL_COLS = new Set(["ad_enabled", "pending_reboot", "av_enabled", "av_up_to_date", "online"]);
+const colLabel = (c) => COL_LABELS[c] || c.replace(/_/g, " ").replace(/^./, (x) => x.toUpperCase());
+let GRID_COLS = DEFAULT_COLS.map((c) => [c, colLabel(c)]);
+let gridColsLoaded = null;
+async function loadGridCols() {
+  try {
+    const p = await api("/api/prefs/computers");
+    if (Array.isArray(p.columns) && p.columns.length) setGridCols(p.columns);
+  } catch {}
+}
+function setGridCols(cols) {
+  cols = cols.filter((c, i) => c !== "hostname" && cols.indexOf(c) === i);
+  GRID_COLS = ["hostname", ...cols].map((c) => [c, colLabel(c)]);
+  const keep = new Set(GRID_COLS.map((c) => c[0]));
+  Object.keys(grid.filters).forEach((k) => { if (!keep.has(k)) delete grid.filters[k]; });
+  if (!keep.has(grid.sort)) { grid.sort = "hostname"; grid.desc = false; }
+  $("#gridhead").innerHTML = "";
+}
+const grid = { page: 0, size: 100, sort: "hostname", desc: false, filters: {}, preset: [], domain: "", selected: new Set(), total: 0, rows: [] };
 // Drill-down from the dashboard: open the Computers list narrowed to what was clicked. Each preset is a filter
 // ({field, op, value}) with a label shown as a removable chip.
 function showComputers(preset = [], title = "") {
-  grid.preset = preset.map((p) => ({ ...p, title })); grid.filters = {}; grid.page = 0;
+  grid.preset = preset.map((p) => ({ ...p, title })); grid.filters = {}; grid.domain = ""; grid.page = 0;
+  if ($("#domainsel")) $("#domainsel").value = "";
   document.querySelectorAll("#gridhead [data-f]").forEach((i) => (i.value = ""));
   showTab("computers");
 }
@@ -156,13 +189,17 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...GRID_COLS.map((c) => c[0]), "online", "online_checked", "online_changed", "online_via", "agent_last_seen", "agent_version", "agent_note"],
+  dataset: "v_devices", fields: [...new Set([...GRID_COLS.map((c) => c[0]), "uptime", "last_boot", "online", "online_checked", "online_changed", "online_via", "agent_status", "agent_last_seen", "agent_version", "agent_note"])],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
+    ...(grid.domain ? [{ field: "domain", op: "eq", value: grid.domain }] : []),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
   sort: grid.sort, desc: grid.desc, ...extra,
 });
 let gridTimer;
 loaders.computers = async () => {
+  if (!gridColsLoaded) gridColsLoaded = loadGridCols();
+  await gridColsLoaded;
+  loadDomains();
   if (!$("#gridhead").innerHTML) buildGridHead();
   renderPresets();
   const r = await post("/api/query", gridSpec({ limit: grid.size, offset: grid.page * grid.size, count: true }));
@@ -193,7 +230,8 @@ function gridCell(c, v, row) {
   if (c === "os") return esc((v || "").replace("Microsoft ", ""));
   if (c === "agent_status") return agentPill(row);
   if (c === "ou") return `<span title="${esc(v)}">${esc((v || "").split(",")[0].replace("OU=", ""))}</span>`;
-  if (/seen|scan|collected/.test(c)) return esc(fmtDate(v));
+  if (/seen|collected|_time$|_logon$|created|last_boot|_date$|warranty_end|patch_installed/.test(c)) return esc(fmtDate(v));
+  if (BOOL_COLS.has(c)) return v == null ? "" : v ? "Yes" : "No";
   return esc(v);
 }
 // Agent column: active (and still reporting), silent (active but no heartbeat for an hour), installing, pending, failed.
@@ -254,8 +292,56 @@ function markSort() { $("#gridhead").querySelectorAll("th[data-k]").forEach((th)
 $("#prev").onclick = () => { grid.page--; loaders.computers(); };
 $("#next").onclick = () => { grid.page++; loaders.computers(); };
 $("#pagesize").onchange = (e) => { grid.size = +e.target.value; grid.page = 0; loaders.computers(); };
-$("#clearfilters").onclick = () => { grid.filters = {}; grid.preset = []; $("#gridhead").querySelectorAll("[data-f]").forEach((i) => (i.value = "")); grid.page = 0; loaders.computers(); };
+$("#clearfilters").onclick = () => { grid.filters = {}; grid.preset = []; grid.domain = ""; $("#domainsel").value = ""; $("#gridhead").querySelectorAll("[data-f]").forEach((i) => (i.value = "")); grid.page = 0; loaders.computers(); };
 $("#clearsel").onclick = () => { grid.selected.clear(); loaders.computers(); };
+
+// Domain filter: the AD/DNS domains the computers are in (refreshed each time the list loads).
+async function loadDomains() {
+  let ds; try { ds = await api("/api/domains"); } catch { return; }
+  const sel = $("#domainsel");
+  if (grid.domain && !ds.some((d) => d.domain === grid.domain)) ds.push({ domain: grid.domain, computers: 0 });
+  sel.innerHTML = `<option value="">All domains</option>` + ds.map((d) => `<option value="${esc(d.domain)}">${esc(d.domain)} (${d.computers})</option>`).join("");
+  sel.value = grid.domain;
+  $("#domainwrap").hidden = !ds.length;
+}
+$("#domainsel").onchange = (e) => { grid.domain = e.target.value; grid.page = 0; loaders.computers(); };
+
+// Column picker: add, remove and reorder the Computers list's columns, saved for the signed-in user.
+$("#colpick").onclick = async () => {
+  let all;
+  try { all = (await api("/api/datasets")).find((d) => d.name === "v_devices").columns; } catch (e) { return toast(errText(e), true); }
+  all = all.filter((c) => !HIDDEN_COLS.has(c) && c !== "id" && c !== "device_id");
+  let chosen = GRID_COLS.map((c) => c[0]).filter((c) => c !== "hostname");
+  const m = Object.assign(document.createElement("div"), { className: "modal" });
+  m.innerHTML = `<form class="box wide colpicker"><h3>Columns in the Computers list</h3>
+    <p class="muted small">Name is always shown first. Saved for your sign-in, on any PC.</p>
+    <ol id="cpchosen"></ol>
+    <label>Add a column <select id="cpadd"></select></label>
+    <div class="row"><button type="button" class="ghost" id="cpreset">Reset to default</button><span style="flex:1"></span>
+      <button type="submit">Save</button><button type="button" class="ghost" id="cpcancel">Cancel</button></div></form>`;
+  document.body.appendChild(m);
+  const draw = () => {
+    $("#cpchosen", m).innerHTML = `<li class="fixed"><span>Name</span></li>` + chosen.map((c, i) => `<li><span>${esc(colLabel(c))}</span>
+      <a class="link" data-up="${i}" title="Move up" ${i ? "" : "hidden"}>↑</a><a class="link" data-down="${i}" title="Move down" ${i < chosen.length - 1 ? "" : "hidden"}>↓</a>
+      <a class="link" data-rm="${i}" title="Remove column">✕</a></li>`).join("");
+    const rest = all.filter((c) => c !== "hostname" && !chosen.includes(c)).sort((a, b) => colLabel(a).localeCompare(colLabel(b)));
+    $("#cpadd", m).innerHTML = `<option value="">Pick a field…</option>` + rest.map((c) => `<option value="${esc(c)}">${esc(colLabel(c))}</option>`).join("");
+    m.querySelectorAll("[data-up]").forEach((a) => a.onclick = () => { const i = +a.dataset.up; [chosen[i - 1], chosen[i]] = [chosen[i], chosen[i - 1]]; draw(); });
+    m.querySelectorAll("[data-down]").forEach((a) => a.onclick = () => { const i = +a.dataset.down; [chosen[i + 1], chosen[i]] = [chosen[i], chosen[i + 1]]; draw(); });
+    m.querySelectorAll("[data-rm]").forEach((a) => a.onclick = () => { chosen.splice(+a.dataset.rm, 1); draw(); });
+  };
+  $("#cpadd", m).onchange = (e) => { if (e.target.value) { chosen.push(e.target.value); draw(); } };
+  $("#cpreset", m).onclick = () => { chosen = DEFAULT_COLS.filter((c) => c !== "hostname"); draw(); };
+  $("#cpcancel", m).onclick = () => m.remove();
+  m.querySelector("form").onsubmit = async (e) => {
+    e.preventDefault();
+    const same = chosen.join() === DEFAULT_COLS.slice(1).join();
+    try { await api("/api/prefs/computers", { method: "PUT", body: JSON.stringify(same ? {} : { columns: ["hostname", ...chosen] }) }); }
+    catch (err) { return toast(errText(err), true); }
+    m.remove(); setGridCols(["hostname", ...chosen]); grid.page = 0; loaders.computers(); toast("Columns saved");
+  };
+  draw();
+};
 
 async function download(path, spec) {
   const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
