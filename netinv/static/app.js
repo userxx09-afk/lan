@@ -421,6 +421,8 @@ function renderAssetTab(d, tab) {
     loadFiles(el);
   } else if (tab === "security") {
     loadSecurity(el);
+  } else if (tab === "adtools") {
+    loadAdTab(el);
   } else if (tab === "deployments") {
     el.innerHTML = `<p class="muted">Software and fixes pushed to this PC, newest first. Waiting items run when the PC is online.</p><div id="pcdep"></div>`;
     depTable($("#pcdep"), d.deployments || [], false);
@@ -1229,6 +1231,61 @@ async function loadSecurity(el) {
   table($("#secfw"), d.firewall, ["profile", "enabled", "inbound", "outbound"], { cell: { enabled: (v) => secYN(v) } });
   if (df) table($("#secthr"), df.threats || [], ["time", "id", "resources", "action"], { cell: { time: localTime, action: (v) => (v ? "handled" : `<span class="pill bad">not handled</span>`) } });
   table($("#secav"), d.antivirus, ["name", "state"]);
+}
+
+// ------------------------------------------------------------ AD computer tools (LDAP with the saved Windows credential; rename over WinRM)
+const cnOf = (dn) => String(dn || "").split(",")[0].replace(/^\w+=/, "");
+async function loadAdTab(el) {
+  const host = current;
+  el.innerHTML = `<div class="toolbar wrap"><button class="ghost" data-adop="description">Edit description</button><button class="ghost" data-adop="location">Edit location</button>
+    <button class="ghost" data-adop="move">Move to another OU</button><button class="ghost" data-adop="add_group">Add to a group</button>
+    <button class="ghost" data-adop="toggle">Enable / disable</button><button class="ghost" data-adop="rename">Rename computer</button></div><div id="adbody">${asking()}</div>`;
+  let d;
+  const doOp = async (op, value, q) => {
+    if (q && !(await confirmBox(q))) return;
+    try { const r = await post(hostApi("ad"), { op, value }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+    if (current === host) loadAdTab(el);
+  };
+  el.querySelectorAll("[data-adop]").forEach((b) => b.onclick = async () => {
+    const op = b.dataset.adop;
+    if (!d) return toast("Still reading AD…", true);
+    if (op === "description" || op === "location") {
+      const f = await formModal(`<h3>${op === "description" ? "Description" : "Location"} of ${esc(host)} in AD</h3><label>${op} <input name="v" value="${esc(d[op])}" maxlength="1024"></label>`);
+      if (f) doOp(op, f.v);
+    } else if (op === "toggle") {
+      doOp(d.enabled ? "disable" : "enable", "", d.enabled ? `Disable the computer account ${host} in AD? It can't sign in to the domain until enabled again (users can't log on to it with domain accounts).` : `Enable the computer account ${host} in AD?`);
+    } else if (op === "rename") {
+      const f = await formModal(`<h3>Rename ${esc(host)}</h3><label>New name <input name="v" maxlength="15" pattern="[A-Za-z0-9-]{1,15}" required></label>
+        <p class="muted small">Renamed on the PC and in AD with the saved Windows credential. It takes effect at the next restart; the PC isn't restarted for you.</p>`);
+      if (f) doOp("rename", f.v.trim(), `Rename ${host} to ${f.v.trim().toUpperCase()}?`);
+    } else if (op === "move") {
+      let ous;
+      try { ous = await api(hostApi("ad/ous")); } catch (e) { return toast(errText(e), true); }
+      const f = await formModal(`<h3>Move ${esc(host)} to another OU</h3><input id="oufilter" placeholder="Filter OUs">
+        <label>Target <select name="ou" size="12" required>${ous.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select></label>
+        <p class="muted small">Now in ${esc(d.dn.split(",").slice(1).join(","))}. Group Policy from the new OU applies at the next refresh.</p>`, true,
+        (form) => { form.querySelector("#oufilter").oninput = (e) => { const q = e.target.value.toLowerCase(); form.ou.querySelectorAll("option").forEach((o) => o.hidden = !o.value.toLowerCase().includes(q)); }; });
+      if (f && f.ou) doOp("move", f.ou, `Move ${host} to ${f.ou}?`);
+    } else if (op === "add_group") {
+      const f = await formModal(`<h3>Add ${esc(host)} to a group</h3><div class="toolbar"><input id="grpq" placeholder="Group name"><button type="button" id="grpgo" class="ghost">Search</button></div>
+        <label>Group <select name="g" size="10" required></select></label>`, true, (form) => {
+        const search = async () => {
+          try { const gs = await api(hostApi(`ad/groups?q=${encodeURIComponent(form.querySelector("#grpq").value)}`)); form.g.innerHTML = gs.map((g) => `<option value="${esc(g.dn)}" title="${esc(g.description)}">${esc(g.name)}</option>`).join(""); }
+          catch (e) { toast(errText(e), true); }
+        };
+        form.querySelector("#grpgo").onclick = search;
+        form.querySelector("#grpq").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); search(); } };
+      });
+      if (f && f.g) doOp("add_group", f.g, `Add ${host} to ${cnOf(f.g)}? It applies after the PC restarts (or renews its Kerberos ticket).`);
+    }
+  });
+  try { d = await api(hostApi("ad")); } catch (e) { return toolErr($("#adbody"), e); }
+  $("#adbody").innerHTML = `<div class="kv">${kvRow("Distinguished name", `<span class="small code">${esc(d.dn)}</span>`)}${kvRow("Account", `<span class="pill ${d.enabled ? "good" : "bad"}">${d.enabled ? "enabled" : "disabled"}</span>`)}
+    ${kvRow("Description", esc(d.description) || `<span class="muted">none</span>`)}${kvRow("Location", esc(d.location) || `<span class="muted">none</span>`)}${kvRow("Managed by", esc(cnOf(d.managed_by)))}</div>
+    <h2>Member of</h2><div id="adgrp"></div><p class="muted small">Read live from AD with the saved Windows credential. Every change is audit-logged and kept in History.</p>`;
+  table($("#adgrp"), d.groups.map((g) => ({ name: cnOf(g), dn: g, act: g })), ["name", "dn", "act"], { labels: { act: "" },
+    cell: { dn: (v) => `<span class="small muted">${esc(v)}</span>`, act: (g) => `<a class="link" data-rmgrp="${esc(g)}">Remove</a>` } });
+  $("#adgrp").querySelectorAll("[data-rmgrp]").forEach((a) => a.onclick = () => doOp("remove_group", a.dataset.rmgrp, `Remove ${host} from ${cnOf(a.dataset.rmgrp)}?`));
 }
 
 // ------------------------------------------------------------ deployment queue and log

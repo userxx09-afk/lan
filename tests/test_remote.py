@@ -174,6 +174,31 @@ with TestClient(m.app) as c:
     assert fixes._validate("windows_updates", "bogus") == ("Install pending Windows updates", None)
     assert "'notify' -eq 'notify'" in fixes.WU_SCRIPT.replace("__AFTER__", "notify")
 
+    # AD computer tools (LDAP faked)
+    if dn:
+        acts = []
+        adc.computer_info = lambda cfg, d: {"dn": d, "description": "x", "location": "", "managed_by": "", "enabled": True, "groups": []}
+        adc.list_ous = lambda cfg, d: ["OU=Laptops,DC=corp,DC=example,DC=com"]
+        adc.find_groups = lambda cfg, d, q: [{"dn": "CN=VPN,OU=Groups,DC=corp,DC=example,DC=com", "name": "VPN", "description": ""}]
+        adc.computer_action = lambda cfg, d, op, v: (acts.append((op, v)), f"{d.split(',')[0]},{v}" if op == "move" else d)[1]
+        assert c.get(f"{u}/ad").json()["enabled"] and c.get(f"{u}/ad/ous").json() and c.get(f"{u}/ad/groups", params={"q": "vp"}).json()
+        n = len(acts)
+        for body in ({"op": "move", "value": "OU=X,DC=evil,DC=com"}, {"op": "add_group", "value": "VPN"}, {"op": "delete", "value": ""},
+                     {"op": "description", "value": "a\nb"}):
+            assert not c.post(f"{u}/ad", json=body).json()["ok"], body
+        assert len(acts) == n
+        assert c.post(f"{u}/ad", json={"op": "move", "value": "OU=Laptops,DC=corp,DC=example,DC=com"}).json()["ok"]
+        with SessionLocal() as db:
+            assert db.scalar(select(Device.ad_dn).where(Device.hostname == h)).endswith("OU=Laptops,DC=corp,DC=example,DC=com")
+        assert c.post(f"{u}/ad", json={"op": "add_group", "value": "CN=VPN,OU=Groups,DC=corp,DC=example,DC=com"}).json()["ok"]
+        assert c.post(f"{u}/ad", json={"op": "disable"}).json()["ok"] and acts[-1] == ("disable", "")
+        n = len(sent)
+        for bad in ("toolongname-123456", "12345", "a b", h):
+            assert not c.post(f"{u}/ad", json={"op": "rename", "value": bad}).json()["ok"], bad
+        assert len(sent) == n
+        assert c.post(f"{u}/ad", json={"op": "rename", "value": "ws-new-01"}).json()["ok"]
+        assert "WS-NEW-01" in decoded(sent[-1]) and "x" in decoded(sent[-1]) and "Rename-Computer" in sent[-1]
+
     hist = c.get(u).json()
     hist = hist.get("history") or hist.get("changes") or []
     assert any("Command (powershell)" in (x.get("detail") or x.get("text") or str(x)) for x in hist), hist[:3]
