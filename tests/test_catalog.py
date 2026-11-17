@@ -114,7 +114,7 @@ with TestClient(m.app) as cl:
         rescans = []
         fixes._rescan_later = lambda h, check_pending=False: rescans.append(h)
         for after, want in (("131.0.6778.86", "failed"), ("142.0.7444.60", "success")):
-            fixes.check = lambda db, dev, name, a=after: {"done": True, "result": {
+            fixes.check = lambda db, dev, name, dep=None, a=after: {"done": True, "result": {
                 "ok": True, "exit": 0, "message": "winget finished", "before": [chrome("131.0.6778.86")], "after": [chrome(a)]}}
             dep = Deployment(hostname=host, action="app_update", value="Google.Chrome", label="Update Google.Chrome", who="t",
                              status="running", task="app-Google.Chrome", created=utcnow(), next_try=utcnow(),

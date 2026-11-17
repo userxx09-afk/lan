@@ -198,7 +198,7 @@ def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 20.
     from .db import get_setting, set_setting, utcnow
     n = 0
     if not get_setting(db, "migr:logon_client_v1"):
-        # Before 0.21, network logons kept the DC's own name from WorkstationName as the computer.
+        # Before 0.22, network logons kept the DC's own name from WorkstationName as the computer.
         db.execute(text(f"""
             UPDATE logon_events SET hostname = NULL
             WHERE source LIKE 'dc:%' AND hostname IS NOT NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL}

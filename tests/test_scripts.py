@@ -27,7 +27,7 @@ def fake_run_ps(addr, cfg, script):
 
 winrm.run_ps = fake_run_ps
 scanning.winrm_cfg = lambda db: {"username": "x", "password": "y"}
-fixes._cfg = lambda db: {"username": "x", "password": "y"}
+fixes._cfg = lambda db, dep=None: {"username": "x", "password": "y"}
 
 with TestClient(m.app) as c:
     host = c.post("/api/query", json={"dataset": "v_devices", "fields": ["hostname"], "limit": 3}).json()["rows"]

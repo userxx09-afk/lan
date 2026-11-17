@@ -26,7 +26,7 @@ def fake_run_ps(addr, cfg, script):
 
 winrm.run_ps = fake_run_ps
 scanning.winrm_cfg = lambda db: {"username": "x", "password": "y"}
-fixes._cfg = lambda db: {"username": "x", "password": "y"}
+fixes._cfg = lambda db, dep=None: {"username": "x", "password": "y"}
 agentpush.pin = lambda: "AB" * 32           # pretend the server is on HTTPS
 
 

@@ -1584,6 +1584,12 @@ def _cred_out(c: Credential) -> dict:
             "has_secret": bool(c.secret), "has_secret2": bool(c.secret2)}
 
 
+@app.get("/api/service-account", dependencies=UI)
+def service_account():
+    """The Windows account NetInventory runs as: offered as the credential "This server's own account" (id 0)."""
+    return {"id": scanning.SERVICE_CRED_ID, "account": scanning.service_account()}
+
+
 @app.get("/api/credentials", dependencies=UI)
 def list_creds(db=Depends(db_session)):
     return [_cred_out(c) for c in db.scalars(select(Credential).order_by(Credential.name))]
@@ -1632,16 +1638,16 @@ class CredTest(BaseModel):
 def test_cred(cid: int, body: CredTest, db=Depends(db_session)):
     """Try a credential against one host: LDAP bind + WinRM for Windows, sysName get for SNMP."""
     import asyncio
-    from .scanning import cred_cfg
-    c = db.get(Credential, cid)
-    if not c:
+    from .scanning import SERVICE_CRED_ID, cred_cfg, service_cfg
+    c = None if cid == SERVICE_CRED_ID else db.get(Credential, cid)
+    if not c and cid != SERVICE_CRED_ID:
         raise HTTPException(404)
     host = body.host.strip()
     if not actions.HOST_RE.match(host):
         raise HTTPException(400, "invalid host")
-    cfg = cred_cfg(c)
+    cfg = cred_cfg(c) if c else service_cfg()
     results = []
-    if c.kind == "windows":
+    if not c or c.kind == "windows":
         from .collectors import ad as adc
         from .collectors.winrm import run_ps
         try:
@@ -2019,6 +2025,7 @@ class AgentPushIn(BaseModel):
     run_as: str = "LOCALSERVICE"
     server_url: str
     remove: bool = False
+    credential_id: int | None = None      # sign in to the PCs with: None = scan targets' credentials, 0 = this server's account
 
 
 @app.post("/api/agents/push")
@@ -2038,6 +2045,11 @@ def agents_push(body: AgentPushIn, user=Depends(ui_auth)):
                 set_setting(db, "agent:server_url", url)
                 db.add(AuditLog(actor=user, action="agent.settings", target="agent", result=f"server address for pushes: {url}"))
             db.commit()
+        if body.credential_id is not None:
+            try:
+                fixes.cred_for_push(db, body.credential_id)
+            except PermissionError as exc:
+                raise HTTPException(400, str(exc))
         hosts = list(body.hostnames)
         if body.group:
             hosts += groups.hosts(db, body.group)
@@ -2046,7 +2058,8 @@ def agents_push(body: AgentPushIn, user=Depends(ui_auth)):
     if len(set(hosts)) > 2000:
         raise HTTPException(400, "at most 2,000 computers at a time")
     try:
-        n = fixes.run_many(hosts, "agent_remove" if body.remove else "agent_install", user, None if body.remove else body.run_as)
+        n = fixes.run_many(hosts, "agent_remove" if body.remove else "agent_install", user, None if body.remove else body.run_as,
+                           **({"cred_id": body.credential_id} if body.credential_id is not None else {}))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "count": n, "output": f"{'Removal' if body.remove else 'Agent install'} queued for {n} computer{'s' if n != 1 else ''}. "
