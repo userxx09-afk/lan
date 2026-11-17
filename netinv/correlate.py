@@ -98,13 +98,19 @@ VIEWS: dict[str, str] = {
                d.ad_description, d.ad_location,
                d.online, d.online_checked, d.online_changed, d.online_via, d.last_boot AS uptime,
                CASE WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname AND a.status = 'active') THEN 'active'
-                    WHEN EXISTS (SELECT 1 FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
-                                 AND x.status IN ('queued', 'sending', 'running')) THEN 'installing'
                     WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname AND a.status = 'pending') THEN 'pending'
+                    WHEN EXISTS (SELECT 1 FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
+                                 AND x.status IN ('sending', 'running')) THEN 'installing'
+                    WHEN EXISTS (SELECT 1 FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
+                                 AND x.status = 'queued') THEN 'waiting'
                     WHEN (SELECT x.status FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
                           ORDER BY x.created DESC, x.id DESC LIMIT 1) IN ('failed', 'expired') THEN 'failed'
                     WHEN EXISTS (SELECT 1 FROM agents a WHERE a.hostname = d.hostname) THEN 'revoked'
                     ELSE NULL END AS agent_status,
+               COALESCE((SELECT a.note FROM agents a WHERE a.hostname = d.hostname AND a.status = 'pending'
+                         ORDER BY a.enrolled DESC LIMIT 1),
+                        (SELECT x.message FROM deployments x WHERE x.hostname = d.hostname AND x.action = 'agent_install'
+                         ORDER BY x.created DESC, x.id DESC LIMIT 1)) AS agent_note,
                (SELECT MAX(a.last_seen) FROM agents a WHERE a.hostname = d.hostname AND a.status <> 'revoked') AS agent_last_seen,
                (SELECT MAX(a.version) FROM agents a WHERE a.hostname = d.hostname AND a.status = 'active') AS agent_version,
                (SELECT MIN(k.free_gb) FROM disks k WHERE k.device_id = d.id) AS min_disk_free_gb,

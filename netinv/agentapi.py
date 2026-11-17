@@ -126,6 +126,8 @@ def enroll(body: EnrollIn, request: Request, db=Depends(_db)):
               last_seen=utcnow(), last_ip=ip, version=(body.version or "")[:16] or None, run_as=(body.run_as or "")[:64] or None,
               want_inventory=True)
     db.add(a)
+    agentpush.settle(db, host, "enrolled" + (" by the push" if pushed else ", installed by hand or GPO") +
+                     ("" if status == "active" else f"; waiting for approval in Settings > Agent: {note}"))
     db.add(AuditLog(actor=f"agent:{host}", action="agent.enroll", target=f"computer:{host}", result=f"{status} from {ip}" + (" (pushed)" if pushed else "")))
     db.commit()
     return {"agent_id": a.agent_id, "secret": base64.b64encode(secret).decode(), "status": status, "note": note}
@@ -198,6 +200,9 @@ async def heartbeat(request: Request, auth=Depends(signed)):
                 pass
         if hb.current_user is not None:
             dev.current_user = hb.current_user[:128] or None
+        if a.status == "active":
+            from . import agentpush
+            agentpush.settle(db, a.hostname, "heartbeat")
         due = a.want_inventory or not a.last_inventory or a.last_inventory < utcnow() - timedelta(hours=inventory_hours(db))
         db.commit()
         return {"ok": True, "inventory": bool(due), "status": a.status}
