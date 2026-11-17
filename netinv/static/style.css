@@ -282,3 +282,13 @@ span.code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; whit
 .cmdform textarea { margin-top: 6px; }
 .cmdblock { margin: 12px 0; }
 .cmdblock pre.code { margin-top: 4px; }
+.toolbar.wrap { flex-wrap: wrap; }
+.perfgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 20px; }
+.perfgrid h3 { margin: 0 0 4px; }
+.perfbar { position: relative; height: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.perffill { position: absolute; inset: 0 auto 0 0; background: #4c8bf5; opacity: .35; }
+.perffill.warn { background: #e0a020; } .perffill.bad { background: #d9534f; }
+.perfbar span { position: relative; padding: 0 8px; line-height: 22px; font-size: 12.5px; }
+.perfrow { display: grid; grid-template-columns: 40px 1fr; gap: 8px; align-items: center; margin: 4px 0; }
+.toolbar label.chk { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.toolbar label.chk input { width: auto; }

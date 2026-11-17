@@ -283,3 +283,243 @@ def wmi_query(db, dev: Device, ns: str, query: str, limit: int = 1000) -> dict:
         raise ValueError("A WQL query starts with SELECT (for example SELECT Name, State FROM Win32_Service WHERE StartMode='Auto').")
     r = _run(db, dev, WMI_QUERY.replace("__NS__", _b(ns)).replace("__QUERY__", _b(query)).replace("__MAX__", str(max(1, min(int(limit), 5000)))))
     return {"namespace": ns, "rows": _list(r.get("rows"))}
+
+
+# ------------------------------------------------------------------ more live tabs: read-only views
+VIEWS = {
+    "shares": r'''
+$acc = @{}
+try { Get-SmbShareAccess -Name * -ErrorAction SilentlyContinue | ForEach-Object { $acc[$_.Name] += @("$($_.AccountName): $($_.AccessRight)$(if ("$($_.AccessControlType)" -ne 'Allow') { ' (deny)' })") } } catch {}
+ConvertTo-Json -Compress @(Get-CimInstance Win32_Share | ForEach-Object {
+  [pscustomobject]@{ name = $_.Name; path = $_.Path; description = $_.Description; special = ($_.Name -match '\$$')
+    access = (@($acc[$_.Name]) | Where-Object { $_ }) -join '; ' } })''',
+    "env": r'''
+$out = @()
+$m = Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+foreach ($n in $m.GetValueNames()) { $out += [pscustomobject]@{ scope = 'System'; user = ''; sid = ''; name = $n; value = "$($m.GetValue($n, $null, 'DoNotExpandEnvironmentNames'))" } }
+foreach ($u in Get-ChildItem Registry::HKEY_USERS | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' }) {
+  $who = try { (New-Object Security.Principal.SecurityIdentifier $u.PSChildName).Translate([Security.Principal.NTAccount]).Value } catch { $u.PSChildName }
+  $k = Get-Item "Registry::HKEY_USERS\$($u.PSChildName)\Environment" -ErrorAction SilentlyContinue
+  if ($k) { foreach ($n in $k.GetValueNames()) { $out += [pscustomobject]@{ scope = 'User'; user = $who; sid = $u.PSChildName; name = $n; value = "$($k.GetValue($n, $null, 'DoNotExpandEnvironmentNames'))" } } }
+}
+ConvertTo-Json -Compress @($out)''',
+    "startup": r'''
+$out = @()
+$keys = @(@('HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'All users'), @('HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce', 'All users (once)'),
+          @('HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'All users (32-bit)'))
+foreach ($u in Get-ChildItem Registry::HKEY_USERS | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' }) {
+  $who = try { (New-Object Security.Principal.SecurityIdentifier $u.PSChildName).Translate([Security.Principal.NTAccount]).Value } catch { $u.PSChildName }
+  $keys += ,@("HKU\$($u.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Run", $who)
+}
+foreach ($k in $keys) {
+  $key = Get-Item ('Registry::' + ($k[0] -replace '^HKLM', 'HKEY_LOCAL_MACHINE' -replace '^HKU', 'HKEY_USERS')) -ErrorAction SilentlyContinue
+  if (-not $key) { continue }
+  foreach ($n in $key.GetValueNames()) { if ($n) { $out += [pscustomobject]@{ name = $n; command = "$($key.GetValue($n))"; where = $k[1]; kind = 'registry'; location = $k[0] } } }
+}
+foreach ($f in @("$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp") + @(Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName)\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup" })) {
+  foreach ($i in Get-ChildItem $f -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'desktop.ini' }) {
+    $out += [pscustomobject]@{ name = $i.Name; command = $i.FullName; where = $(if ($f -like "$env:ProgramData*") { 'All users' } else { ($f -split '\\')[2] }); kind = 'folder'; location = $f } }
+}
+ConvertTo-Json -Compress @($out)''',
+    "tasks": r'''
+ConvertTo-Json -Compress @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { __ALL__ -or $_.TaskPath -notlike '\Microsoft\*' } | ForEach-Object {
+  $i = $_ | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+  [pscustomobject]@{ path = $_.TaskPath; name = $_.TaskName; state = "$($_.State)"; author = $_.Author
+    runs_as = "$($_.Principal.UserId)$($_.Principal.GroupId)"
+    action = (@($_.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)".Trim() }) -join '; ')
+    triggers = (@($_.Triggers | ForEach-Object { ($_.CimClass.CimClassName -replace '^MSFT_Task|Trigger$', '') }) -join ', ')
+    last_run = if ($i.LastRunTime -and $i.LastRunTime.Year -gt 2000) { $i.LastRunTime.ToUniversalTime().ToString('s') } else { '' }
+    last_result = if ($i) { '0x{0:X}' -f $i.LastTaskResult } else { '' }
+    next_run = if ($i.NextRunTime) { $i.NextRunTime.ToUniversalTime().ToString('s') } else { '' } } })''',
+    "events": r'''
+$log = D '__LOG__'; $src = D '__SRC__'; $text = D '__TEXT__'
+$f = @{ LogName = $log; StartTime = (Get-Date).AddHours(-__HOURS__) }
+if (__LEVELS__) { $f.Level = @(__LEVELS__) }
+if ($src) { $f.ProviderName = $src }
+if (__ID__ -gt 0) { $f.Id = __ID__ }
+$ev = try { @(Get-WinEvent -FilterHashtable $f -MaxEvents __MAX__ -ErrorAction Stop) } catch { if ("$_" -match 'No events were found') { @() } else { throw } }
+ConvertTo-Json -Compress @($ev | Where-Object { -not $text -or $_.Message -like "*$text*" } | ForEach-Object {
+  $msg = "$($_.Message)"
+  [pscustomobject]@{ time = $_.TimeCreated.ToUniversalTime().ToString('s'); level = "$($_.LevelDisplayName)"; level_n = [int]$_.Level; source = $_.ProviderName; id = $_.Id
+    user = "$($_.UserId)"; message = $msg.Substring(0, [Math]::Min(4000, $msg.Length)) } })''',
+    "eventlogs": r'''
+ConvertTo-Json -Compress @(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object { $_.RecordCount -gt 0 } | Sort-Object LogName | ForEach-Object {
+  [pscustomobject]@{ name = $_.LogName; records = [int64]$_.RecordCount; size_mb = [math]::Round($_.FileSize / 1MB, 1) } })''',
+    "devices": r'''
+$drv = @{}
+Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | ForEach-Object { if ($_.DeviceID) { $drv[$_.DeviceID] = $_ } }
+ConvertTo-Json -Compress @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name } | ForEach-Object {
+  $d = $drv[$_.PNPDeviceID]
+  [pscustomobject]@{ name = $_.Name; class = $_.PNPClass; manufacturer = $_.Manufacturer; status = $_.Status; problem = [int]$_.ConfigManagerErrorCode
+    present = [bool]$_.Present; driver = if ($d) { $d.DriverVersion } else { '' }
+    driver_date = if ($d -and $d.DriverDate) { $d.DriverDate.ToString('yyyy-MM-dd') } else { '' }; provider = if ($d) { $d.DriverProviderName } else { '' }; id = $_.PNPDeviceID } })''',
+    "network": r'''
+$cfg = @{}
+Get-CimInstance Win32_NetworkAdapterConfiguration | ForEach-Object { $cfg[[int]$_.InterfaceIndex] = $_ }
+ConvertTo-Json -Compress -Depth 3 @(Get-NetAdapter -IncludeHidden:$false -ErrorAction SilentlyContinue | ForEach-Object {
+  $c = $cfg[[int]$_.ifIndex]
+  $ip = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+  [pscustomobject]@{ name = $_.Name; description = $_.InterfaceDescription; status = "$($_.Status)"; speed = "$($_.LinkSpeed)"; mac = $_.MacAddress
+    ip = $ip -join ', '; gateway = if ($c) { @($c.DefaultIPGateway) -join ', ' } else { '' }; dns = if ($c) { @($c.DNSServerSearchOrder) -join ', ' } else { '' }
+    dhcp = if ($c) { [bool]$c.DHCPEnabled } else { $null }; dhcp_server = if ($c) { $c.DHCPServer } else { '' }
+    suffix = if ($c) { $c.DNSDomain } else { '' }; vlan = "$($_.VlanID)"; media = "$($_.MediaType)" } })''',
+    "connections": r'''
+$p = @{}
+Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $p[$_.Id] = $_.ProcessName }
+$t = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'TimeWait' } | ForEach-Object {
+  [pscustomobject]@{ proto = 'TCP'; local = "$($_.LocalAddress):$($_.LocalPort)"; remote = "$($_.RemoteAddress):$($_.RemotePort)"; state = "$($_.State)"; pid = [int]$_.OwningProcess; process = $p[[int]$_.OwningProcess] } })
+$u = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
+  [pscustomobject]@{ proto = 'UDP'; local = "$($_.LocalAddress):$($_.LocalPort)"; remote = ''; state = 'Listen'; pid = [int]$_.OwningProcess; process = $p[[int]$_.OwningProcess] } })
+ConvertTo-Json -Compress @($t + $u)''',
+    "performance": r'''
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+$disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object { [pscustomobject]@{ drive = $_.DeviceID; size_gb = [math]::Round($_.Size / 1GB, 1); free_gb = [math]::Round($_.FreeSpace / 1GB, 1) } })
+$pd = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+$net = @(Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = $_.Name; in_kbps = [math]::Round($_.BytesReceivedPersec * 8 / 1KB); out_kbps = [math]::Round($_.BytesSentPersec * 8 / 1KB) } })
+$cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$top = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin '_Total', 'Idle' } |
+  Sort-Object PercentProcessorTime -Descending | Select-Object -First 8 | ForEach-Object { [pscustomobject]@{ name = $_.Name; pid = [int]$_.IDProcess; cpu_pct = [math]::Round($_.PercentProcessorTime / [math]::Max(1, $cores), 1); mem_mb = [math]::Round($_.WorkingSetPrivate / 1MB, 1) } })
+@{ cpu_pct = [int]$cpu; mem_total_mb = [math]::Round($os.TotalVisibleMemorySize / 1KB); mem_free_mb = [math]::Round($os.FreePhysicalMemory / 1KB)
+   disk_busy_pct = if ($pd) { [int]$pd.PercentDiskTime } else { $null }; disk_queue = if ($pd) { [int]$pd.CurrentDiskQueueLength } else { $null }
+   disks = $disks; net = $net; top = $top; processes = @(Get-Process).Count; uptime_h = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalHours, 1) } | ConvertTo-Json -Compress -Depth 3''',
+}
+EVENT_LEVELS = {"critical": 1, "error": 2, "warning": 3, "information": 4, "verbose": 5}
+LOG_RE = re.compile(r"^[\w\-/ .%]{1,200}$")
+
+
+def view(db, dev: Device, name: str, **p) -> list | dict:
+    if name not in VIEWS:
+        raise ValueError("Unknown view.")
+    script = VIEWS[name]
+    if name == "tasks":
+        script = script.replace("__ALL__", "$true" if p.get("all") else "$false")
+    if name == "events":
+        log = (p.get("log") or "System").strip()
+        if not LOG_RE.match(log):
+            raise ValueError("Unknown event log.")
+        levels = [EVENT_LEVELS[x] for x in (p.get("levels") or "").split(",") if x in EVENT_LEVELS]
+        try:
+            hours = max(1, min(int(p.get("hours") or 24), 24 * 90))
+            eid = max(0, min(int(p.get("id") or 0), 1 << 30))
+            mx = max(10, min(int(p.get("max") or 500), 5000))
+        except (TypeError, ValueError):
+            raise ValueError("Bad number.")
+        script = (script.replace("__LOG__", _b(log)).replace("__SRC__", _b((p.get("source") or "")[:200]))
+                  .replace("__TEXT__", _b((p.get("text") or "").replace("*", "")[:200])).replace("__HOURS__", str(hours))
+                  .replace("__LEVELS__", ",".join(map(str, levels)) or "$null").replace("__ID__", str(eid)).replace("__MAX__", str(mx)))
+    r = _run(db, dev, script)
+    return r if isinstance(r, dict) and name == "performance" else _list(r)
+
+
+# ------------------------------------------------------------------ more live tabs: changes
+SHARE_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f\[\]=;,+]{1,80}$")
+ACCOUNT_RE = re.compile(r"^([\w.\- ]{1,64}\\)?[\w.\-$@ ]{1,104}$")
+PATH_RE = re.compile(r"^[A-Za-z]:\\[^\x00-\x1f*?\"<>|]{0,250}$")
+ENV_RE = re.compile(r"^[A-Za-z_][\w.()\-]{0,99}$")
+ENV_LOCKED = {"path", "pathext", "comspec", "windir", "systemroot", "os", "processor_architecture", "number_of_processors",
+              "psmodulepath", "temp", "tmp", "driverdata", "username"}
+TASK_RE = re.compile(r"^\\([^\x00-\x1f\\]{1,200}\\)*$")
+
+
+def change(db, dev: Device, who: str, kind: str, op: str, a: dict) -> dict:
+    """One change on a PC tab. a holds the strings for that change; each is checked here, then sent base64-encoded."""
+    a = {k: ("" if v is None else str(v)) for k, v in (a or {}).items()}
+    fail = lambda m: {"ok": False, "output": m}   # noqa: E731
+    key = f"{kind}.{op}"
+    if key == "share.add":
+        if not SHARE_RE.match(a.get("name", "")) or a["name"].endswith("$") and a["name"].upper() in ("C$", "ADMIN$", "IPC$"):
+            return fail("Pick a share name (no \\ / : * ? \" < > |).")
+        if not PATH_RE.match(a.get("path", "")):
+            return fail("Give a local folder like D:\\Shares\\Scans.")
+        if a.get("access") not in ("Read", "Change", "Full"):
+            return fail("Pick Read, Change or Full.")
+        if not ACCOUNT_RE.match(a.get("account", "")):
+            return fail("Give who gets access as DOMAIN\\name (or Everyone).")
+        body = r'''
+if (-not (Test-Path -LiteralPath $path -PathType Container)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+$p = @{ Name = $name; Path = $path; Description = $desc }
+$p["$($access)Access"] = $account
+New-SmbShare @p -ErrorAction Stop | Out-Null
+@{ ok = $true; message = "shared as \\$env:COMPUTERNAME\$name ($account`: $access)" } | ConvertTo-Json -Compress'''
+        detail = f"Share {a['path']} as {a['name']} ({a['account']}: {a['access']})"
+    elif key == "share.remove":
+        if not SHARE_RE.match(a.get("name", "")) or a["name"].upper() in ("C$", "ADMIN$", "IPC$", "D$", "E$", "PRINT$", "NETLOGON", "SYSVOL"):
+            return fail("That share isn't removed from here (Windows or the domain needs it).")
+        body = r'''
+Remove-SmbShare -Name $name -Force -ErrorAction Stop
+@{ ok = $true; message = 'share removed (the folder and its files are kept)' } | ConvertTo-Json -Compress'''
+        detail = f"Remove share {a['name']}"
+    elif key in ("env.set", "env.delete"):
+        if not ENV_RE.match(a.get("name", "")):
+            return fail("A variable name is letters, digits and _ (starting with a letter).")
+        if len(a.get("value", "")) > 8000:
+            return fail("Value too long.")
+        sid = a.get("sid", "")
+        if sid and not re.match(r"^S-1-5-21-[\d-]{5,80}$", sid):
+            return fail("Unknown user.")
+        if key == "env.delete" and not sid and a["name"].lower() in ENV_LOCKED:
+            return fail(f"{a['name']} is needed by Windows; edit it instead of deleting it.")
+        if key == "env.set" and not sid and a["name"].lower() == "path" and "system32" not in a.get("value", "").lower():
+            return fail("That Path has no System32 in it; Windows wouldn't work. Check the value.")
+        kpath = (f"Registry::HKEY_USERS\\{sid}\\Environment" if sid else
+                 "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
+        body = (f"$k = '{kpath}'\n" + (r'''
+$was = (Get-Item $k).GetValue($name, '(new)', 'DoNotExpandEnvironmentNames')
+$type = if ($value -match '%\w+%') { 'ExpandString' } else { 'String' }
+Set-ItemProperty -Path $k -Name $name -Value $value -Type $type -ErrorAction Stop
+@{ ok = $true; message = "set (was: $was). Programs started from now on see it; signed-in users get it at their next sign-in." } | ConvertTo-Json -Compress'''
+            if key == "env.set" else r'''
+$was = (Get-Item $k).GetValue($name, $null, 'DoNotExpandEnvironmentNames')
+if ($null -eq $was) { throw 'variable not found' }
+Remove-ItemProperty -Path $k -Name $name -ErrorAction Stop
+@{ ok = $true; message = "deleted (was: $was)" } | ConvertTo-Json -Compress'''))
+        detail = (f"{'Set' if op == 'set' else 'Delete'} {'user' if sid else 'system'} variable {a['name']}"
+                  + (f" = {a.get('value', '')[:200]}" if op == "set" else ""))
+    elif key == "startup.remove":
+        loc = a.get("location", "")
+        if a.get("kind") == "registry":
+            if not re.match(r"^(HKLM\\SOFTWARE\\(WOW6432Node\\)?Microsoft\\Windows\\CurrentVersion\\Run(Once)?|HKU\\S-1-5-21-[\d-]+\\Software\\Microsoft\\Windows\\CurrentVersion\\Run)$", loc, re.I):
+                return fail("Unknown startup location.")
+            body = f"$k = 'Registry::{loc.replace('HKLM', 'HKEY_LOCAL_MACHINE', 1).replace('HKU', 'HKEY_USERS', 1)}'\n" + r'''
+$was = (Get-Item $k).GetValue($name)
+if ($null -eq $was) { throw 'entry not found' }
+Remove-ItemProperty -Path $k -Name $name -ErrorAction Stop
+@{ ok = $true; message = "removed from startup (was: $was)" } | ConvertTo-Json -Compress'''
+        elif a.get("kind") == "folder":
+            if not re.match(r"^[A-Za-z]:\\.*\\Start Menu\\Programs\\Startup$", loc, re.I) or not re.match(r"^[^\\/:*?\"<>|\x00-\x1f]{1,200}$", a.get("name", "")):
+                return fail("Unknown startup location.")
+            body = r'''
+$f = Join-Path $location $name
+if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw 'file not found' }
+$bak = Join-Path $env:ProgramData 'NetInventory\startup-removed'
+New-Item -ItemType Directory -Path $bak -Force | Out-Null
+Move-Item -LiteralPath $f -Destination (Join-Path $bak ("{0:yyyyMMddHHmmss}-{1}" -f (Get-Date), $name)) -Force
+@{ ok = $true; message = "moved out of the Startup folder (kept in $bak)" } | ConvertTo-Json -Compress'''
+        else:
+            return fail("Unknown startup entry.")
+        detail = f"Remove startup entry {a.get('name')} ({loc})"
+    elif kind == "task" and op in ("run", "end", "enable", "disable"):
+        if not TASK_RE.match(a.get("path", "")) or not re.match(r"^[^\x00-\x1f\\]{1,200}$", a.get("name", "")):
+            return fail("Unknown task.")
+        if op in ("disable", "end") and a["path"].lower().startswith("\\microsoft\\") and not a.get("force"):
+            return fail("Windows' own tasks aren't stopped or disabled from here.")
+        cmd = {"run": "Start-ScheduledTask", "end": "Stop-ScheduledTask", "enable": "Enable-ScheduledTask", "disable": "Disable-ScheduledTask"}[op]
+        body = f"{cmd} -TaskPath $path -TaskName $name -ErrorAction Stop | Out-Null\n" + r'''
+Start-Sleep 1
+$t = Get-ScheduledTask -TaskPath $path -TaskName $name
+@{ ok = $true; message = "$($t.TaskName): $($t.State)" } | ConvertTo-Json -Compress'''
+        detail = f"{op.capitalize()} scheduled task {a['path']}{a['name']}"
+    elif kind == "net" and op in ("flushdns", "registerdns", "renew", "gpupdate"):
+        body = {
+            "flushdns": "Clear-DnsClientCache\n@{ ok = $true; message = 'DNS cache cleared' } | ConvertTo-Json -Compress",
+            "registerdns": "$ErrorActionPreference = 'Continue'\n& ipconfig.exe /registerdns | Out-Null\n@{ ok = ($LASTEXITCODE -eq 0); message = 'DNS registration started (takes a few minutes)' } | ConvertTo-Json -Compress",
+            # release cuts the network (and this WinRM call), so both run from a detached task
+            "renew": RUN_DETACHED + "Start-Detached 'cmd.exe' '/c ipconfig /release & ipconfig /renew'\n@{ ok = $true; message = 'releasing and renewing the DHCP lease: the PC drops off the network for a few seconds' } | ConvertTo-Json -Compress",
+            "gpupdate": "$ErrorActionPreference = 'Continue'\n$o = & gpupdate.exe /force /wait:90 2>&1 | Out-String\n@{ ok = ($LASTEXITCODE -eq 0); message = (($o -split \"`n\" | Where-Object { $_.Trim() }) -join ' ').Trim() } | ConvertTo-Json -Compress",
+        }[op]
+        detail = {"flushdns": "Flush DNS cache", "registerdns": "Register in DNS", "renew": "Release and renew DHCP lease", "gpupdate": "Group Policy update (gpupdate /force)"}[op]
+    else:
+        return fail("Unknown change.")
+    head = "".join(f"${k} = D '{_b(a.get(k, ''))}'\n" for k in ("name", "path", "desc", "access", "account", "value", "location"))
+    return _go(db, dev, who, key, detail, head + body)
