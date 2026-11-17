@@ -918,49 +918,22 @@ class AdOpIn(BaseModel):
 
 @app.post("/api/devices/{hostname}/ad")
 def device_ad_change(hostname: str, body: AdOpIn, user=Depends(ui_auth), db=Depends(db_session)):
-    from .collectors import ad as adc
     from . import remote
     dev = _device(db, hostname)
-    cfg = _ad_cfg(db, dev)
-    op, value = body.op, (body.value or "").strip()
-    if op == "rename":
-        return _remote(lambda: remote.rename(db, dev, user, value, cfg))
-    base = adc._base(cfg, dev.ad_dn).lower()
-    if op not in ("description", "location", "enable", "disable", "move", "add_group", "remove_group"):
-        return {"ok": False, "output": "Unknown change."}
-    if len(value) > 1024 or any(ord(ch) < 32 for ch in value):
-        return {"ok": False, "output": "Value too long."}
-    if op in ("move", "add_group", "remove_group") and not (value.lower().endswith("," + base) and "=" in value.split(",")[0]):
-        return {"ok": False, "output": "Pick an OU or group from this computer's domain."}
-    labels = {"description": f"Set AD description to '{value}'", "location": f"Set AD location to '{value}'", "enable": "Enable the AD computer account",
-              "disable": "Disable the AD computer account", "move": f"Move to {value}", "add_group": f"Add to group {value}",
-              "remove_group": f"Remove from group {value}"}
-    try:
-        new_dn = adc.computer_action(cfg, dev.ad_dn, op, value)
-        ok, msg = True, "done"
-        if op == "move":
-            dev.ad_dn = new_dn
-        if op in ("enable", "disable"):
-            dev.ad_enabled = op == "enable"
-        if op == "description":
-            dev.ad_description = value
-    except Exception as exc:
-        ok, msg = False, f"Failed: {str(exc)[:300]}"
-    db.add(AuditLog(actor=user, action=f"ad.computer.{op}", target=f"computer:{dev.hostname}", result=f"{labels[op]}: {msg}"[:500]))
-    log_change(db, dev, "tool", f"{labels[op]}: {msg} (by {user})")
-    db.commit()
-    return {"ok": ok, "output": f"{labels[op]}: {msg}"}
+    _ad_cfg(db, dev)
+    return _remote(lambda: remote.ad_change(db, dev, user, body.op, body.value))
 
 
 class FixIn(BaseModel):
     action: str
     value: str | None = None
     adhoc: AdhocIn | None = None     # action "script" without a saved script: a one-off command
+    tool: dict | None = None         # action "tool": {"tool": ..., "args": {...}} (remote.BULK)
 
 
 @app.post("/api/devices/{hostname}/fix")
 def device_fix(hostname: str, body: FixIn, user=Depends(ui_auth), db=Depends(db_session)):
-    return fixes.run(db, _device(db, hostname), body.action, user, body.value, body.adhoc.model_dump() if body.adhoc else None)
+    return fixes.run(db, _device(db, hostname), body.action, user, body.value, body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None)
 
 
 class BulkFixIn(BaseModel):
@@ -969,6 +942,7 @@ class BulkFixIn(BaseModel):
     group: str | None = None           # every computer in this group, as well as hostnames
     value: str | None = None
     adhoc: AdhocIn | None = None
+    tool: dict | None = None
 
 
 @app.post("/api/fix/bulk")
@@ -984,7 +958,7 @@ def bulk_fix(body: BulkFixIn, user=Depends(ui_auth)):
     if len(set(hosts)) > 2000:
         raise HTTPException(400, "at most 2,000 computers at a time")
     try:
-        n = fixes.run_many(hosts, body.action, user, body.value, body.adhoc.model_dump() if body.adhoc else None)
+        n = fixes.run_many(hosts, body.action, user, body.value, body.tool if body.action == "tool" else body.adhoc.model_dump() if body.adhoc else None)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, "count": n, "output": f"Queued for {n} computer{'s' if n != 1 else ''}. Track it in Software > Deployments; "
@@ -1031,7 +1005,7 @@ def deployment_retry(did: int, actor=Depends(ui_auth), db=Depends(db_session)):
     d = db.get(Deployment, did)
     if not d or d.status not in ("failed", "expired", "cancelled"):
         raise HTTPException(400, "only a failed, expired or cancelled deployment can be retried")
-    snap = (d.label, d.payload) if d.action == "script" and d.payload else None
+    snap = (d.label, d.payload) if d.action in ("script", "tool") and d.payload else None
     try:
         n = fixes.run_many([d.hostname], d.action, actor, d.value, snapshot=snap)
     except ValueError as exc:

@@ -211,6 +211,16 @@ Over WinRM, live, on demand:
 Every change is confirmed first and written to the audit log and the PC's History. Text typed in the browser is
 sent to the PC as data (base64-encoded), never pasted into the script as code.
 
+## Configure many PCs at once (Computers > Configure…, Groups > Configure)
+
+Pick computers in the list (or a group) and apply one change to all of them: power (restart or shut down with a
+notice, hibernate, lock, log off everyone), a pop-up message, Windows updates (with the restart choice), a service
+action, a registry value, local Administrators membership, a printer for every user, a system environment
+variable, Group Policy update / DNS, Defender scan or signatures, or an AD change (description, location, move to
+OU, group, enable/disable). It goes through the deployment queue like scripts and app updates: a few PCs at a time,
+offline PCs get it when they're back, and each PC's result is in Software > Deployments and its History. The same
+checks apply per PC as on its page (for example WinRM is never stopped), and a refused PC fails with the reason.
+
 ## Scripts (Software > Scripts)
 
 Keep a library of PowerShell or command prompt scripts, and run one, or a one-off command, on:

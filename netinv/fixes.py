@@ -33,7 +33,7 @@ from .ingest import log_change
 
 log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
-ACTIONS = {"windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script",
+ACTIONS = {"tool", "windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script",
            "agent_install", "agent_remove"}
 LANGS = {"powershell": "PowerShell", "cmd": "Command prompt"}
 MAX_SCRIPT = 100_000
@@ -267,10 +267,18 @@ def script_payload(db, value: str | None, adhoc: dict | None) -> tuple[str, str,
 def _digest(payload: str) -> str:
     import hashlib
     p = json.loads(payload)
+    if "tool" in p:
+        return f"tool {p['tool']}: " + json.dumps(p.get("args") or {})[:200]
     return f"{LANGS[p['language']]}, sha256 {hashlib.sha256(p['body'].encode()).hexdigest()[:12]}"
 
 
 WU_AFTER = {"none": "", "restart": ", then restart if needed", "notify": ", then ask the user to restart"}
+
+
+def tool_payload(spec: dict | None) -> tuple[str, str]:
+    """(label, payload) for a remote tool run through the queue (remote.BULK)."""
+    from . import remote
+    return remote.bulk_label(spec or {}), json.dumps(spec)
 
 
 def _validate(action: str, value: str | None) -> tuple[str, str | None]:
@@ -292,6 +300,8 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
         return f"{'Uninstall' if action == 'app_uninstall' else 'Repair'} {value}", value
     if action == "script":
         return "Run script", value
+    if action == "tool":
+        return "Tool", None
     if action == "agent_install":
         from .agentpush import RUN_AS
         run_as = value if value in RUN_AS else "LOCALSERVICE"
@@ -321,6 +331,8 @@ def enqueue(db, hostname: str, action: str, who: str, value: str | None = None, 
     payload = None
     if action == "script":
         label, payload = snapshot if snapshot else script_payload(db, value, adhoc)[:2]
+    if action == "tool":
+        label, payload = snapshot if snapshot else tool_payload(adhoc)
     if action in ("app_uninstall", "app_repair"):
         name = _sw_name(db, hostname, value)
         if not name:
@@ -344,6 +356,9 @@ def _execute(db, dev: Device, dep) -> str:
         raise PermissionError("No Windows credential is configured (Settings > Credentials).")
     addr = _addr(dev)
     action, value = dep.action, dep.value
+    if action == "tool":
+        from . import remote
+        return remote.bulk_run(db, dev, dep.who or "?", json.loads(dep.payload or "{}"))
     if action == "windows_updates":
         _launch(addr, cfg, _task_name(action), WU_SCRIPT.replace("__AFTER__", value if value in WU_AFTER else "none"))
         return "Started. Windows is downloading and installing the updates."
@@ -472,6 +487,8 @@ def run_many(hostnames: list[str], action: str, who: str, value: str | None = No
         _validate(action, value)
         if action == "script" and not snapshot:      # one snapshot for every PC, so they all run the same text
             snapshot = script_payload(db, value, adhoc)[:2]
+        if action == "tool" and not snapshot:
+            snapshot = tool_payload(adhoc)
         known = {h for (h,) in db.execute(select(Device.hostname).where(Device.hostname.in_(hosts)))}
         queued = 0
         for h in hosts:

@@ -1288,6 +1288,50 @@ async function loadAdTab(el) {
   $("#adgrp").querySelectorAll("[data-rmgrp]").forEach((a) => a.onclick = () => doOp("remove_group", a.dataset.rmgrp, `Remove ${host} from ${cnOf(a.dataset.rmgrp)}?`));
 }
 
+// ------------------------------------------------------------ configure many PCs at once (remote.BULK through the deployment queue)
+const BULK_TOOLS = {
+  power: ["Power", `<label>Action <select name="power_op"><option value="restart">Restart</option><option value="shutdown">Shut down</option><option value="abort">Cancel pending shutdown/restart</option>
+      <option value="hibernate">Hibernate</option><option value="sleep">Sleep</option><option value="lock">Lock screen</option><option value="logoff_all">Log off everyone</option></select></label>
+    <label>Delay (restart/shut down) <select name="power_min"><option value="0">Now</option><option value="5" selected>5 minutes</option><option value="15">15 minutes</option><option value="60">1 hour</option></select></label>
+    <label>Notice <input name="power_msg" value="Your IT department is restarting this computer. Please save your work."></label>`,
+    (f) => ({ op: f.power_op, minutes: +f.power_min, message: f.power_msg })],
+  message: ["Pop-up message", `<label>Title <input name="msg_title" value="Message from IT"></label><label>Message <textarea name="msg_text" rows="3"></textarea></label>
+    <label>Stays for <select name="msg_secs"><option value="300">5 minutes</option><option value="3600">1 hour</option><option value="86400">until closed</option></select></label>`,
+    (f) => ({ title: f.msg_title, text: f.msg_text, seconds: +f.msg_secs })],
+  windows_updates: ["Install Windows updates", WU_AFTER_FIELD, (f) => f.after],
+  service: ["Service", `<label>Service name (short name, e.g. Spooler) <input name="svc_name"></label><label>Action <select name="svc_act">${SVC_ACT.map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>`,
+    (f) => ({ name: f.svc_name.trim(), action: f.svc_act })],
+  registry: ["Registry value", `<label>Change <select name="reg_op"><option value="set">Set a value</option><option value="delete_value">Delete a value</option></select></label>
+    <label>Key <input name="reg_path" placeholder="HKLM\\SOFTWARE\\Vendor\\App"></label><label>Value name <input name="reg_name" placeholder="empty = (Default)"></label>
+    <label>Type <select name="reg_kind">${Object.entries(REG_KIND).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label><label>Data <input name="reg_data"></label>`,
+    (f) => ({ op: f.reg_op, path: f.reg_path.trim(), name: f.reg_name, kind: f.reg_kind, data: f.reg_data })],
+  admin: ["Local Administrators", `<label>Change <select name="adm_op"><option value="add_admin">Add to Administrators</option><option value="remove_admin">Remove from Administrators</option></select></label>
+    <label>Account (DOMAIN\\name) <input name="adm_name"></label>`, (f) => ({ op: f.adm_op, name: f.adm_name.trim() })],
+  printer: ["Printer for every user", `<label>Change <select name="prn_op"><option value="add">Add</option><option value="remove">Remove</option></select></label>
+    <label>Shared printer (\\\\server\\printer) <input name="prn_name"></label>`, (f) => ({ op: f.prn_op, name: f.prn_name.trim() })],
+  env: ["System environment variable", `<label>Name <input name="env_name"></label><label>Value <input name="env_value"></label>`, (f) => ({ name: f.env_name.trim(), value: f.env_value })],
+  net: ["Network / policy", `<label>Action <select name="net_op"><option value="gpupdate">Group Policy update</option><option value="flushdns">Flush DNS cache</option><option value="registerdns">Register in DNS</option></select></label>`,
+    (f) => ({ op: f.net_op })],
+  defender: ["Microsoft Defender", `<label>Action <select name="def_op"><option value="signatures">Update signatures</option><option value="quickscan">Quick scan</option><option value="fullscan">Full scan</option></select></label>`,
+    (f) => ({ op: f.def_op })],
+  ad: ["Active Directory", `<label>Change <select name="ad_op"><option value="description">Set description</option><option value="location">Set location</option><option value="move">Move to OU</option>
+      <option value="add_group">Add to group</option><option value="remove_group">Remove from group</option><option value="enable">Enable</option><option value="disable">Disable</option></select></label>
+    <label>Value (text, or the OU / group distinguished name) <input name="ad_value" placeholder="OU=Laptops,DC=corp,DC=example,DC=com"></label>`, (f) => ({ op: f.ad_op, value: f.ad_value.trim() })],
+};
+async function bulkToolDialog({ hosts = [], group = null } = {}) {
+  const who = group ? `every computer in the group ${group}` : hosts.length === 1 ? hosts[0] : `${hosts.length} computers`;
+  const f = await formModal(`<h3>Configure ${esc(who)}</h3><label>What <select name="tool">${Object.entries(BULK_TOOLS).map(([k, t]) => `<option value="${k}">${esc(t[0])}</option>`).join("")}</select></label>
+    ${Object.entries(BULK_TOOLS).map(([k, t]) => `<fieldset class="bulkf" data-bt="${k}">${t[1]}</fieldset>`).join("")}
+    <p class="muted small">Goes through the deployment queue: a few PCs at a time, offline PCs get it when they come back, and each PC's result is in Software &gt; Deployments and its History.</p>`, true,
+    (form) => { const show = () => form.querySelectorAll(".bulkf").forEach((fs) => { fs.hidden = fs.dataset.bt !== form.tool.value; }); form.tool.onchange = show; show(); });
+  if (!f) return;
+  const t = BULK_TOOLS[f.tool], args = t[2](f);
+  if (!(await confirmBox(`${t[0]} on ${who}?`))) return;
+  const req = f.tool === "windows_updates" ? { action: "windows_updates", value: args } : { action: "tool", tool: { tool: f.tool, args } };
+  try { const r = await post("/api/fix/bulk", { ...req, hostnames: hosts, group }); toast(r.output, !r.ok); } catch (e) { toast(errText(e), true); }
+}
+$("#bulkconfig").onclick = () => grid.selected.size ? bulkToolDialog({ hosts: [...grid.selected] }) : toast("Select one or more computers first.", true);
+
 // ------------------------------------------------------------ deployment queue and log
 const DEP_PILL = { queued: "warn", sending: "warn", running: "warn", success: "good", failed: "bad", expired: "bad", cancelled: "mute" };
 const depStatus = (v, r) => `<span class="pill ${DEP_PILL[v] || "mute"}">${r.waiting_offline ? "waiting (PC offline)" : v === "sending" ? "sending" : esc(v)}</span>`;
@@ -2246,7 +2290,7 @@ loaders.groups = async () => {
       kind: (v, r) => v === "rules" ? `<span class="pill good">rules</span>${r.manual ? ` <span class="muted small">+${r.manual} by hand</span>` : ""}` : `<span class="pill mute">by hand</span>`,
       rule: (v) => `<span class="longtext">${esc(v)}</span>`,
       scan_jobs: (v) => esc((v || []).join(", ")),
-      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
+      act: (n) => `<a class="link" data-gshow="${esc(n)}">Show in Computers</a> · <a class="link" data-gscript="${esc(n)}">Run script</a> · <a class="link" data-gpush="${esc(n)}">Push agent</a> · <a class="link" data-gconf="${esc(n)}">Configure</a> · <a class="link" data-gedit="${esc(n)}">Edit</a> · <a class="link" data-gdel="${esc(n)}">Delete</a>`,
     } });
   const el = $("#grptable"), byName = (n) => grpData.groups.find((g) => g.name === n);
   el.querySelectorAll("[data-gmem]").forEach((a) => a.onclick = () => groupMembers(a.dataset.gmem));
@@ -2257,6 +2301,7 @@ loaders.groups = async () => {
   });
   el.querySelectorAll("[data-gscript]").forEach((a) => a.onclick = () => runScriptDialog({ group: a.dataset.gscript }));
   el.querySelectorAll("[data-gpush]").forEach((a) => a.onclick = () => pushAgentDialog([], a.dataset.gpush));
+  el.querySelectorAll("[data-gconf]").forEach((a) => a.onclick = () => bulkToolDialog({ group: a.dataset.gconf }));
   el.querySelectorAll("[data-gedit]").forEach((a) => a.onclick = () => editGroup(byName(a.dataset.gedit)));
   el.querySelectorAll("[data-gdel]").forEach((a) => a.onclick = async () => {
     const g = byName(a.dataset.gdel);
