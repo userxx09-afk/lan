@@ -220,6 +220,31 @@ def dc_client_host(host: str | None, ip: str | None, source: str) -> str | None:
     return host or (dc if local and ip is not None else None)
 
 
+LOGON_NTLM = 100          # pseudo logon type for 4776 (NTLM credential validation on a DC); 0 = 4768 Kerberos TGT
+EVENT_OF_TYPE = {0: 4768, LOGON_NTLM: 4776}
+
+
+def _drop_known_ipless(db: Session, rows: list[dict]) -> list[dict]:
+    """The unique key includes ip, and NULLs never conflict, so 4776 rows (no IP) read twice at the edge of a
+    DC pull would be stored twice. Skip the ones already there."""
+    ipless = [r for r in rows if r["ip"] is None]
+    if not ipless:
+        return rows
+    lo, hi = min(r["time"] for r in ipless), max(r["time"] for r in ipless)
+    have = {(s, u, t, lt) for s, u, t, lt in db.execute(
+        select(LogonEvent.source, LogonEvent.username, LogonEvent.time, LogonEvent.logon_type)
+        .where(LogonEvent.ip.is_(None), LogonEvent.time >= lo, LogonEvent.time <= hi))}
+    out, seen = [], set()
+    for r in rows:
+        if r["ip"] is None:
+            k = (r["source"], r["username"], r["time"], r["logon_type"])
+            if k in have or k in seen:
+                continue
+            seen.add(k)
+        out.append(r)
+    return out
+
+
 def add_logons(db: Session, logons: list[LogonIn]) -> int:
     from .exclusions import Exclusions
     excl = Exclusions.load(db)
@@ -228,16 +253,20 @@ def add_logons(db: Session, logons: list[LogonIn]) -> int:
         user = l.username.split("\\")[-1].split("@")[0].lower()
         if not user or user.endswith("$") or user in {"system", "anonymous logon", "-"}:
             continue  # computer accounts / system noise
-        # Logons come from Security events 4768 (Kerberos TGT, logon_type 0) and 4624 (logon).
-        if excl.event("Microsoft-Windows-Security-Auditing", 4768 if l.logon_type == 0 else 4624):
+        # Logons come from Security events 4768 (Kerberos TGT, logon_type 0), 4776 (NTLM, LOGON_NTLM) and 4624.
+        if excl.event("Microsoft-Windows-Security-Auditing", EVENT_OF_TYPE.get(l.logon_type, 4624)):
             continue
         if excl.host(l.hostname) or excl.ip(l.ip):
             continue
-        host = norm_host(l.hostname)
+        host = norm_host((l.hostname or "").strip().lstrip("\\"))     # 4776 can say \\PC01
         if l.source and l.source.lower().startswith("dc:"):
             host = dc_client_host(host, l.ip, l.source)
         rows.append(dict(time=_naive(l.time), username=user[:128], hostname=host and host[:64],
-                         ip=(l.ip or None) and l.ip[:64], logon_type=l.logon_type, source=(l.source or None) and l.source[:64]))
+                         ip=(l.ip or None) and l.ip[:64], logon_type=l.logon_type, source=(l.source or None) and l.source[:64],
+                         host_via="event" if host else None))
+    if not rows:
+        return 0
+    rows = _drop_known_ipless(db, rows)
     if not rows:
         return 0
     dialect = db.get_bind().dialect.name

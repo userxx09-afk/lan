@@ -495,4 +495,6 @@ def run_dc_logons(db: Session) -> str:
     if cfg is None:
         raise why_no_winrm(db)
     msg = winrm.collect_dc_logons(db, cfg)
-    return msg + f", {resolve_logon_hosts(db)} matched to the computer they came from"
+    from . import ipdisc
+    found = ipdisc.refresh(db, cfg)       # DHCP leases + DNS first, so the matching below can use them
+    return msg + f", {resolve_logon_hosts(db)} matched to the computer they came from. {found}"

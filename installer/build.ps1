@@ -134,6 +134,9 @@ Step 'Compiling installer'
 & $iscc "/DAppVersion=$Version" (Join-Path $Here 'netinventory.iss') | Out-Host
 if ($LASTEXITCODE) { throw 'ISCC failed' }
 $out = Get-ChildItem (Join-Path $Here 'output') -Filter "NetInventory-Setup-$Version.exe" | Select-Object -First 1
+# Signed before hashing: latest.json's sha256 must match the file servers download.
+& (Join-Path $Here 'sign.ps1') $out.FullName
+$out = Get-Item $out.FullName
 # latest.json: what installed servers read to find and verify an update (published next to the exe).
 $sha = (Get-FileHash -LiteralPath $out.FullName -Algorithm SHA256).Hash.ToLower()
 [ordered]@{

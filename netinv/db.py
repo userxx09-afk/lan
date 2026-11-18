@@ -199,6 +199,26 @@ class LogonEvent(Base):
     ip: Mapped[str | None] = mapped_column(String(64))
     logon_type: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str | None] = mapped_column(String(64))  # which DC / agent reported it
+    # How the computer was found (correlate.resolve_logon_hosts): event (WorkstationName in the event itself),
+    # dhcp (DHCP lease for that IP at that time), named (another event from that IP named the PC), nic, arp,
+    # dns (A/AAAA record of a PC), ptr (reverse DNS). None = stored by a version before 0.28.
+    host_via: Mapped[str | None] = mapped_column(String(8))
+
+
+class IpSighting(Base):
+    """An IP address seen for a computer, from somewhere other than the PC's own inventory:
+    DHCP leases and the DHCP audit log (source dhcp:<server>) and DNS A/AAAA lookups of AD computers (dns).
+    first_seen..last_seen is when the binding held (for the DHCP audit log: the first grant to the last renewal)."""
+    __tablename__ = "ip_sightings"
+    __table_args__ = (UniqueConstraint("ip", "hostname", "source"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ip: Mapped[str] = mapped_column(String(64), index=True)
+    hostname: Mapped[str | None] = mapped_column(String(64), index=True)
+    mac: Mapped[str | None] = mapped_column(String(17), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    expires: Mapped[datetime | None] = mapped_column(DateTime)      # DHCP lease expiry (UTC), when known
 
 
 # --------------------------------------------------------------------------- network
