@@ -82,6 +82,11 @@ for s in (agentpush.INSTALL, agentpush.REMOVE):
         s = s.replace(k, v)
     seen.append(s)
 
+from netinv import ipdisc  # noqa: E402
+from netinv.collectors import winrm  # noqa: E402
+seen += [ipdisc.DISCOVER_SCRIPT, ipdisc.DHCP_SCRIPT.replace("__SINCE__", "2026-11-01T00:00:00Z"),
+         winrm.DC_LOGON_SCRIPT.replace("__SINCE__", "2026-11-01T00:00:00Z").replace("__MAX__", "100")]
+
 for i, s in enumerate(seen):
     (out / f"script{i:02d}.ps1").write_text(s, encoding="utf-8-sig")
 print(f"{len(seen)} scripts written to {out}")

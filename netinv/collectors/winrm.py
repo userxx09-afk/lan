@@ -2,7 +2,7 @@
 
 * endpoints: runs ENDPOINT_SCRIPT on each PC and stores the result through the
   same EndpointPayload a future agent would POST.
-* dc_logons: reads Kerberos TGT (4768) and logon (4624) events from each DC.
+* dc_logons: reads Kerberos TGT (4768), logon (4624) and NTLM validation (4776) events from each DC.
 
 Needs WinRM enabled on targets (GPO: "Allow remote server management through WinRM")
 and an account that is local admin on the PCs and in "Event Log Readers" on the DCs.
@@ -108,7 +108,7 @@ if ($LogonDays -gt 0) {
 DC_LOGON_SCRIPT = r'''
 $ErrorActionPreference = 'SilentlyContinue'
 $since = [datetime]::Parse('__SINCE__').ToLocalTime()
-$xp = "*[System[(EventID=4768 or EventID=4624) and TimeCreated[@SystemTime>='" + $since.ToUniversalTime().ToString('o') + "']]]"
+$xp = "*[System[(EventID=4768 or EventID=4624 or EventID=4776) and TimeCreated[@SystemTime>='" + $since.ToUniversalTime().ToString('o') + "']]]"
 $err = $null
 $ev = @()
 try { $ev = @(Get-WinEvent -LogName Security -FilterXPath $xp -MaxEvents __MAX__ -ErrorAction Stop) }
@@ -120,6 +120,9 @@ $out = @($ev | ForEach-Object {
     @{ time = $_.TimeCreated.ToUniversalTime().ToString('o'); username = $d.TargetUserName; ip = $ip; logon_type = 0 }
   } elseif ($_.Id -eq 4624 -and $d.WorkstationName -and $d.WorkstationName -ne '-' -and [int]$d.LogonType -eq 3) {
     @{ time = $_.TimeCreated.ToUniversalTime().ToString('o'); username = $d.TargetUserName; hostname = $d.WorkstationName; ip = $ip; logon_type = 3 }
+  } elseif ($_.Id -eq 4776 -and $d.Status -eq '0x0' -and $d.Workstation -and $d.Workstation -ne '-') {
+    # NTLM sign-in checked by this DC: no IP, but Workstation names the client PC
+    @{ time = $_.TimeCreated.ToUniversalTime().ToString('o'); username = $d.TargetUserName; hostname = $d.Workstation; logon_type = 100 }
   }
 })
 $who = $(try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" })
