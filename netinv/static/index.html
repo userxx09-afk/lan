@@ -252,12 +252,14 @@
   <section id="network" class="tab">
     <h2>Domain controllers</h2><div id="dctable"></div>
     <h2>Network devices</h2><div id="ndtable"></div>
-    <h2>Switch ports</h2>
+    <h2 id="spheading">Switch ports</h2>
     <p class="muted">The neighbor is what the port's LLDP/CDP says is on the other end: another switch, a router, an access point
       or an IP phone (and sometimes a PC that sends LLDP). Computers are found by matching the MAC addresses the switch learned on
       the port against each PC's MACs (from its inventory or DHCP lease). Uplinks are left out, so a PC shows on its own access
       port, including when it is plugged in behind a phone. Click a port to see every MAC on it.</p>
-    <div class="toolbar"><input id="spfilter" placeholder="Filter by switch, port, neighbor or computer"></div>
+    <div class="toolbar"><select id="spswitch" title="Show the ports of one switch"><option value="">All switches</option></select>
+      <button class="small ghost" id="spall" hidden>Show all switches</button>
+      <input id="spfilter" placeholder="Filter by port, neighbor or computer"></div>
     <div id="sptable"></div>
   </section>
 

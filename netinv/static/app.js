@@ -2061,14 +2061,31 @@ loaders.network = async () => {
   const [dc, nd, sp] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
     post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 })]);
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
+  // Clicking a switch (or picking it in the drop-down) shows only that switch's ports.
+  const sel = $("#spswitch");
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">All switches</option>` + nd.rows.slice().sort((a, b) => String(a.sysname || a.ip).localeCompare(String(b.sysname || b.ip)))
+    .map((x) => `<option value="${esc(x.ip)}">${esc(x.sysname || x.ip)}${x.sysname ? ` (${esc(x.ip)})` : ""}</option>`).join("");
+  sel.value = nd.rows.some((x) => x.ip === keep) ? keep : "";
+  const showPorts = () => {
+    const ip = sel.value;
+    $("#spall").hidden = !ip;
+    table($("#sptable"), ip ? sp.rows.filter((r) => r.switch_ip === ip) : sp.rows,
+      ["switch_name", "port", "alias", "oper_up", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
+      { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
+        labels: { port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+        cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
+          port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
+          unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
+  };
+  const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  sel.onchange = showPorts;
+  $("#spall").onclick = () => { sel.value = ""; showPorts(); };
   table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "uptime_s", "last_polled", "poll_error"],
-    { cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : "") }, labels: { uptime_s: "uptime" } });
-  table($("#sptable"), sp.rows, ["switch_name", "port", "alias", "oper_up", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
-    { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
-      labels: { port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
-      cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
-        port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
-        unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
+    { rowTitle: "Show this switch's ports", rowClick: (r) => pickSwitch(r.ip),
+      cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""), sysname: (v, r) => `<a class="link">${esc(v || r.ip)}</a>` },
+      labels: { uptime_s: "uptime", port_count: "ports" } });
+  showPorts();
 };
 
 // ------------------------------------------------------------ report builder
