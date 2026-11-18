@@ -35,12 +35,58 @@ function table(el, rows, cols, opts = {}) {
     el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
     el.querySelectorAll("[data-user]").forEach((a) => a.onclick = () => openUser(a.dataset.user));
     if (opts.rowClick) el.querySelectorAll("tr[data-ri]").forEach((tr) => tr.onclick = (e) => {
-      if (!e.target.closest("[data-host],[data-user]")) opts.rowClick(data[+tr.dataset.ri]);
+      if (!e.target.closest("[data-host],[data-user],[data-swport]")) opts.rowClick(data[+tr.dataset.ri]);
     });
   };
   if (opts.filterEl) opts.filterEl.oninput = render;
   render();
 }
+// ------------------------------------------------------------ switch ports
+// A switch port, linked to its drawer (neighbour + every MAC learned there, tied to computers).
+const portLink = (sw, swip, port, label) => (port && swip ? `<a class="link" data-swip="${esc(swip)}" data-swport="${esc(port)}">${esc(label ?? port)}</a>` : esc(label ?? port ?? ""));
+const NB_KIND = { switch: ["switch", "mute"], router: ["router", "mute"], ap: ["access point", "mute"], phone: ["IP phone", "warn"],
+  computer: ["computer", "good"], other: ["other", "mute"], unknown: ["device", "mute"] };
+const kindPill = (k) => (k && NB_KIND[k] ? `<span class="pill ${NB_KIND[k][1]}">${NB_KIND[k][0]}</span>` : "");
+const PORT_TYPE = { uplink: ["uplink", "mute", "Leads to another switch, router or access point, or has too many MACs: its MACs are not plugged in here"],
+  phone: ["phone", "warn", "An IP phone is the LLDP/CDP neighbour; the PC plugged into the phone is shown under computers"],
+  access: ["access", "good", "Edge port: the MACs learned here are plugged in here"] };
+const portType = (v) => (PORT_TYPE[v] ? `<span class="pill ${PORT_TYPE[v][1]}" title="${esc(PORT_TYPE[v][2])}">${PORT_TYPE[v][0]}</span>` : "");
+const MAC_VIA = { inventory: "MAC from the PC's own inventory (agent or WinRM)", DHCP: "MAC from the PC's DHCP lease" };
+const viaPill = (v) => (v ? `<span class="small muted" title="${esc(MAC_VIA[v] || "")}">via ${esc(v)}</span>` : "");
+// LLDP/CDP neighbour: what it is, and a link to it when it is one of our computers or a switch we poll.
+const neighborCell = (v, r) => {
+  if (!v) return "";
+  const name = r.neighbor_computer ? hostLink(r.neighbor_computer)
+    : r.neighbor_switch_ip ? portLink(v, r.neighbor_switch_ip, r.neighbor_port, v) : esc(v);
+  return `${kindPill(r.neighbor_kind)} ${name}${r.neighbor_port ? ` <span class="small muted">${esc(r.neighbor_port)}</span>` : ""}`;
+};
+const hostList = (v) => (v ? String(v).split(", ").map(hostLink).join(" ") : "");
+async function openPort(swip, port) {
+  let d;
+  try { d = await api(`/api/switch-port?switch_ip=${encodeURIComponent(swip)}&port=${encodeURIComponent(port)}`); }
+  catch { drawer(`<h2>${esc(port)}</h2><p class="muted">That port isn't in the inventory (the switch at ${esc(swip)} may not have been polled yet).</p>`); return; }
+  const p = d.port;
+  drawer(`<h2>${esc(p.switch_name || p.switch_ip)} · ${esc(p.port)} ${portType(p.port_type)}</h2>
+    <div class="summary"><div class="panel">
+      ${kvRow("Description", esc(p.alias))}${kvRow("Status", p.oper_up ? "up" : "down")}${kvRow("Speed", p.speed_mbps ? `${p.speed_mbps} Mb/s` : "")}
+      ${kvRow("VLAN", esc(p.vlan))}${kvRow("MACs learned", esc(p.mac_count))}
+      ${kvRow("Neighbor (LLDP/CDP)", neighborCell(p.neighbor, p) + (p.neighbor_ip ? ` <span class="small muted">${esc(p.neighbor_ip)}</span>` : ""))}
+      ${kvRow("Computers", hostList(p.computers))}
+    </div></div>
+    <p class="muted">${p.port_type === "uplink" ? "This port leads to more network, so the MACs below are not plugged in here: each computer is shown on the access port it was found on."
+      : "Every MAC address the switch learned on this port. Computers are matched by MAC from their own inventory or their DHCP lease."}</p>
+    <div id="pmacs"></div>`);
+  $("#detail .panel").querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
+  table($("#pmacs"), d.macs, ["mac", "hostname", "ip", "vlan", "device_kind", "now_on", "last_seen"], {
+    labels: { device_kind: "is", now_on: "now on" },
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? "" : `<span class="pill mute">unknown</span>`),
+      device_kind: kindPill } });
+}
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-swport]");
+  if (a) { e.preventDefault(); openPort(a.dataset.swip, a.dataset.swport); }
+});
+
 const hostLink = (v) => (v ? `<a class="link" data-host="${esc(v)}">${esc(v)}</a>` : `<span class="pill mute">unknown</span>`);
 const logonType = (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached", 100: "NTLM (DC)" }[t] ?? esc(t));
 const MATCHED_BY = { event: "named in the event", dhcp: "DHCP lease at the time", named: "another event from that IP named it",
@@ -413,7 +459,11 @@ function renderAssetTab(d, tab) {
         ${kvRow("Last patch", `${fmtDate(v.last_patch_installed)} ${v.pending_updates ? `<span class="pill warn">${v.pending_updates} pending</span>` : ""} ${v.pending_reboot ? `<span class="pill warn">reboot pending</span>` : ""}`)}
         <h3>Network</h3>
         ${d.nics.map((n) => kvRow("Adapter", `${esc(n.description || "")}<br>${esc(n.mac)} · ${esc(n.ip || "")}`)).join("") || kvRow("Adapter", `${esc(v.mac || "unknown")}`)}
-        ${kvRow("Switch port", v.switch_name ? `<b>${esc(v.switch_name)}</b> ${esc(v.switch_port)} · VLAN ${esc(v.vlan ?? "?")} <span class="muted">seen ${fmtDate(v.port_last_seen)}</span>` : `<span class="muted">not found on any switch</span>`)}
+        ${kvRow("Switch port", v.switch_name ? (() => {
+          const at = d.location.find((x) => x.switch_name === v.switch_name && x.port === v.switch_port) || {};
+          return `<b>${esc(v.switch_name)}</b> ${portLink(v.switch_name, at.switch_ip, v.switch_port)} · VLAN ${esc(v.vlan ?? "?")}
+            ${at.phone ? ` · behind phone ${esc(at.phone)}` : ""} <span class="muted">seen ${fmtDate(v.port_last_seen)}</span> ${viaPill(at.matched_by)}`;
+        })() : `<span class="muted">not found on any switch${d.nics.length || v.mac ? "" : " (no MAC address known for this PC yet: it needs the agent, a WinRM scan or a DHCP lease)"}</span>`)}
         <h3>Disks</h3>
         ${d.disks.map((k) => `<div class="disk"><div class="dl"><b>${esc(k.drive)}</b> ${k.free_gb} GB free of ${k.size_gb} GB</div>
           <div class="track"><div class="fill ${k.pct_free < 10 ? "bad" : k.pct_free < 20 ? "warn" : ""}" style="width:${100 - (k.pct_free || 0)}%"></div></div></div>`).join("") || `<p class="muted">No disk data yet.</p>`}
@@ -481,8 +531,11 @@ function renderAssetTab(d, tab) {
     table($("#up1"), d.updates.filter((u) => u.status === "pending"), ["kb", "title", "severity"]);
     table($("#up2"), d.updates.filter((u) => u.status === "installed"), ["kb", "title", "installed_on"], { sort: "installed_on" });
   } else if (tab === "location") {
-    el.innerHTML = `<p class="muted">Every access port this PC's network adapters have been seen on (uplinks excluded).</p><div id="loc"></div>`;
-    table($("#loc"), d.location, ["switch_name", "port", "port_alias", "vlan", "mac", "first_seen", "last_seen"]);
+    el.innerHTML = `<p class="muted">Every access port this PC's network adapters have been seen on, matched by MAC address
+      (uplinks to other switches excluded). Click a port to see everything else on it.</p><div id="loc"></div>`;
+    table($("#loc"), d.location, ["switch_name", "port", "port_alias", "vlan", "phone", "mac", "matched_by", "first_seen", "last_seen"], {
+      labels: { phone: "behind phone", matched_by: "MAC from" },
+      cell: { port: (v, r) => portLink(r.switch_name, r.switch_ip, v), matched_by: (v) => esc(v) } });
   } else if (tab === "logons") {
     el.innerHTML = `<h2>Users on this PC</h2><div id="lg1"></div><h2>Logon events</h2><div id="lg2"></div>`;
     table($("#lg1"), d.users, ["username", "last_logon", "first_logon", "logon_count"], { cell: { username: userLink } });
@@ -1998,8 +2051,11 @@ function formModal(html, wide = false, init = null) {
 
 // ------------------------------------------------------------ port map / network
 loaders.portmap = async () => {
-  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "port", "port_alias", "vlan", "hostname", "ip", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
-  table($("#pmtable"), r.rows, r.columns, { filterEl: $("#pmfilter"), cell: { hostname: hostLink } });
+  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
+  table($("#pmtable"), r.rows, ["switch_name", "port", "port_alias", "vlan", "hostname", "phone", "ip", "mac", "last_seen"], { filterEl: $("#pmfilter"),
+    labels: { phone: "behind phone" },
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind) : hostLink(v)),
+      port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
 };
 loaders.network = async () => {
   const [dc, nd, sp] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
@@ -2007,9 +2063,12 @@ loaders.network = async () => {
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
   table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "uptime_s", "last_polled", "poll_error"],
     { cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : "") }, labels: { uptime_s: "uptime" } });
-  table($("#sptable"), sp.rows, ["switch_name", "port", "alias", "oper_up", "speed_mbps", "is_uplink", "neighbor", "devices_on_port"],
-    { filterEl: $("#spfilter"), cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
-      is_uplink: (v) => (v ? `<span class="pill mute">uplink</span>` : "") } });
+  table($("#sptable"), sp.rows, ["switch_name", "port", "alias", "oper_up", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
+    { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
+      labels: { port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+      cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
+        port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
+        unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
 };
 
 // ------------------------------------------------------------ report builder
@@ -2607,12 +2666,15 @@ $("#search").onsubmit = async (e) => {
   const r = await api(`/api/search?q=${encodeURIComponent(q)}`);
   drawer(`<h2>Results for “${esc(q)}”</h2>${r.port_map?.length ? `<h3>Switch location</h3><div id="sp"></div>` : ""}
     <h3>Computers</h3><div id="sd"></div><h3>Users</h3><div id="su"></div>`);
-  if (r.port_map?.length) table($("#sp"), r.port_map, ["mac", "hostname", "ip", "switch_name", "port", "vlan", "last_seen"], { cell: { hostname: hostLink } });
+  if (r.port_map?.length) table($("#sp"), r.port_map, ["mac", "hostname", "ip", "switch_name", "port", "vlan", "last_seen"],
+    { cell: { hostname: hostLink, port: (v, x) => portLink(x.switch_name, x.switch_ip, v) } });
   table($("#sd"), r.devices, null, { cell: { hostname: hostLink, last_user: userLink } });
   table($("#su"), r.users, ["username", "hostname", "last_logon", "logon_count"], { cell: { username: userLink, hostname: hostLink } });
 };
 function drawer(html) { $("#detail").innerHTML = html; $("#drawer").hidden = false; }
 $("#close").onclick = () => ($("#drawer").hidden = true);
+// opening a computer or another switch port from inside the drawer: close the drawer first so the page shows
+$("#detail").addEventListener("click", (e) => { if (e.target.closest("[data-host],[data-user]")) $("#drawer").hidden = true; }, true);
 $("#drawer").onclick = (e) => { if (e.target.id === "drawer") $("#drawer").hidden = true; };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#drawer").hidden = true; });
 

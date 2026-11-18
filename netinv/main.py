@@ -19,7 +19,7 @@ from sqlalchemy import bindparam, select, text
 
 from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, reports, scanning, updater
 from .config import settings
-from .correlate import create_views
+from .correlate import MAC_OWNER_HOST, MAC_OWNER_VIA, create_views
 from datetime import datetime
 
 from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
@@ -340,19 +340,44 @@ def _device(db, hostname: str) -> Device:
     return dev
 
 
+@app.get("/api/switch-port", dependencies=UI)
+def switch_port(switch_ip: str, port: str, db=Depends(db_session)):
+    """One switch port: its LLDP/CDP neighbour and every MAC learned on it, each tied to a computer where we can."""
+    info = reports.run_query(db, "v_switch_ports", filters=[{"field": "switch_ip", "op": "eq", "value": switch_ip},
+                                                             {"field": "port", "op": "eq", "value": port}])["rows"]
+    if not info:
+        raise HTTPException(404, "unknown switch port")
+    macs = _rows_of(db.execute(text(f"""
+        SELECT ms.mac, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.first_seen, ms.last_seen,
+               {MAC_OWNER_HOST} AS hostname, {MAC_OWNER_VIA} AS matched_by,
+               (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
+               CASE WHEN ms.mac = sp.neighbor_mac THEN sp.neighbor_kind END AS device_kind,
+               (SELECT pm.switch_name || ' ' || pm.port FROM v_port_map pm WHERE pm.mac = ms.mac
+                  AND NOT (pm.switch_ip = nd.ip AND pm.port = sp.name)) AS now_on
+        FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id JOIN network_devices nd ON nd.id = sp.switch_id
+        WHERE nd.ip = :ip AND sp.name = :port ORDER BY ms.last_seen DESC LIMIT 2000"""), {"ip": switch_ip, "port": port}))
+    return {"port": info[0], "macs": macs}
+
+
 @app.get("/api/devices/{hostname}", dependencies=UI)
 def device(hostname: str, db=Depends(db_session)):
     dev = _device(db, hostname)
     h = dev.hostname
     one = lambda ds, f="hostname", **kw: reports.run_query(db, ds, filters=[{"field": f, "op": "eq", "value": h}], limit=5000, **kw)["rows"]  # noqa: E731
-    macs = [n.mac for n in dev.nics]
+    # the PC's MACs: its NICs, else the MACs its DHCP leases gave (PCs only read from AD)
+    owned = {r[0]: r[1] for r in db.execute(text("SELECT mac, matched_by FROM v_mac_owner WHERE hostname = :h"), {"h": h})}
+    macs = list(owned)
     location = []
     if macs:
         location = _rows_of(db.execute(text(
-            "SELECT nd.sysname AS switch_name, sp.name AS port, sp.alias AS port_alias, ms.vlan, ms.mac, "
-            "ms.first_seen, ms.last_seen FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id "
+            "SELECT nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port, sp.alias AS port_alias, "
+            "COALESCE(ms.vlan, sp.vlan) AS vlan, ms.mac, ms.first_seen, ms.last_seen, sp.neighbor_kind, "
+            "CASE WHEN sp.neighbor_kind = 'phone' THEN sp.neighbor END AS phone "
+            "FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id "
             "JOIN network_devices nd ON nd.id = sp.switch_id WHERE sp.is_uplink = :f AND ms.mac IN :macs "
             "ORDER BY ms.last_seen DESC").bindparams(bindparam("macs", expanding=True)), {"f": False, "macs": macs}))
+        for r in location:
+            r["matched_by"] = owned.get(r["mac"])
     return {"device": one("v_devices")[0], "disks": one("v_disks"), "software": one("v_software", sort="name"),
             "updates": one("v_updates"), "users": one("v_user_devices", sort="last_logon", desc=True),
             "logons": reports.run_query(db, "v_logons", filters=[{"field": "hostname", "op": "eq", "value": h}],

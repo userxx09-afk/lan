@@ -12,16 +12,30 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 VIEWS: dict[str, str] = {
-    # Where each MAC physically is: latest sighting on an edge (non-uplink) port.
+    # Which computer owns a MAC: its NICs from the agent / WinRM inventory, else the DHCP leases of that PC's name
+    # (so PCs that were only read from AD still get matched to the switch port their MAC is on).
+    "v_mac_owner": """
+        SELECT n.mac, d.hostname, 'inventory' AS matched_by
+        FROM device_nics n JOIN devices d ON d.id = n.device_id WHERE n.mac IS NOT NULL
+        UNION
+        SELECT s.mac, d.hostname, 'DHCP' AS matched_by
+        FROM ip_sightings s JOIN devices d ON d.hostname = s.hostname
+        WHERE s.source LIKE 'dhcp:%' AND s.mac IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM device_nics n WHERE n.mac = s.mac)
+    """,
+    # Where each MAC physically is: latest sighting on an edge (non-uplink) port. matched_by says how the MAC was
+    # tied to the computer; device_kind is 'computer', or 'phone' etc. when the MAC is the port's LLDP/CDP neighbour.
     "v_port_map": """
         SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip,
-               hostname
+               hostname, matched_by,
+               CASE WHEN hostname IS NOT NULL THEN 'computer' WHEN mac = neighbor_mac THEN neighbor_kind END AS device_kind,
+               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone
         FROM (
           SELECT ms.mac, nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port,
-                 sp.alias AS port_alias, ms.vlan, ms.last_seen, ms.first_seen,
+                 sp.alias AS port_alias, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.last_seen, ms.first_seen,
+                 sp.neighbor, sp.neighbor_kind, sp.neighbor_mac,
                  (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
-                 (SELECT d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id
-                   WHERE n.mac = ms.mac LIMIT 1) AS hostname,
+                 MAC_OWNER_HOST_ AS hostname, MAC_OWNER_VIA_ AS matched_by,
                  ROW_NUMBER() OVER (PARTITION BY ms.mac ORDER BY ms.last_seen DESC, sp.mac_count ASC) AS rn
           FROM mac_sightings ms
           JOIN switch_ports sp ON sp.id = ms.port_id
@@ -55,10 +69,27 @@ VIEWS: dict[str, str] = {
                CASE WHEN EXISTS (SELECT 1 FROM devices d WHERE d.hostname = l.hostname) THEN 1 ELSE 0 END AS in_inventory
         FROM logon_events l
     """,
+    # One row per port. port_type: uplink (switch/router/AP neighbour, or more MACs than the threshold), phone (IP phone,
+    # usually with a PC behind it), access. neighbor_* are LLDP/CDP; neighbor_computer / neighbor_switch_ip link the
+    # neighbour to the Computers list or a polled switch. computers = PCs whose MAC was last learned on this port.
     "v_switch_ports": """
         SELECT nd.sysname AS switch_name, nd.ip AS switch_ip, nd.vendor, sp.name AS port, sp.alias,
-               sp.oper_up, sp.speed_mbps, sp.is_uplink, sp.mac_count, sp.neighbor, sp.neighbor_port,
-               (SELECT COUNT(*) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name) AS devices_on_port
+               sp.oper_up, sp.speed_mbps, sp.vlan, sp.is_uplink,
+               CASE WHEN sp.is_uplink = TRUE THEN 'uplink' WHEN sp.neighbor_kind = 'phone' THEN 'phone' ELSE 'access' END AS port_type,
+               sp.mac_count, sp.neighbor, sp.neighbor_port, sp.neighbor_kind, sp.neighbor_ip, sp.neighbor_mac,
+               (SELECT d.hostname FROM devices d WHERE sp.neighbor IS NOT NULL
+                  AND (d.hostname = UPPER(sp.neighbor) OR UPPER(sp.neighbor) LIKE d.hostname || '.%'
+                       OR EXISTS (SELECT 1 FROM device_nics n WHERE n.device_id = d.id AND n.mac = sp.neighbor_mac))
+                LIMIT 1) AS neighbor_computer,
+               (SELECT n2.ip FROM network_devices n2 WHERE sp.neighbor IS NOT NULL AND n2.id <> nd.id
+                  AND (n2.ip = sp.neighbor_ip OR LOWER(n2.sysname) = LOWER(sp.neighbor)
+                       OR LOWER(sp.neighbor) LIKE LOWER(n2.sysname) || '.%' OR LOWER(sp.neighbor) LIKE LOWER(n2.sysname) || '(%')
+                LIMIT 1) AS neighbor_switch_ip,
+               (SELECT COUNT(*) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name) AS devices_on_port,
+               (SELECT STRING_AGG_(pm.hostname) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
+                  AND pm.hostname IS NOT NULL) AS computers,
+               (SELECT COUNT(*) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
+                  AND pm.hostname IS NULL AND pm.device_kind IS NULL) AS unknown_devices
         FROM switch_ports sp JOIN network_devices nd ON nd.id = sp.switch_id
     """,
     "v_network_devices": """
@@ -182,8 +213,18 @@ DOMAIN = ("CASE WHEN STRPOS_(UPPER(COALESCE(d.ad_dn, '')), 'DC=') > 0 THEN "
           "LOWER(REPLACE(REPLACE(SUBSTR(UPPER(d.ad_dn), STRPOS_(UPPER(d.ad_dn), 'DC=')), ',DC=', '.'), 'DC=', '')) "
           "WHEN STRPOS_(COALESCE(d.fqdn, ''), '.') > 0 THEN LOWER(SUBSTR(d.fqdn, STRPOS_(d.fqdn, '.') + 1)) END")
 VIEWS["v_devices"] = VIEWS["v_devices"].replace("AD_DISPLAY_VERSION_", AD_DISPLAY_VERSION).replace("DOMAIN_", DOMAIN)
+# Same rule as v_mac_owner, written out as one scalar subquery per column. Not the view itself: a UNION view inside a
+# correlated subquery is scanned whole for every MAC. Not COALESCE(a, b) either: a function around the column stops
+# SQLite from indexing v_port_map.hostname, and v_devices then rebuilds the port map once per computer.
+_OWNER = ("(SELECT {col} FROM ("
+          "SELECT d.hostname AS h, 'inventory' AS via, 0 AS o, NULL AS t FROM device_nics n JOIN devices d ON d.id = n.device_id "
+          "WHERE n.mac = ms.mac "
+          "UNION ALL SELECT d.hostname, 'DHCP', 1, s.last_seen FROM ip_sightings s JOIN devices d ON d.hostname = s.hostname "
+          "WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%') own ORDER BY o, t DESC LIMIT 1)")
+MAC_OWNER_HOST, MAC_OWNER_VIA = _OWNER.format(col="h"), _OWNER.format(col="via")
+VIEWS["v_port_map"] = VIEWS["v_port_map"].replace("MAC_OWNER_HOST_", MAC_OWNER_HOST).replace("MAC_OWNER_VIA_", MAC_OWNER_VIA)
 
-VIEW_ORDER = ["v_port_map", "v_user_devices", "v_disks", "v_software", "v_updates", "v_logons",
+VIEW_ORDER = ["v_mac_owner", "v_port_map", "v_user_devices", "v_disks", "v_software", "v_updates", "v_logons",
               "v_switch_ports", "v_network_devices", "v_domain_controllers", "v_devices", "v_changes",
               "v_users", "v_physical_disks", "v_audit"]
 
@@ -195,12 +236,13 @@ def create_views(db: Session) -> None:
     for name in VIEW_ORDER:
         sql = VIEWS[name]
         if dialect == "sqlite":
+            sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"GROUP_CONCAT(\1, ', ')", sql)
             sql = (sql.replace("= FALSE", "= 0").replace("AS NUMERIC", "AS REAL").replace("GREATEST_(", "MAX(")
-                   .replace("STRING_AGG_(g.name)", "GROUP_CONCAT(g.name, ', ')").replace("STRPOS_(", "INSTR(")
-                   .replace("= TRUE", "= 1"))
+                   .replace("STRPOS_(", "INSTR(").replace("= TRUE", "= 1"))
         else:
-            sql = (sql.replace("GREATEST_(", "GREATEST(").replace("STRING_AGG_(g.name)", "STRING_AGG(g.name, ', ')")
-                   .replace("STRPOS_(", "STRPOS(").replace("'1900-01-01'", "TIMESTAMP '1900-01-01'"))
+            sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"STRING_AGG(\1, ', ')", sql)
+            sql = (sql.replace("GREATEST_(", "GREATEST(").replace("STRPOS_(", "STRPOS(")
+                   .replace("'1900-01-01'", "TIMESTAMP '1900-01-01'"))
         db.execute(text(f"CREATE VIEW {name} AS {sql}"))
     db.commit()
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 from datetime import timedelta
 
-from .db import (AdGroup, AdUser, ArpEntry, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
+from .db import (AdGroup, AdUser, ArpEntry, IpSighting, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
 from .ingest import AvIn, PhysDiskIn, DiskIn, EndpointPayload, HotfixIn, LogonIn, Nic, PendingIn, SoftwareIn, add_logons, apply_endpoint
 
 USERS = ["jsmith", "mgarcia", "alee", "pnguyen", "kpatel", "rjohnson", "lchen", "dwilliams", "sbrown", "tmiller",
@@ -57,10 +57,10 @@ def seed(db) -> str:
     uplinks = {}
     for i, sw in enumerate(access):
         up = SwitchPort(switch=sw, ifindex=52, name="Gi1/0/52" if sw.vendor == "Cisco" else "1/1/52", oper_up=True,
-                        speed_mbps=10000, neighbor="core-sw01", neighbor_port=f"Te1/1/{i + 1}", is_uplink=True)
+                        speed_mbps=10000, neighbor="core-sw01", neighbor_port=f"Te1/1/{i + 1}", neighbor_kind="switch", is_uplink=True)
         db.add(up)
         cp = SwitchPort(switch=core, ifindex=100 + i, name=f"Te1/1/{i + 1}", oper_up=True, speed_mbps=10000,
-                        neighbor=sw.sysname, neighbor_port=up.name, is_uplink=True)
+                        neighbor=sw.sysname, neighbor_port=up.name, neighbor_kind="switch", is_uplink=True)
         db.add(cp)
         uplinks[sw.id] = (up, cp)
     db.flush()
@@ -129,13 +129,25 @@ def seed(db) -> str:
                            created=now - timedelta(days=3)))
 
         sw = access[i % 3]
+        vlan = 20 if sw.location.startswith("HQ") else 30
         port = SwitchPort(switch=sw, ifindex=i, name=(f"Gi1/0/{i}" if sw.vendor == "Cisco" else f"1/1/{i}"),
-                          alias=f"Desk {i:03d}", oper_up=True, speed_mbps=1000, mac_count=1)
+                          alias=f"Desk {i:03d}", oper_up=True, speed_mbps=1000, mac_count=1, vlan=vlan)
+        phone_mac = None
+        if i % 4 == 0:      # the PC is plugged into the desk phone: the phone is the LLDP neighbour, not an uplink
+            phone_mac = f"00:1b:4f:00:{i // 256:02x}:{i % 256:02x}"
+            port.neighbor, port.neighbor_port, port.neighbor_kind = f"SEP001B4F00{i // 256:02X}{i % 256:02X}", "Port 1", "phone"
+            port.neighbor_mac, port.neighbor_descr, port.mac_count = phone_mac, "Cisco IP Phone 8845", 2
+        elif i == 5:        # a PC whose NIC sends LLDP itself
+            port.neighbor, port.neighbor_port, port.neighbor_kind, port.neighbor_mac = f"{host}.corp.example.com", mac, "computer", mac
         db.add(port)
         db.flush()
-        vlan = 20 if sw.location.startswith("HQ") else 30
         db.add(MacSighting(mac=mac, port_id=port.id, vlan=vlan, first_seen=now - timedelta(days=60),
                            last_seen=now - timedelta(minutes=random.randint(1, 600))))
+        if phone_mac:
+            db.add(MacSighting(mac=phone_mac, port_id=port.id, vlan=vlan + 100, last_seen=now))
+        if not reachable:   # never inventoried, so no NIC: its MAC comes from the DHCP lease
+            db.add(IpSighting(ip=ip, hostname=host, mac=mac, source="dhcp:DC01", first_seen=now - timedelta(days=3),
+                              last_seen=now, expires=now + timedelta(days=5)))
         for p in uplinks[sw.id]:
             db.add(MacSighting(mac=mac, port_id=p.id, vlan=vlan, last_seen=now))
         db.add(ArpEntry(ip=ip, mac=mac, source="core-sw01", last_seen=now))
@@ -191,6 +203,14 @@ def seed(db) -> str:
         db.flush()
         db.add(MacSighting(mac=vendor_mac, port_id=port.id, vlan=20, last_seen=now))
         db.add(ArpEntry(ip=ip, mac=vendor_mac, source="core-sw01", last_seen=now))
+    # A ceiling access point: its wireless clients are learned on its port, which is an uplink
+    ap = SwitchPort(switch=access[1], ifindex=300, name="1/1/45", alias="AP lobby", oper_up=True, speed_mbps=2500, mac_count=9,
+                    neighbor="ap-lobby-01", neighbor_port="eth0", neighbor_kind="ap", neighbor_ip="10.0.5.21",
+                    neighbor_descr="ArubaOS AP-535", is_uplink=True)
+    db.add(ap)
+    db.flush()
+    for k in range(9):
+        db.add(MacSighting(mac=f"de:ad:be:ef:00:{k:02x}", port_id=ap.id, vlan=40, last_seen=now))
     for sw in [core] + access:
         db.flush()
     # DC kerberos events (IP only) to show IP -> PC resolution
