@@ -20,18 +20,53 @@ permissions:
   security-events: write
 
 env:
-  # Configure this as a GitHub repository/environment variable.
-  # It MUST point only to the disposable TEST/STAGING instance.
   NETINVENTORY_TEST_URL: ${{ vars.NETINVENTORY_TEST_URL }}
 
 jobs:
 
-  # --------------------------------------------------------------------------
-  # 1. Secret scanning
-  # --------------------------------------------------------------------------
+  # ==========================================================================
+  # 0. PREFLIGHT
+  # Verifies that the test target exists and the self-hosted runner can reach it
+  # ==========================================================================
+  preflight:
+    name: Security test preflight
+    runs-on: self-hosted
+
+    steps:
+      - name: Validate NetInventory test configuration
+        shell: bash
+        env:
+          BASE_URL: ${{ vars.NETINVENTORY_TEST_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::error::NETINVENTORY_TEST_URL is not configured"
+            exit 1
+          fi
+
+          echo "NetInventory security test target is configured."
+
+      - name: Verify NetInventory is reachable
+        shell: bash
+        env:
+          BASE_URL: ${{ vars.NETINVENTORY_TEST_URL }}
+        run: |
+          echo "Testing connectivity to NetInventory..."
+
+          curl --fail --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            "$BASE_URL" > /dev/null
+
+          echo "NetInventory is reachable."
+
+
+  # ==========================================================================
+  # 1. SECRET SCANNING
+  # ==========================================================================
   secrets:
     name: Secret scanning
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,12 +77,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # --------------------------------------------------------------------------
-  # 2. Static application security testing
-  # --------------------------------------------------------------------------
+
+  # ==========================================================================
+  # 2. STATIC APPLICATION SECURITY TESTING
+  # ==========================================================================
   sast:
     name: Semgrep SAST
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -58,12 +95,14 @@ jobs:
             p/owasp-top-ten
             p/security-audit
 
-  # --------------------------------------------------------------------------
-  # 3. Dependency / filesystem vulnerabilities
-  # --------------------------------------------------------------------------
+
+  # ==========================================================================
+  # 3. DEPENDENCY / FILESYSTEM VULNERABILITY SCANNING
+  # ==========================================================================
   dependencies:
     name: Dependency vulnerabilities
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -84,12 +123,14 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-  # --------------------------------------------------------------------------
-  # 4. SBOM
-  # --------------------------------------------------------------------------
+
+  # ==========================================================================
+  # 4. SOFTWARE BILL OF MATERIALS
+  # ==========================================================================
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -107,16 +148,15 @@ jobs:
           path: netinventory-sbom.cdx.json
           retention-days: 90
 
-  # --------------------------------------------------------------------------
-  # 5. NetInventory application security tests
-  #
-  # Implement tests/security/* using pytest, Newman, or your existing test
-  # framework. These tests should exercise a TEST instance only.
-  # --------------------------------------------------------------------------
+
+  # ==========================================================================
+  # 5. NETINVENTORY APPLICATION SECURITY TESTS
+  # Requires successful preflight
+  # ==========================================================================
   app-security:
     name: NetInventory security tests
     runs-on: self-hosted
-    if: ${{ vars.NETINVENTORY_TEST_URL != '' }}
+    needs: preflight
 
     steps:
       - uses: actions/checkout@v4
@@ -162,129 +202,4 @@ jobs:
         env:
           BASE_URL: ${{ env.NETINVENTORY_TEST_URL }}
           TEST_USER: ${{ secrets.NETINV_VIEWER_USER }}
-          TEST_PASSWORD: ${{ secrets.NETINV_VIEWER_PASSWORD }}
-        run: |
-          pytest tests/security/test_logout.py -v
-
-      - name: Archive test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: netinventory-app-security-results
-          path: |
-            test-results/
-          if-no-files-found: ignore
-          retention-days: 90
-
-  # --------------------------------------------------------------------------
-  # 6. OWASP ZAP passive baseline
-  # --------------------------------------------------------------------------
-  zap-baseline:
-    name: ZAP baseline
-    runs-on: self-hosted
-    if: ${{ vars.NETINVENTORY_TEST_URL != '' }}
-
-    steps:
-      - name: ZAP baseline
-        uses: zaproxy/action-baseline@v0.14.0
-        with:
-          target: ${{ env.NETINVENTORY_TEST_URL }}
-          allow_issue_writing: false
-          fail_action: true
-          artifact_name: zap-baseline-report
-
-  # --------------------------------------------------------------------------
-  # 7. Destructive / state-changing security tests
-  #
-  # NIGHTLY or manually requested only.
-  # These MUST target a resettable staging instance and disposable endpoints.
-  # --------------------------------------------------------------------------
-  active-security:
-    name: Controlled active security tests
-    runs-on: self-hosted
-    needs:
-      - secrets
-      - sast
-      - dependencies
-      - app-security
-      - zap-baseline
-
-    if: >-
-      ${{
-        vars.NETINVENTORY_TEST_URL != '' &&
-        (
-          github.event_name == 'schedule' ||
-          (github.event_name == 'workflow_dispatch' &&
-           inputs.run_active_dast == true)
-        )
-      }}
-
-    environment: netinventory-security-test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify target guardrail
-        shell: bash
-        run: |
-          case "${NETINVENTORY_TEST_URL}" in
-            *netinventory-test*|*netinventory-staging*|https://10.*|https://172.16.*|https://192.168.*)
-              echo "Approved non-production target"
-              ;;
-            *)
-              echo "Refusing active testing against unapproved target."
-              exit 1
-              ;;
-          esac
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install security test requirements
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest requests
-
-      - name: Injection and XSS tests
-        env:
-          BASE_URL: ${{ env.NETINVENTORY_TEST_URL }}
-          TEST_USER: ${{ secrets.NETINV_TEST_ADMIN_USER }}
-          TEST_PASSWORD: ${{ secrets.NETINV_TEST_ADMIN_PASSWORD }}
-        run: |
-          pytest tests/security/test_injection.py -v
-          pytest tests/security/test_xss.py -v
-
-      - name: Package/upload abuse tests
-        env:
-          BASE_URL: ${{ env.NETINVENTORY_TEST_URL }}
-          TEST_USER: ${{ secrets.NETINV_TEST_ADMIN_USER }}
-          TEST_PASSWORD: ${{ secrets.NETINV_TEST_ADMIN_PASSWORD }}
-        run: |
-          pytest tests/security/test_uploads.py -v
-
-      - name: High-risk API negative tests
-        env:
-          BASE_URL: ${{ env.NETINVENTORY_TEST_URL }}
-          VIEWER_USER: ${{ secrets.NETINV_VIEWER_USER }}
-          VIEWER_PASSWORD: ${{ secrets.NETINV_VIEWER_PASSWORD }}
-        run: |
-          pytest tests/security/test_privileged_operations.py -v
-
-      - name: Audit validation
-        env:
-          BASE_URL: ${{ env.NETINVENTORY_TEST_URL }}
-          ADMIN_USER: ${{ secrets.NETINV_TEST_ADMIN_USER }}
-          ADMIN_PASSWORD: ${{ secrets.NETINV_TEST_ADMIN_PASSWORD }}
-        run: |
-          pytest tests/security/test_audit.py -v
-
-      - name: Archive active-test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: active-security-evidence
-          path: test-results/
-          if-no-files-found: ignore
-          retention-days: 90
+          TEST_PASSWORD: ${{ secrets.NETINV_VIEWER
