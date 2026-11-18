@@ -12,7 +12,8 @@
   example when AD or the group is unavailable). It is written again on the next AD sign-in.
 - Lockout: 5 failed attempts for a username, or 20 from one address, within 15 minutes block further
   attempts for 15 minutes.
-- Sessions: random token in an HttpOnly, SameSite=Strict cookie (Secure over HTTPS); 12 hours, or 2 hours idle.
+- Sessions: random token in an HttpOnly, SameSite=Strict browser-session cookie (Secure over HTTPS; gone when the
+  browser closes); 12 hours, or 2 hours idle. Sign-ins, failures, sign-outs and timeouts go to the audit log.
 """
 from __future__ import annotations
 
@@ -253,14 +254,45 @@ def session_user(token: str | None) -> Session | None:
     with _lock:
         s = _sessions.get(token)
         now = time.time()
-        if not s or now - s.created > SESSION_MAX or now - s.seen > SESSION_IDLE:
+        why = None
+        if s and now - s.created > SESSION_MAX:
+            why = f"session ended after {SESSION_MAX // 3600} hours"
+        elif s and now - s.seen > SESSION_IDLE:
+            why = f"signed out after {SESSION_IDLE // 3600} hours without use"
+        elif s and s.source == "local" and not local_enabled():
+            why = "local admin sign-in was turned off"
+        if not s or why:
             _sessions.pop(token, None)
-            return None
-        if s.source == "local" and not local_enabled():
-            _sessions.pop(token, None)     # local admin was just turned off
-            return None
-        s.seen = now
-        return s
+        else:
+            s.seen = now
+            return s
+    if s and why:
+        _audit_end(s, why)
+    return None
+
+
+def sweep() -> None:
+    """End timed-out sessions nobody came back to, so their end shows in the audit log too."""
+    with _lock:
+        tokens = list(_sessions)
+    for t in tokens:
+        if _expired(t):
+            session_user(t)
+
+
+def _expired(token: str) -> bool:
+    with _lock:
+        s = _sessions.get(token)
+        now = time.time()
+        return bool(s) and (now - s.created > SESSION_MAX or now - s.seen > SESSION_IDLE)
+
+
+def _audit_end(s: Session, why: str) -> None:
+    try:
+        from . import logs
+        logs.audit(s.user, "session.expired", "session", why)
+    except Exception:
+        log.exception("writing the session timeout to the audit log")
 
 
 def logout(token: str | None) -> None:

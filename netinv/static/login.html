@@ -25,7 +25,10 @@ document.getElementById("login").onsubmit = async (e) => {
   try {
     const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: f.get("username"), password: f.get("password") }) });
-    if (r.ok) { location.href = "/" + (location.hash || ""); return; }
+    if (r.ok) {   // start clean: nothing from whoever used this browser before carries over
+      try { sessionStorage.clear(); localStorage.clear(); } catch {}
+      location.href = "/" + (location.hash || ""); return;
+    }
     let msg = "Sign-in failed."; try { msg = (await r.json()).detail || msg; } catch {}
     err.textContent = msg; err.hidden = false;
   } catch { err.textContent = "Can't reach the server."; err.hidden = false; }

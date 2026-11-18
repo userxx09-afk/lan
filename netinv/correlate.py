@@ -145,7 +145,7 @@ VIEWS["v_physical_disks"] = """
 """
 
 VIEWS["v_audit"] = """
-    SELECT time, actor, action, target, result FROM audit_log
+    SELECT time, actor, action, target, result, ip FROM audit_log
 """
 
 VIEWS["v_changes"] = """

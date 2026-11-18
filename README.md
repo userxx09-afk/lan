@@ -117,9 +117,29 @@ auto_install = false    # true installs new versions without waiting for a click
   which turns the local admin off. If AD or the group is unavailable, or the group was set wrong, delete that file on the
   server and sign in as the local admin again. It is written again at the next AD sign-in.
 - **Lockout:** 5 failed sign-ins for one username, or 20 from one address, within 15 minutes block sign-in for 15 minutes.
-- **Sessions:** 12 hours, or 2 hours idle, in an HttpOnly, SameSite=Strict, Secure cookie.
+- **Sessions:** 12 hours, or 2 hours idle, in an HttpOnly, SameSite=Strict, Secure cookie that ends when the browser
+  closes. Signing in on a browser where someone else is still signed in ends their session first.
+- **Nothing carries over between people (0.28):** what one person chose in the browser (open tab, Logs tab and so on)
+  is cleared at sign-in and sign-out, and API answers are sent `no-store` so the next person can't page back to them.
+  Per-person settings are kept per user on the server: the Computers columns, and the DameWare sign-in mode
+  (Settings > DameWare is now "your own setting"; the old shared value is the default for anyone who hasn't chosen).
+  Scan schedules, credentials, groups and the rest of Settings stay shared.
 - **Stored credentials:** encrypted with a key that Windows DPAPI protects for this machine (`secret.key.dpapi`). Copying
   the file to another server doesn't decrypt anything, so after a rebuild the scan credentials have to be entered again.
+
+## Logs (Logs tab, 0.28)
+
+- **Audit log:** every sign-in, failed sign-in, sign-out and session timeout, and every change made in NetInventory
+  (settings, sign-in setup, groups, credentials, scan targets and jobs, deployments and fixes, scripts, AD changes, PC
+  tools, agents, Jira, certificates, updates...), with who, when (shown in your local time), the IP address it came
+  from and what changed. Changes that have no entry of their own are still recorded with the request (passwords,
+  tokens and keys masked as `***`) and the result. Filter by kind (sign-ins / changes / failures), time, person,
+  action, IP and text; **Export CSV** downloads what the filters show. The audit log is never trimmed.
+- **Server log:** NetInventory's own log (scans, collectors, DC and WinRM errors, updates), kept in the database for
+  30 days. Filter by level, part (logger), time and text.
+- **Scans and collectors:** every scan job and collector run with its result; *Failed runs only* finds problems.
+- **Log files on the server:** the files in `<data folder>\logs` (the service's `NetInventory.out.log` /
+  `NetInventory.err.log`, setup and update logs): view the end of one or download it.
 
 ## App versions and one-click fixes
 
