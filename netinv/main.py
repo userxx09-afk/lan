@@ -2528,7 +2528,7 @@ def update_install(body: UpdateIn | None = None, actor=Depends(ui_auth), db=Depe
 
 SETTING_KEYS = {"dameware_mode": "windows", "interval:ad": "", "interval:snmp": "",
                 "interval:pcs": "", "interval:pcs_updates": "", "interval:dc_logons": "",
-                "fix:reboot_hour": "2"}
+                "fix:reboot_hour": "2", "dhcp:servers": ""}
 
 
 # ----------------------------------------------------------------- Logs page: audit log, server log, collector runs, log files
@@ -2623,6 +2623,9 @@ def put_settings(body: dict, actor=Depends(ui_auth), db=Depends(db_session)):
                 raise HTTPException(400, f"{k} must be minutes")
             if k == "fix:reboot_hour" and not (str(v).isdigit() and 0 <= int(v) <= 23):
                 raise HTTPException(400, "reboot hour must be 0-23")
+            if k == "dhcp:servers":
+                v = ", ".join(x.strip() for x in str(v or "").replace(";", ",").split(",") if x.strip())
+                set_setting(db, "dhcp:discovered", None)
             set_setting(db, k, None if v in ("", None) else str(v))
     changed = {k: f"{before.get(k) if before.get(k) not in (None, '') else '(none)'} -> {v if v not in (None, '') else '(none)'}"
                for k, v in body.items() if k in SETTING_KEYS and str(before.get(k) or "") != str(v or "")}

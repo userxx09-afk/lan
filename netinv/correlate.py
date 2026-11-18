@@ -5,6 +5,9 @@ tool (Power BI, Excel, Metabase, Grafana) all read the same v_* views.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -47,7 +50,7 @@ VIEWS: dict[str, str] = {
     """,
     # hostname = the computer the user was on; dc = the domain controller that logged it (DC events only).
     "v_logons": """
-        SELECT l.time, l.username, l.hostname, l.ip, l.logon_type, l.source,
+        SELECT l.time, l.username, l.hostname, l.ip, l.logon_type, l.source, l.host_via AS matched_by,
                CASE WHEN l.source LIKE 'dc:%' THEN SUBSTR(l.source, 4) END AS dc,
                CASE WHEN EXISTS (SELECT 1 FROM devices d WHERE d.hostname = l.hostname) THEN 1 ELSE 0 END AS in_inventory
         FROM logon_events l
@@ -81,8 +84,18 @@ VIEWS: dict[str, str] = {
                (SELECT MIN(k.pct_free) FROM v_disks k WHERE k.hostname = d.hostname) AS min_disk_pct_free,
                (SELECT k.free_gb FROM v_disks k WHERE k.hostname = d.hostname AND k.drive = 'C:') AS c_free_gb,
                (SELECT COUNT(*) FROM software s WHERE s.device_id = d.id) AS software_count,
-               (SELECT n.mac FROM device_nics n WHERE n.device_id = d.id LIMIT 1) AS mac,
-               (SELECT n.ip FROM device_nics n WHERE n.device_id = d.id LIMIT 1) AS ip,
+               COALESCE((SELECT n.mac FROM device_nics n WHERE n.device_id = d.id LIMIT 1),
+                        (SELECT s.mac FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source LIKE 'dhcp:%'
+                          AND s.mac IS NOT NULL ORDER BY s.last_seen DESC LIMIT 1)) AS mac,
+               COALESCE((SELECT n.ip FROM device_nics n WHERE n.device_id = d.id AND n.ip IS NOT NULL LIMIT 1),
+                        (SELECT s.ip FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source LIKE 'dhcp:%'
+                          ORDER BY s.last_seen DESC LIMIT 1),
+                        (SELECT s.ip FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source = 'dns'
+                          ORDER BY CASE WHEN s.ip LIKE '%:%' THEN 1 ELSE 0 END, s.last_seen DESC LIMIT 1)) AS ip,
+               CASE WHEN EXISTS (SELECT 1 FROM device_nics n WHERE n.device_id = d.id AND n.ip IS NOT NULL) THEN 'inventory'
+                    WHEN EXISTS (SELECT 1 FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source LIKE 'dhcp:%') THEN 'DHCP'
+                    WHEN EXISTS (SELECT 1 FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source = 'dns') THEN 'DNS'
+                    END AS ip_source,
                (SELECT pm.switch_name FROM v_port_map pm WHERE pm.hostname = d.hostname
                  ORDER BY pm.last_seen DESC LIMIT 1) AS switch_name,
                (SELECT pm.port FROM v_port_map pm WHERE pm.hostname = d.hostname
@@ -193,15 +206,83 @@ def create_views(db: Session) -> None:
 
 
 _LOCAL_SQL = "('', '-', '127.0.0.1', '::1')"
+NAMED_WINDOW = timedelta(hours=8)     # another event from the same IP this close in time names the PC
+LEASE_SLACK = timedelta(days=8)       # Windows DHCP's default lease: a binding holds this long after its last renewal
 
 
-def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 20.0) -> int:
+def _as_dt(v):
+    """text() queries on SQLite give DATETIME columns back as strings."""
+    return datetime.fromisoformat(v) if isinstance(v, str) else v
+
+
+def _intervals(sightings: list[tuple]) -> list[tuple[datetime, datetime, str]]:
+    """DHCP sightings of one IP -> non-overlapping (start, end, host): each binding holds from its first grant
+    until the next PC got the address, or its lease ran out."""
+    rows = sorted(sightings, key=lambda r: r[1])
+    out = []
+    for i, (host, first, last, expires) in enumerate(rows):
+        end = max(expires, last) if expires else last + LEASE_SLACK
+        nxt = next((r[1] for r in rows[i + 1:] if r[0] != host), None)
+        if nxt is not None:
+            end = min(end, nxt)
+        start = first - (LEASE_SLACK if i == 0 else timedelta(0))   # renewals in the log can start mid-lease
+        out.append((start, end, host))
+    return out
+
+
+def _match_in_python(db: Session, open_: str) -> int:
+    """DHCP binding at the time of the event, then another event from that IP close in time that named the PC
+    (NTLM 4624/4776 carry WorkstationName; Kerberos 4768 only an IP)."""
+    rows = db.execute(text(f"SELECT id, ip, time FROM logon_events WHERE {open_}")).all()
+    if not rows:
+        return 0
+    ips = sorted({r[1] for r in rows})
+    by_mac = dict(db.execute(text("SELECT n.mac, d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id")).all())
+    dhcp: dict[str, list] = {}
+    named: dict[str, list] = {}
+    for k in range(0, len(ips), 500):
+        chunk = ips[k:k + 500]
+        params = {f"i{n}": ip for n, ip in enumerate(chunk)}
+        inl = ", ".join(f":i{n}" for n in range(len(chunk)))
+        for ip, host, mac, first, last, exp in db.execute(text(
+                f"SELECT ip, hostname, mac, first_seen, last_seen, expires FROM ip_sightings "
+                f"WHERE source LIKE 'dhcp:%' AND ip IN ({inl})"), params):
+            host = by_mac.get(mac) or host        # the PC that owns that MAC beats the name the client sent
+            if host:
+                dhcp.setdefault(ip, []).append((host, _as_dt(first), _as_dt(last), _as_dt(exp)))
+        for ip, host, t in db.execute(text(
+                f"SELECT ip, hostname, time FROM logon_events WHERE host_via = 'event' AND hostname IS NOT NULL "
+                f"AND source LIKE 'dc:%' AND ip IN ({inl})"), params):
+            if host:
+                named.setdefault(ip, []).append((_as_dt(t), host))
+    dcs = {r[0] for r in db.execute(text("SELECT hostname FROM domain_controllers"))}
+    win = {ip: _intervals(v) for ip, v in dhcp.items()}
+    upd = []
+    for rid, ip, t in rows:
+        t = _as_dt(t)
+        host = via = None
+        for a, b, h in win.get(ip, ()):
+            if a <= t <= b:
+                host, via = h, "dhcp"
+        if host is None and ip in named:
+            near = [(abs(nt - t), h) for nt, h in named[ip] if h not in dcs]
+            near = [x for x in near if x[0] <= NAMED_WINDOW]
+            if near:
+                host, via = min(near)[1], "named"
+        if host:
+            upd.append({"id": rid, "h": host[:64], "v": via})
+    if upd:
+        db.execute(text("UPDATE logon_events SET hostname = :h, host_via = :v WHERE id = :id"), upd)
+    return len(upd)
+
+
+def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 30.0) -> int:
     """Fill in the computer for DC logon events, which mostly carry only the client IP.
 
-    Tries, in order: a PC whose NIC has that IP, a PC whose MAC the routers' ARP tables give for
-    that IP, then reverse DNS (PTR) for the IP. The match uses today's IP-to-PC data, so a DHCP
-    address that moved to another PC since the event can point at the wrong one."""
-    from datetime import timedelta
+    Tries, in order: the PC that held that IP in DHCP at the time of the event; a PC that another event from the
+    same IP named within 8 hours (NTLM logons carry WorkstationName); a PC whose NIC has that IP today; a PC whose
+    MAC the routers' ARP tables give for that IP; a PC whose DNS A/AAAA record is that IP; reverse DNS (PTR).
+    The NIC/ARP/DNS steps use today's addresses, so they can be wrong for old events after a DHCP move."""
     from .db import get_setting, set_setting, utcnow
     n = 0
     if not get_setting(db, "migr:logon_client_v1"):
@@ -213,9 +294,18 @@ def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 20.
         """))
         set_setting(db, "migr:logon_client_v1", "1")
         db.commit()
+    if not get_setting(db, "migr:logon_client_v2"):
+        # Before 0.28 the computer of a Kerberos (4768) logon was guessed from today's IPs only, and nothing recorded
+        # how. Guess again now that DHCP history and named events can say who had the address at the time.
+        db.execute(text("UPDATE logon_events SET hostname = NULL WHERE source LIKE 'dc:%' AND logon_type = 0 "
+                        "AND host_via IS NULL"))
+        db.execute(text("UPDATE logon_events SET host_via = 'event' WHERE host_via IS NULL AND hostname IS NOT NULL"))
+        set_setting(db, "migr:logon_client_v2", "1")
+        db.commit()
     open_ = f"hostname IS NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL}"
+    n += _match_in_python(db, open_)
     n += db.execute(text(f"""
-        UPDATE logon_events SET hostname = (
+        UPDATE logon_events SET host_via = 'nic', hostname = (
           SELECT d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id
           WHERE n.ip = logon_events.ip LIMIT 1)
         WHERE {open_} AND EXISTS (SELECT 1 FROM device_nics n WHERE n.ip = logon_events.ip)
@@ -223,19 +313,27 @@ def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 20.
     arp = """FROM arp_entries a JOIN device_nics n ON n.mac = a.mac JOIN devices d ON d.id = n.device_id
              WHERE a.ip = logon_events.ip"""
     n += db.execute(text(f"""
-        UPDATE logon_events SET hostname = (SELECT d.hostname {arp} ORDER BY a.last_seen DESC LIMIT 1)
+        UPDATE logon_events SET host_via = 'arp', hostname = (SELECT d.hostname {arp} ORDER BY a.last_seen DESC LIMIT 1)
         WHERE {open_} AND EXISTS (SELECT 1 {arp})
+    """)).rowcount or 0
+    fwd = "FROM ip_sightings s WHERE s.source = 'dns' AND s.ip = logon_events.ip AND s.hostname IS NOT NULL"
+    n += db.execute(text(f"""
+        UPDATE logon_events SET host_via = 'dns', hostname = (SELECT s.hostname {fwd} ORDER BY s.last_seen DESC LIMIT 1)
+        WHERE {open_} AND EXISTS (SELECT 1 {fwd})
     """)).rowcount or 0
     db.commit()
     if dns:
         since = utcnow() - timedelta(days=30)
         ips = [r[0] for r in db.execute(text(f"SELECT DISTINCT ip FROM logon_events WHERE {open_} AND time >= :s"),
-                                        {"s": since}).all()][:256]
+                                        {"s": since}).all()][:1000]
         for ip, name in reverse_dns(ips, dns_budget_s).items():
-            n += db.execute(text(f"UPDATE logon_events SET hostname = :h WHERE {open_} AND ip = :ip"),
+            n += db.execute(text(f"UPDATE logon_events SET hostname = :h, host_via = 'ptr' WHERE {open_} AND ip = :ip"),
                             {"h": name, "ip": ip}).rowcount or 0
         db.commit()
     return n
+
+
+_GENERIC_PTR = re.compile(r"^(ip|host|dhcp|client|pool|dyn|static)?[-_]?\d{1,3}([-_.]\d{1,3}){3}\b", re.I)
 
 
 def reverse_dns(ips: list[str], budget_s: float = 20.0) -> dict[str, str]:
@@ -245,17 +343,19 @@ def reverse_dns(ips: list[str], budget_s: float = 20.0) -> dict[str, str]:
     from .db import norm_host
     if not ips:
         return {}
-    ex = ThreadPoolExecutor(max_workers=16)
+    ex = ThreadPoolExecutor(max_workers=32)
     futs = {ex.submit(socket.gethostbyaddr, ip): ip for ip in ips}
     done, _ = wait(futs, timeout=budget_s)
     ex.shutdown(wait=False, cancel_futures=True)
     out = {}
     for f in done:
         try:
-            name = norm_host(f.result()[0])
+            full = f.result()[0]
         except Exception:
             continue
-        if name and not name[0].isdigit():   # skip "10-1-2-3"-style generic PTRs
+        name = norm_host(full)
+        # skip "10-1-2-3"/"ip-10-1-2-3"-style generic PTRs, but keep real names that start with a digit (2FL-PC01)
+        if name and not _GENERIC_PTR.match(full):
             out[futs[f]] = name[:64]
     return out
 

@@ -42,10 +42,12 @@ function table(el, rows, cols, opts = {}) {
   render();
 }
 const hostLink = (v) => (v ? `<a class="link" data-host="${esc(v)}">${esc(v)}</a>` : `<span class="pill mute">unknown</span>`);
-const logonType = (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached" }[t] ?? esc(t));
+const logonType = (t) => ({ 0: "Kerberos (DC)", 2: "Interactive", 3: "Network", 10: "Remote desktop", 11: "Cached", 100: "NTLM (DC)" }[t] ?? esc(t));
+const MATCHED_BY = { event: "named in the event", dhcp: "DHCP lease at the time", named: "another event from that IP named it",
+  nic: "PC's current IP", arp: "router ARP table", dns: "DNS record of the PC", ptr: "reverse DNS" };
 // Computer a logon came from: linked when it is in the Computers list, plain text when only DNS knew it.
-const logonHost = (v, r) => (!v ? `<span class="pill mute">unknown</span>` : r.in_inventory ? hostLink(v)
-  : `${esc(v)} <span class="small muted">not in inventory</span>`);
+const logonHost = (v, r) => (!v ? `<span class="pill mute">unknown</span>` : `<span title="${esc(MATCHED_BY[r.matched_by] || "")}">${r.in_inventory ? hostLink(v)
+  : `${esc(v)} <span class="small muted">not in inventory</span>`}</span>`);
 const dcCell = (v, r) => (v ? esc(v) : `<span class="small muted">${esc(r.source && r.source.startsWith("local:") ? "PC's own log" : r.source || "")}</span>`);
 const userLink = (v) => (v ? `<a class="link" data-user="${esc(v)}">${esc(v)}</a>` : "");
 const diskPill = (v) => (v === null || v === undefined ? "" : `<span class="pill ${v < 10 ? "bad" : v < 20 ? "warn" : "good"}">${v}%</span>`);
@@ -151,7 +153,7 @@ const COL_LABELS = {
   logon_events: "Logon events", role: "Role", av_name: "Antivirus", av_enabled: "AV on", av_up_to_date: "AV up to date",
   scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
   ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
-  agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks",
+  agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks", ip_source: "IP from",
 };
 const HIDDEN_COLS = new Set(["online_checked", "online_changed", "online_via", "agent_note"]);   // shown via the status dot / tooltips
 const BOOL_COLS = new Set(["ad_enabled", "pending_reboot", "av_enabled", "av_up_to_date", "online"]);
@@ -1631,6 +1633,11 @@ async function loadCatalog() {
 }
 $("#catrefresh").onclick = async () => { const r = await post("/api/catalog/refresh", {}); toast(r.output); setTimeout(loadCatalog, 15000); };
 $("#catrule").onclick = () => ruleModal();
+$("#dhcpform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { appSettings = await api("/api/settings", { method: "PUT", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Saved. Used from the next DC logons run."); }
+  catch (er) { toast(errText(er), true); }
+};
 $("#rebootform").onsubmit = async (e) => {
   e.preventDefault();
   try { appSettings = await api("/api/settings", { method: "PUT", body: JSON.stringify(Object.fromEntries(new FormData(e.target))) }); toast("Saved."); }
@@ -2094,6 +2101,7 @@ loaders.settings = async () => {
   loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
+  $("#dhcpform")["dhcp:servers"].value = s["dhcp:servers"] || "";
   if (sa && $("#svcacct")) $("#svcacct").textContent = sa.account;
   table($("#credtable"), [...c.map((x) => ({ ...x, secret: x.has_secret, edit: x.id })), { ...svcCred(), secret: "none", edit: 0 }], ["name", "kind", "username", "secret", "edit"], {
     labels: { edit: "" }, cell: { kind: (v) => esc(v === "service" ? "Windows sign-in (WinRM + LDAP)" : KIND[v] || v),

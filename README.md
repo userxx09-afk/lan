@@ -119,7 +119,7 @@ auto_install = false    # true installs new versions without waiting for a click
 - **Lockout:** 5 failed sign-ins for one username, or 20 from one address, within 15 minutes block sign-in for 15 minutes.
 - **Sessions:** 12 hours, or 2 hours idle, in an HttpOnly, SameSite=Strict, Secure cookie that ends when the browser
   closes. Signing in on a browser where someone else is still signed in ends their session first.
-- **Nothing carries over between people (0.28):** what one person chose in the browser (open tab, Logs tab and so on)
+- **Nothing carries over between people (0.29):** what one person chose in the browser (open tab, Logs tab and so on)
   is cleared at sign-in and sign-out, and API answers are sent `no-store` so the next person can't page back to them.
   Per-person settings are kept per user on the server: the Computers columns, and the DameWare sign-in mode
   (Settings > DameWare is now "your own setting"; the old shared value is the default for anyone who hasn't chosen).
@@ -127,7 +127,7 @@ auto_install = false    # true installs new versions without waiting for a click
 - **Stored credentials:** encrypted with a key that Windows DPAPI protects for this machine (`secret.key.dpapi`). Copying
   the file to another server doesn't decrypt anything, so after a rebuild the scan credentials have to be entered again.
 
-## Logs (Logs tab, 0.28)
+## Logs (Logs tab, 0.29)
 
 - **Audit log:** every sign-in, failed sign-in, sign-out and session timeout, and every change made in NetInventory
   (settings, sign-in setup, groups, credentials, scan targets and jobs, deployments and fixes, scripts, AD changes, PC
@@ -363,19 +363,33 @@ the defaults below are the jobs an upgrade from 0.6 starts with.
 | `snmp` | SNMP to switches and routers | 15 min | Ports, MAC table, LLDP/CDP neighbours, ARP (IP to MAC) |
 | `pcs` | WinRM to each PC | 4 h | OS build, hardware, serial, disks, NICs, installed software, hotfixes, pending reboot, local logons |
 | `pcs_updates` | WinRM to each PC | daily | Same as `pcs` plus the Windows Update search for pending updates (slow) |
-| `dc_logons` | WinRM to each DC | 30 min | Kerberos and network logons, with the computer each came from (see below) |
+| `dc_logons` | WinRM to each DC and DHCP server, DNS | 30 min | Kerberos, NTLM and network logons with the computer each came from; DHCP leases and DNS records (see below) |
 
 **Which computer a DC logon came from.** A DC's events name the DC, not the user's PC: network logons (4624) often
-put the DC's own name in *Workstation name*, and Kerberos (4768) has only the client IP. NetInventory ignores the
-DC's own name and works out the PC from the event: its workstation name when that is a real PC, otherwise the IP,
-matched to a PC's adapter in the Computers list, then to the routers' ARP tables (IP to MAC to PC), then reverse
-DNS. A user's **Logons** tab shows that PC as *computer* (linked to its page when it's in the inventory) and the DC
-as *domain controller*; the PC's own Logons tab and the user's Computers tab use the same match. The IP match uses
-today's addresses, so a DHCP address that has since moved to another PC can point at the wrong one.
+put the DC's own name in *Workstation name*, and Kerberos (4768), the bulk of domain sign-ins, has only the client IP.
+NTLM events do name the client: 4624 type 3 in *Workstation name* and 4776 (read since 0.28) in *Workstation*.
+NetInventory ignores the DC's own name and works out the PC, in this order:
+
+1. the workstation name in the event itself, when it is a real PC;
+2. the PC that held that IP **in DHCP at the time of the event** (DHCP audit log and leases, below);
+3. the PC another event from the same IP named within 8 hours (an NTLM logon gives the name, a Kerberos one the IP);
+4. a PC whose adapter has that IP today, then the routers' ARP tables (IP to MAC to PC);
+5. a PC whose DNS A/AAAA record is that IP, then reverse DNS (PTR).
+
+Hover the computer on a Logons tab to see which step matched it (`matched_by` in the `v_logons` view). Steps 4 and 5
+use today's addresses, so they can be wrong for old events after a DHCP move; steps 1 to 3 can't.
+
+**DHCP leases and DNS (0.28).** With each DC logons run, NetInventory reads every Windows DHCP server over WinRM: the
+active IPv4 leases (IP, MAC, host name) and the DHCP audit log (`DhcpSrvLog-*.log`, the last 7 days), which says which
+PC had which address when. The servers are the ones authorized in AD, or the list in Settings, What to scan, *DHCP
+servers*. The scan account needs WinRM on those servers and to be in their **DHCP Users** group (reading the audit log
+also needs read access to `%SystemRoot%\System32\dhcp`, which admins have). It then looks up every enabled AD
+computer in DNS (A and AAAA). Both go into `ip_sightings` and give a PC that WinRM never reached an IP and MAC in the
+Computers list (column *IP from*: inventory, DHCP or DNS).
 
 **How the DC logon scan reads the logs:** over WinRM (TCP 5985, PowerShell remoting) to each domain controller the AD
 import found, with the same Windows credentials as the PC scan. On the DC it runs `Get-WinEvent` on the Security log for
-events 4768 (Kerberos ticket) and 4624 type 3 (network logon) since the last pull (7 days the first time). It does not
+events 4768 (Kerberos ticket), 4624 type 3 (network logon) and 4776 (NTLM validation) since the last pull (7 days the first time). It does not
 use remote Event Log RPC. The account needs WinRM access to the DC and read access to the Security log: a Domain
 Admin, or a member of the DC's *Remote Management Users* and *Event Log Readers* groups. Each DC's own error (WinRM
 refused, not reachable, or "connected as X but reading the Security log failed") is in the run's result.
@@ -624,6 +638,17 @@ Deploy:
 
 `agent/Send-Inventory.ps1` (the older one-shot script using the shared `ingest_token`) still works but has no pinning
 or per-PC secret; prefer the agent.
+
+## Code signing (0.28)
+
+CI signs the agent scripts (`netinv/agent/*.ps1`, `agent/Send-Inventory.ps1`), the agent MSI and the server
+installer with Authenticode when the repository has two secrets: `CODESIGN_PFX_BASE64` (the code-signing .pfx,
+base64-encoded) and `CODESIGN_PFX_PASSWORD`. The certificate must have the Code Signing purpose (EKU
+1.3.6.1.5.5.7.3.3): a TLS or wildcard certificate can't sign code. An internal AD CS *Code Signing* certificate works;
+domain PCs already trust the CA, and a GPO adds the certificate to **Trusted Publishers** so `AllSigned` execution
+policies and SmartScreen/AppLocker rules accept the agent. Signatures are timestamped, so they stay valid after the
+certificate expires. Without the secrets the build is published unsigned, with a warning on the run.
+`installer\sign.ps1 <files>` signs by hand with the same variables.
 
 ## Layout
 
