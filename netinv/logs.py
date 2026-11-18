@@ -35,7 +35,7 @@ _ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar("netinv_reque
 # POSTs that only read or check something; they change nothing, so the generic entry would be noise.
 READ_ONLY = [re.compile(p) for p in (
     r"^/api/login$", r"^/api/logout$", r"^/api/prefs/", r"^/api/query$", r"^/api/export/", r"^/api/groups/preview$",
-    r"^/api/library/[^/]+/drill$", r"^/api/tls/check$", r"^/api/ingest/", r"^/api/agent/", r"^/api/logs",
+    r"^/api/library/[^/]+/drill$", r"^/api/tls/check$", r"^/api/ingest/", r"^/api/agent/", r"^/api/logs", r"^/api/scan/once/preview$",
 )]
 SECRET_KEYS = re.compile(r"pass|secret|token|key|pwd|private|pfx|pem|cert_data|api_?token", re.I)
 MAX_BODY = 16_384

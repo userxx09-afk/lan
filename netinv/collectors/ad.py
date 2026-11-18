@@ -19,6 +19,7 @@ import ssl
 from datetime import datetime, timedelta, timezone
 
 from ldap3 import ALL, KERBEROS, MODIFY_REPLACE, NTLM, SASL, SUBTREE, Connection, Server, Tls
+from ldap3.utils.conv import escape_filter_chars
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -148,8 +149,12 @@ def collect(db: Session, cfg: dict) -> str:
     computers = 0
     dcs = []
     want_computers = cfg.get("computers", True)
-    for cbase in (cfg.get("computer_bases") or [base]) if want_computers else []:
-        for e in _search(conn, cbase, "(objectClass=computer)", COMPUTER_ATTRS):
+    searches = [(cbase, "(objectClass=computer)") for cbase in (cfg.get("computer_bases") or [base])] if want_computers else []
+    if cfg.get("computer_names"):       # a one-time scan of computers by name
+        searches.append((base, "(&(objectClass=computer)(|" +
+                         "".join(f"(name={escape_filter_chars(n)})" for n in cfg["computer_names"]) + "))"))
+    for cbase, cflt in searches:
+        for e in _search(conn, cbase, cflt, COMPUTER_ATTRS):
             name = norm_host(_attr(e, "name"))
             if not name or excl.target(hostname=name, fqdn=_attr(e, "dNSHostName"), dn=_attr(e, "distinguishedName")):
                 continue
@@ -173,7 +178,7 @@ def collect(db: Session, cfg: dict) -> str:
                 dev.first_seen = dev.ad_created or now
             computers += 1
     # DCs live in OU=Domain Controllers, which may be outside a restricted computer path.
-    if cfg.get("computer_bases") or not want_computers:
+    if cfg.get("computer_bases") or cfg.get("computer_names") or not want_computers:
         dcs = _search(conn, base, "(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))", COMPUTER_ATTRS)
 
     fsmo = _fsmo_roles(conn, base)
@@ -192,7 +197,7 @@ def collect(db: Session, cfg: dict) -> str:
 
     users = 0
     groups = {}
-    if want_computers or cfg.get("users", True):
+    if want_computers or cfg.get("users", True) or cfg.get("computer_names") or cfg.get("user_names"):
         # Every AD group, with the groups it is itself in: group conditions (Groups tab, sign-in) follow nesting.
         for g in _search(conn, base, "(objectClass=group)", ["distinguishedName", "cn", "sAMAccountName", "groupType",
                                                             "description", "memberOf"]):
@@ -204,9 +209,14 @@ def collect(db: Session, cfg: dict) -> str:
                                                              "sam": _attr(g, "sAMAccountName"),
                                                              "member_of": [str(x).lower() for x in g["attributes"].get("memberOf") or []]}
         _save_groups(db, groups, now)
-    if cfg.get("users", True):
-        for ubase in cfg.get("user_bases") or [base]:
-            for e in _search(conn, ubase, "(&(objectCategory=person)(objectClass=user))", USER_ATTRS):
+    usearches = [(ubase, "(&(objectCategory=person)(objectClass=user))") for ubase in (cfg.get("user_bases") or [base])] \
+        if cfg.get("users", True) else []
+    if cfg.get("user_names"):           # a one-time scan of users by name
+        usearches.append((base, "(&(objectCategory=person)(objectClass=user)(|" +
+                          "".join(f"(sAMAccountName={escape_filter_chars(n)})" for n in cfg["user_names"]) + "))"))
+    if usearches:
+        for ubase, uflt in usearches:
+            for e in _search(conn, ubase, uflt, USER_ATTRS):
                 sam = (_attr(e, "sAMAccountName") or "").lower()
                 if not sam or excl.dn(_attr(e, "distinguishedName")):
                     continue

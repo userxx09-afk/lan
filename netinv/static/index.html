@@ -30,7 +30,7 @@
 <main>
   <div id="scanbanner" class="banner" hidden></div>
   <section id="scanning" class="tab">
-    <div class="alerthead"><h2>Running now</h2><span class="muted" id="scancap"></span></div>
+    <div class="alerthead"><h2>Running now</h2><span class="muted" id="scancap"></span><button id="scanonce">One-time scan…</button></div>
     <div id="scanrunning"></div>
     <h2>Waiting in the queue</h2>
     <p class="muted small">Jobs over the "at most N jobs at once" limit (Settings, Scan schedule) wait here, first in line first. Start times are estimates from each job's last run.</p>
@@ -397,7 +397,7 @@
         <p class="muted">Add an AD domain, an OU of computers or users, or an IP range of network gear and PCs. Each target uses the credentials you pick, tried in order.
           This is only <i>what</i> gets scanned and <i>with which account</i>. <i>When</i> it is scanned, and pausing, is set in Scan schedule below. Scan now always scans every target here.</p>
         <div id="targettable"></div>
-        <div class="row"><button id="addtarget">+ Add scan target</button><button id="scanall" class="ghost">Scan everything now</button></div>
+        <div class="row"><button id="addtarget">+ Add scan target</button><button id="scanall" class="ghost">Scan everything now</button><button class="ghost" data-scanonce>One-time scan…</button></div>
         <form id="dhcpform" class="inline"><label>DHCP servers <input name="dhcp:servers" placeholder="found in AD" style="width:22em"></label><button class="ghost">Save</button>
           <span class="small muted">With each DC logons run, leases and the DHCP audit log are read over WinRM (the account needs DHCP Users on those servers) and AD computers are looked up in DNS. That fills in IPs of PCs WinRM can't reach and the PC behind each logon. Blank = the DHCP servers authorized in AD.</span></form>
       </div>

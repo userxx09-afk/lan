@@ -1702,7 +1702,7 @@ setInterval(() => {
 
 // ------------------------------------------------------------ Scanning view: running (with progress), queue, upcoming, recent
 const dur = (sec) => sec == null ? "" : sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, "0")}s` : `${Math.floor(sec / 3600)}h ${String(Math.floor(sec % 3600 / 60)).padStart(2, "0")}m`;
-const STEP_LABEL = { ad: "AD import", snmp: "IP ranges (SNMP + sweep)", pcs: "PC inventory", pcs_updates: "PC inventory + updates", dc_logons: "DC logons" };
+const STEP_LABEL = { ping: "Ping", ad: "AD import", snmp: "IP ranges (SNMP + sweep)", pcs: "PC inventory", pcs_updates: "PC inventory + updates", dc_logons: "DC logons" };
 let scanTimer;
 loaders.scanning = async () => {
   clearTimeout(scanTimer);
@@ -1724,7 +1724,7 @@ loaders.scanning = async () => {
     return `<div class="runcard"><div class="top"><b>${esc(r.name)}</b>
         <span class="muted">${r.who ? `started by ${esc(r.who)}` : r.job_id ? "scheduled" : "scan now"} · running ${dur(r.elapsed)}${r.eta != null ? ` · about ${dur(r.eta)} left` : ""}</span>
         ${r.cancelling ? `<span class="pill warn">stopping…</span>` : ""}
-        <span class="actions">${r.job_id && !r.cancelling ? `<button class="ghost" data-scancel="${r.job_id}">Cancel</button>` : ""}</span></div>
+        <span class="actions">${r.job_id && !r.cancelling ? `<button class="ghost" data-scancel="${r.job_id}">Cancel</button>` : ""}${!r.job_id && /^once:\d+$/.test(r.key) && !r.cancelling ? `<button class="ghost" data-oncecancel="${r.key.slice(5)}">Cancel</button>` : ""}</span></div>
       ${steps}<div class="pbar ${pct == null ? "indet" : ""}"><i style="width:${pct ?? 0}%"></i></div>${hosts}${cur}${why}</div>`;
   }).join("") : `<p class="muted">Nothing is scanning right now.</p>`;
   $("#scanrunning").querySelectorAll("details[data-fails]").forEach((el) => el.ontoggle = () => el.open ? openFails.add(el.dataset.fails) : openFails.delete(el.dataset.fails));
@@ -1745,12 +1745,71 @@ loaders.scanning = async () => {
     try { const r = await post(`/api/scanning/${a.dataset.scancel}/cancel`, {}); toast(r.output); } catch (e) { toast(errText(e), true); }
     loaders.scanning(); pollStatus();
   });
+  $("#scanning").querySelectorAll("[data-oncecancel]").forEach((a) => a.onclick = async () => {
+    if (!(await confirmBox("Cancel this one-time scan? PCs already being scanned finish; the rest are skipped."))) return;
+    try { const r = await post(`/api/scanning/once/${a.dataset.oncecancel}/cancel`, {}); toast(r.output); } catch (e) { toast(errText(e), true); }
+    loaders.scanning(); pollStatus();
+  });
   $("#scanning").querySelectorAll("[data-sfront]").forEach((a) => a.onclick = async () => {
     try { const r = await post(`/api/scanning/${a.dataset.sfront}/front`, {}); toast(r.output); } catch (e) { toast(errText(e), true); }
     loaders.scanning();
   });
   scanTimer = setTimeout(loaders.scanning, d.running.length || d.queued.length ? 3000 : 15000);
 };
+
+// ------------------------------------------------------------ one-time scan: type what to scan, pick scans and the account, run once
+// Nothing is saved: no scan target, no scan job. Results go into the inventory like any scan; the run is in Recently
+// finished and the audit log.
+let onceLast = null;          // what was typed last time, so a second scan starts from it
+async function oneTimeScan(prefill = "") {
+  let o, ra;
+  try { [o, ra] = await Promise.all([api("/api/scan/once"), getRunAs()]); } catch (e) { toast(errText(e), true); return; }
+  const v = onceLast || { targets: "", kind: "auto", scans: o.default_scans, credential_id: "", snmp_ids: [], max_parallel: "" };
+  const f = await formModal(`<h3>One-time scan</h3>
+    <p class="muted small">Scans once, now, without saving a scan target or a scan job. Results go into the inventory like any other scan.</p>
+    <label>What to scan <textarea name="targets" rows="3" required placeholder="10.0.0.25, 10.0.1.0/24, 10.0.2.10-60, PC-0123, jsmith, CORP\jsmith, corp.example.com/Sites/Office/PCs">${esc(prefill || v.targets)}</textarea></label>
+    <p class="muted small">IP addresses, ranges (10.0.2.10-60) or CIDRs, computer names, usernames, AD OUs (as ADUC shows them, or a DN) or a whole domain. Several at once: separate them with commas or new lines.</p>
+    <label>It is <select name="kind">${Object.entries(o.kinds).map(([k, l]) => `<option value="${k}" ${k === v.kind ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+    <div data-oncepreview class="small"></div>
+    <fieldset><legend>Scans</legend>
+      ${Object.entries(o.scans).map(([k, l]) => `<label class="check"><input type="checkbox" data-multi="1" name="scans" value="${k}" ${v.scans.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}
+      <p class="muted small">A username gets its AD details and, with PC inventory, the 5 computers it signed in to most recently. An OU or a domain with PC inventory scans every PC in it.</p></fieldset>
+    ${signInField(ra, { label: "Sign in with (AD, WinRM and DC logons)", selected: v.credential_id ?? "",
+      note: "Scanning credentials = the accounts ticked on your saved scan targets, tried in order. Pick one account to scan with only that one." })}
+    ${o.snmp.length ? `<fieldset><legend>SNMP credentials to try <span class="muted small">(none ticked = the ones on your saved targets)</span></legend>
+      ${o.snmp.map((c) => `<label class="check"><input type="checkbox" data-multi="1" name="snmp_ids" value="${c.id}" ${v.snmp_ids.includes(String(c.id)) ? "checked" : ""}> ${esc(c.name)} <span class="muted small">${c.kind === "snmp3" ? "SNMPv3" : "SNMP v2c"}</span></label>`).join("")}</fieldset>` : ""}
+    <label>PCs scanned at once <input name="max_parallel" type="number" min="1" max="64" placeholder="16" value="${esc(v.max_parallel || "")}" style="width:5em"></label>`, true, (form) => {
+    const out = form.querySelector("[data-oncepreview]");
+    let t;
+    const show = async () => {
+      const targets = form.targets.value.trim();
+      if (!targets) { out.innerHTML = ""; return; }
+      const scans = [...form.querySelectorAll("input[name=scans]:checked")].map((i) => i.value);
+      try {
+        const p = await post("/api/scan/once/preview", { targets, kind: form.kind.value, scans });
+        out.innerHTML = `<ul class="whylist">${p.targets.map((e) => `<li><b>${esc(e.input)}</b>: ${e.error ? `<span class="bad">${esc(e.error)}</span>`
+          : `${esc(e.label)}${e.domain && ["host", "ad_user"].includes(e.kind) ? ` <span class="muted">in ${esc(e.domain)}</span>` : ""}`}</li>`).join("")}</ul>
+          ${p.steps.length ? `<span class="muted">Runs: ${p.steps.map((s) => esc(STEP_LABEL[s] || s)).join(", ")}</span>` : `<span class="bad">None of the ticked scans applies to this.</span>`}`;
+      } catch (e) { out.innerHTML = `<span class="bad">${esc(errText(e))}</span>`; }
+    };
+    const later = () => { clearTimeout(t); t = setTimeout(show, 350); };
+    form.targets.addEventListener("input", later);
+    form.kind.addEventListener("change", show);
+    form.querySelectorAll("input[name=scans]").forEach((i) => i.addEventListener("change", show));
+    show();
+  });
+  if (!f) return;
+  onceLast = { ...f, credential_id: f.credential_id };
+  try {
+    const r = await post("/api/scan/once", { targets: f.targets, kind: f.kind, scans: f.scans, credential_id: credVal(f.credential_id),
+      snmp_ids: (f.snmp_ids || []).length ? f.snmp_ids.map(Number) : null, max_parallel: f.max_parallel ? Number(f.max_parallel) : null });
+    toast(r.output);
+    showTab("scanning");
+    setTimeout(pollStatus, 500);
+  } catch (e) { toast(errText(e), true); }
+}
+$("#scanonce").onclick = () => oneTimeScan();
+document.querySelectorAll("[data-scanonce]").forEach((b) => b.onclick = () => oneTimeScan());
 
 // #asset/<pc> and #user/<name> deep links
 function route(fallback) {
