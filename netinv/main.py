@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, reports, scanning, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, reports, scanning, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
@@ -298,6 +298,8 @@ def _run_name(db, collector: str) -> str:
     if collector.startswith("job:") and collector[4:].isdigit():
         j = db.get(ScanJob, int(collector[4:]))
         return f"job: {j.name}" if j else "job (deleted)"
+    if collector == "once":
+        return "One-time scan"
     return collector
 
 
@@ -2178,6 +2180,55 @@ def scan_target(tid: int, db=Depends(db_session)):
 def scan_all():
     threading.Thread(target=jobs.run_all, daemon=True).start()
     return {"started": jobs.ALL_ORDER}
+
+
+# ----------------------------------------------------------------- one-time scan (see oneshot.py)
+class OnceIn(BaseModel):
+    targets: str                         # IPs, ranges, CIDRs, computer names, usernames, OUs or domains
+    kind: str = "auto"                   # oneshot.KINDS: what the values are, or work it out
+    scans: list[str] | None = None       # oneshot.SCANS; None = the defaults
+    credential_id: int | None = None     # sign in with: None = the scanning credentials, 0 = the server's own account
+    snmp_ids: list[int] | None = None    # SNMP credentials to try; None = the ones ticked on the saved targets
+    max_parallel: int | None = None      # PCs scanned at once over WinRM
+
+
+@app.get("/api/scan/once", dependencies=UI)
+def scan_once_options(db=Depends(db_session)):
+    return {"kinds": oneshot.KINDS, "scans": oneshot.SCANS, "default_scans": oneshot.DEFAULT_SCANS,
+            "snmp": [{"id": c.id, "name": c.name, "kind": c.kind} for c in
+                     db.scalars(select(Credential).where(Credential.kind.in_(("snmp2", "snmp3"))).order_by(Credential.name))],
+            "domains": oneshot.known_domains(db)}
+
+
+@app.post("/api/scan/once/preview", dependencies=UI)
+def scan_once_preview(body: OnceIn, db=Depends(db_session)):
+    """What each typed value will be scanned as, and which steps run, before starting."""
+    try:
+        entries = oneshot.parse(db, body.targets, body.kind)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    scans = set(body.scans or oneshot.DEFAULT_SCANS) | ({"pcs"} if "updates" in (body.scans or []) else set())
+    return {"targets": entries, "steps": oneshot.steps_for([e for e in entries if not e["error"]], scans)}
+
+
+@app.post("/api/scan/once")
+def scan_once(body: OnceIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        return oneshot.start(db, actor, body.targets, body.kind, body.scans, body.credential_id, body.snmp_ids,
+                             body.max_parallel)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/scanning/once/{n}/cancel")
+def scan_once_cancel(n: int, actor=Depends(ui_auth), db=Depends(db_session)):
+    key = f"once:{n}"
+    name = oneshot.ACTIVE.get(key, {}).get("name")
+    if not oneshot.cancel(key, actor):
+        raise HTTPException(400, "that one-time scan isn't running")
+    db.add(AuditLog(actor=actor, action="scan.once.cancel", target=(name or key)[:120], result="stopping"))
+    db.commit()
+    return {"ok": True, "output": "Stopping: PCs already being scanned finish, the rest are skipped."}
 
 
 # ----------------------------------------------------------------- scan schedule (see jobs.py)

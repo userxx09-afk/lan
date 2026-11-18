@@ -411,6 +411,24 @@ credentials* (each target's ticked accounts, the default) or one saved account (
 *Run now* asks which account to use for that run only, starting on the job's own setting. The job's result says
 which account it signed in as. SNMP keeps its community strings.
 
+### One-time scan (0.30)
+
+**One-time scan…** (Scanning tab, and Settings next to *Scan everything now*) scans something once, now, without
+saving a scan target or a scan job. Type one or more of: an IP address, a range (`10.0.2.10-60`) or CIDR, a computer
+name, a username (`jsmith`, `CORP\jsmith` or `jsmith@corp.example.com`), an AD OU (as ADUC shows it, or a DN) or a
+whole domain. *It is* works out what each value is (the dialog shows what it found before you start), or set it by hand.
+
+Tick the scans: *Ping*, *SNMP*, *PC inventory over WinRM* (an IP range is swept on 5985 first), *Pending Windows
+updates too*, *Active Directory details* (a computer or user by name is looked up on its own, not the whole domain) and
+*Logons from domain controllers*. A username with PC inventory also scans the 5 computers that user signed in to most
+recently. **Sign in with** is the same picker as scan jobs: the scanning credentials (the accounts ticked on your saved
+targets), one saved account, or this server's own account; SNMP credentials can be picked too.
+
+Results go into the inventory like any scan. The run shows live on the Scanning tab (with **Cancel**), then in
+*Recently finished* as *One-time scan* with what was scanned, who started it and the account it signed in as. The audit
+log has *scan.once* when it starts and *scan.once.done* with the result. It doesn't wait in the job queue. Exclusions
+still apply.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it
