@@ -549,7 +549,7 @@ class Setting(Base):
 
 
 class AuditLog(Base):
-    """Every write action taken from the UI (AD changes, reboots, credential edits)."""
+    """Sign-ins and sign-outs, and every change made from the UI (settings, groups, credentials, AD changes, deployments...)."""
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(primary_key=True)
     time: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
@@ -557,6 +557,17 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(64))
     target: Mapped[str | None] = mapped_column(String(255))
     result: Mapped[str | None] = mapped_column(Text)
+    ip: Mapped[str | None] = mapped_column(String(64))             # address the request came from (filled in by logs.py)
+
+
+class ServerLog(Base):
+    """The server's own log (scans, collectors, DC errors...), kept in the database for the Logs page. See logs.py."""
+    __tablename__ = "server_log"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    time: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    level: Mapped[str] = mapped_column(String(16), index=True)
+    logger: Mapped[str | None] = mapped_column(String(128))
+    message: Mapped[str | None] = mapped_column(Text)
 
 
 def get_setting(db, key: str, default: str | None = None) -> str | None:

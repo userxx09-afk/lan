@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, reports, scanning, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, reports, scanning, updater
 from .config import settings
 from .correlate import create_views
 from datetime import datetime
@@ -35,6 +35,7 @@ _stop = threading.Event()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db(settings.database_url)
+    logs.install(_stop)
     with SessionLocal() as db:
         create_views(db)
         exclusions.seed(db)
@@ -69,6 +70,26 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "?"
 
 
+def _scope_user(scope) -> str | None:
+    """Who made a request, for the audit middleware. Runs after the endpoint, so a request that got past
+    ui_auth was signed in; for HTTP basic auth the (already checked) username is enough."""
+    req = Request(scope)
+    s = auth.session_user(req.cookies.get(auth.COOKIE))
+    if s:
+        return s.user
+    h = req.headers.get("authorization", "")
+    if h.lower().startswith("basic "):
+        import base64
+        try:
+            return base64.b64decode(h[6:]).decode().partition(":")[0] or None
+        except Exception:
+            return None
+    return None if auth.auth_required() else "admin"
+
+
+app.add_middleware(logs.AuditMiddleware, client_ip=lambda scope: (scope.get("client") or ("?",))[0], user_for=_scope_user)
+
+
 def current_user(request: Request) -> str | None:
     """The signed-in user from the session cookie, or from HTTP basic auth (scripts, BI refreshes)."""
     s = auth.session_user(request.cookies.get(auth.COOKIE))
@@ -84,7 +105,9 @@ def current_user(request: Request) -> str | None:
         with SessionLocal() as db:
             try:
                 sess = auth.login(db, user, pw, _client_ip(request))
-            except auth.LoginError:
+            except auth.LoginError as exc:
+                db.add(AuditLog(actor=user[:64], action="login.failed", target="basic auth", result=str(exc)[:200]))
+                db.commit()
                 return None
         auth.logout(getattr(sess, "token", None))   # basic auth is per request; keep no session
         return sess.user
@@ -133,24 +156,36 @@ class LoginIn(BaseModel):
 @app.post("/api/login")
 def do_login(body: LoginIn, request: Request, db=Depends(db_session)):
     ip = _client_ip(request)
+    agent = (request.headers.get("user-agent") or "")[:200]
     try:
         s = auth.login(db, body.username, body.password, ip)
     except auth.LoginError as exc:
-        db.add(AuditLog(actor=body.username[:64], action="login.failed", target=f"ip:{ip}", result=str(exc)[:200]))
+        db.add(AuditLog(actor=body.username[:64], action="login.failed", target="sign-in page", ip=ip, result=str(exc)[:200]))
         db.commit()
         raise HTTPException(401, str(exc))
-    db.add(AuditLog(actor=s.user, action=f"login.{s.source}", target=f"ip:{ip}", result="ok"))
+    old = auth.session_user(request.cookies.get(auth.COOKIE))
+    if old:     # someone else (or the same person) was still signed in on this browser: end that session first
+        auth.logout(request.cookies.get(auth.COOKIE))
+        db.add(AuditLog(actor=old.user, action="logout", target="session", ip=ip, result=f"replaced by a new sign-in as {s.user}"))
+    db.add(AuditLog(actor=s.user, action=f"login.{s.source}", target="sign-in page", ip=ip,
+                    result=f"ok ({'AD account' if s.source == 'ad' else 'local admin'}){f'; {agent}' if agent else ''}"))
     db.commit()
     resp = Response('{"ok": true}', media_type="application/json")
-    resp.set_cookie(auth.COOKIE, s.token, httponly=True, samesite="strict", secure=request.url.scheme == "https",
-                    max_age=auth.SESSION_MAX, path="/")
+    # No max_age: a browser-session cookie, so closing the browser signs out (the server also ends it after
+    # auth.SESSION_MAX, or auth.SESSION_IDLE without use).
+    resp.set_cookie(auth.COOKIE, s.token, httponly=True, samesite="strict", secure=request.url.scheme == "https", path="/")
     return resp
 
 
 @app.post("/api/logout")
-def do_logout(request: Request):
+def do_logout(request: Request, db=Depends(db_session)):
+    s = auth.session_user(request.cookies.get(auth.COOKIE))
     auth.logout(request.cookies.get(auth.COOKIE))
-    resp = Response('{"ok": true}', media_type="application/json")
+    if s:
+        mins = int((s.seen - s.created) // 60)
+        db.add(AuditLog(actor=s.user, action="logout", target="session", ip=_client_ip(request), result=f"signed out after {mins} min"))
+        db.commit()
+    resp = Response('{"ok": true}', media_type="application/json", headers={"Clear-Site-Data": '"cache", "storage"'})
     resp.delete_cookie(auth.COOKIE, path="/")
     return resp
 
@@ -2496,19 +2531,94 @@ SETTING_KEYS = {"dameware_mode": "windows", "interval:ad": "", "interval:snmp": 
                 "fix:reboot_hour": "2", "dhcp:servers": ""}
 
 
-@app.get("/api/settings", dependencies=UI)
-def get_settings(db=Depends(db_session)):
+# ----------------------------------------------------------------- Logs page: audit log, server log, collector runs, log files
+@app.get("/api/logs/audit", dependencies=UI)
+def logs_audit(hours: int | None = 168, actor: str = "", action: str = "", text: str = "", ip: str = "", kind: str = "",
+               limit: int = 200, offset: int = 0, db=Depends(db_session)):
+    return logs.audit_rows(db, hours=hours or None, actor=actor, action=action, text=text, ip=ip, kind=kind, limit=limit, offset=offset)
+
+
+@app.get("/api/logs/audit.csv", dependencies=UI)
+def logs_audit_csv(hours: int | None = 168, actor: str = "", action: str = "", text: str = "", ip: str = "", kind: str = "",
+                   db=Depends(db_session)):
+    r = logs.audit_rows(db, hours=hours or None, actor=actor, action=action, text=text, ip=ip, kind=kind, limit=5000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time (UTC)", "who", "action", "target", "ip", "result"])
+    for x in r["rows"]:
+        w.writerow([x["time"], x["actor"], x["action"], x["target"], x["ip"], x["result"]])
+    return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=netinventory-audit.csv"})
+
+
+@app.get("/api/logs/server", dependencies=UI)
+def logs_server(hours: int | None = 24, level: str = "", logger: str = "", text: str = "", limit: int = 200, offset: int = 0,
+                db=Depends(db_session)):
+    out = logs.server_rows(db, hours=hours or None, level=level, logger=logger, text=text, limit=limit, offset=offset)
+    out["loggers"] = logs.loggers(db)
+    return out
+
+
+@app.get("/api/logs/runs", dependencies=UI)
+def logs_runs(hours: int | None = 168, failed: bool = False, text: str = "", limit: int = 200, db=Depends(db_session)):
+    from datetime import timedelta
+    q = select(CollectorRun)
+    if hours:
+        q = q.where(CollectorRun.started >= utcnow() - timedelta(hours=hours))
+    if failed:
+        q = q.where(CollectorRun.ok.is_(False))
+    if text:
+        t = f"%{text.replace('%', '')}%"
+        q = q.where((CollectorRun.collector.ilike(t)) | (CollectorRun.message.ilike(t)))
+    names = {f"job:{j.id}": j.name for j in db.scalars(select(ScanJob))}
+    rows = db.scalars(q.order_by(CollectorRun.started.desc()).limit(min(limit, 2000)))
+    return {"rows": [{"started": r.started, "finished": r.finished, "collector": names.get(r.collector, r.collector),
+                      "ok": r.ok, "message": r.message, "ran_by": r.ran_by} for r in rows]}
+
+
+@app.get("/api/logs/files", dependencies=UI)
+def logs_files():
+    return {"folder": str(logs.log_dir()), "files": logs.log_files()}
+
+
+@app.get("/api/logs/files/{name}", dependencies=UI)
+def logs_file(name: str, download: bool = False):
+    p = logs.log_file_path(name)
+    if not p:
+        raise HTTPException(404, "no such log file")
+    if download:
+        return FileResponse(p, filename=p.name, media_type="text/plain")
+    return {"name": p.name, "size": p.stat().st_size, "text": logs.tail(p)}
+
+
+# Settings that belong to the person, not the server: kept per signed-in user (settings key "user:<name>:<key>"),
+# with the shared value as the default for anyone who hasn't chosen.
+USER_SETTING_KEYS = {"dameware_mode"}
+
+
+def _user_key(user: str, k: str) -> str:
+    return f"user:{user.lower()}:{k}"
+
+
+@app.get("/api/settings")
+def get_settings(user=Depends(ui_auth), db=Depends(db_session)):
     out = {k: get_setting(db, k, v) for k, v in SETTING_KEYS.items()}
+    for k in USER_SETTING_KEYS:
+        out[k] = get_setting(db, _user_key(user, k), out[k])
     out["intervals"] = jobs.intervals(db)
+    out["per_user"] = sorted(USER_SETTING_KEYS)
     return out
 
 
 @app.put("/api/settings")
 def put_settings(body: dict, actor=Depends(ui_auth), db=Depends(db_session)):
+    before = get_settings(actor, db)
     for k, v in body.items():
         if k in SETTING_KEYS:
             if k == "dameware_mode" and v not in ("windows", "saved"):
                 raise HTTPException(400, "dameware_mode must be windows or saved")
+            if k in USER_SETTING_KEYS:
+                set_setting(db, _user_key(actor, k), str(v))
+                continue
             if k.startswith("interval:") and v not in ("", None) and not str(v).isdigit():
                 raise HTTPException(400, f"{k} must be minutes")
             if k == "fix:reboot_hour" and not (str(v).isdigit() and 0 <= int(v) <= 23):
@@ -2517,9 +2627,12 @@ def put_settings(body: dict, actor=Depends(ui_auth), db=Depends(db_session)):
                 v = ", ".join(x.strip() for x in str(v or "").replace(";", ",").split(",") if x.strip())
                 set_setting(db, "dhcp:discovered", None)
             set_setting(db, k, None if v in ("", None) else str(v))
-    db.add(AuditLog(actor=actor, action="settings.save", target="settings", result=json.dumps(body)[:500]))
+    changed = {k: f"{before.get(k) if before.get(k) not in (None, '') else '(none)'} -> {v if v not in (None, '') else '(none)'}"
+               for k, v in body.items() if k in SETTING_KEYS and str(before.get(k) or "") != str(v or "")}
+    db.add(AuditLog(actor=actor, action="settings.save", target="settings (your own)" if set(changed) <= USER_SETTING_KEYS and changed else "settings",
+                    result=json.dumps(changed or "no change")[:1000]))
     db.commit()
-    return get_settings(db)
+    return get_settings(actor, db)
 
 
 @app.get("/api/search", dependencies=UI)

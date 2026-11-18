@@ -54,6 +54,7 @@ jobs:
           python tests/test_jira.py
           python tests/test_computers_view.py
           python tests/test_ip_discovery.py
+          python tests/test_audit_logs.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js
       - name: Agent inventory script matches the WinRM one

@@ -21,6 +21,7 @@
     <button data-tab="reports">Reports</button>
     <button data-tab="scanning">Scanning</button>
     <button data-tab="settings">Settings</button>
+    <button data-tab="logs">Logs</button>
   </nav>
   <form id="search"><input id="q" placeholder="Search PC, user, IP or MAC" autocomplete="off"></form>
   <div class="who"><span id="whoami"></span><button class="ghost" id="logout">Sign out</button></div>
@@ -428,10 +429,54 @@
         <h3>DameWare Mini Remote Control</h3>
         <p class="muted">The Remote button opens <code>dameware://</code> links. Each technician PC needs the NetInventory DameWare launcher (an installer option, or deploy <code>dameware-handler.reg</code> and <code>Open-DameWare.ps1</code> by GPO). Extra DWRCC switches and a custom DWRCC.exe path are set per PC in the registry, not here, so a link can never pass arbitrary arguments.</p>
         <form id="dwform" class="lifeform">
+          <p class="muted small">This is your own setting: it applies only when you are signed in.</p>
           <label>Sign in with <select name="dameware_mode"><option value="windows">Windows logon of the technician (default)</option><option value="saved">Saved host entry in DameWare</option></select></label>
           <button>Save</button>
         </form>
       </div>
+    </div>
+  </section>
+
+  <section id="logs" class="tab">
+    <nav class="subtabs" id="logtabs"><button data-ltab="audit" class="active">Audit log</button><button data-ltab="server">Server log</button>
+      <button data-ltab="runs">Scans and collectors</button><button data-ltab="files">Log files on the server</button></nav>
+    <div id="logpane-audit" class="logpane">
+      <p class="muted small">Sign-ins (and failed ones), sign-outs and every change made in NetInventory: who, when, from which address and what changed. Passwords, tokens and keys are never recorded.</p>
+      <form id="auditf" class="toolbar logfilters">
+        <select name="kind"><option value="">Everything</option><option value="signin">Sign-ins and sign-outs</option><option value="changes">Changes only</option><option value="failed">Failures only</option></select>
+        <select name="hours"><option value="24">Last 24 hours</option><option value="168" selected>Last 7 days</option><option value="720">Last 30 days</option><option value="2160">Last 90 days</option><option value="0">All time</option></select>
+        <input name="actor" placeholder="Who">
+        <input name="action" placeholder="Action, like login or group">
+        <input name="ip" placeholder="IP address">
+        <input name="text" placeholder="Search target or details">
+        <button class="ghost" type="button" id="auditcsv">Export CSV</button>
+      </form>
+      <div id="audittable"></div><div id="auditmore"></div>
+    </div>
+    <div id="logpane-server" class="logpane" hidden>
+      <p class="muted small">NetInventory's own log: scans, collectors, domain controller and WinRM errors, updates. Kept 30 days.</p>
+      <form id="serverf" class="toolbar logfilters">
+        <select name="level"><option value="">All levels</option><option value="warning" selected>Warnings and errors</option><option value="error">Errors only</option></select>
+        <select name="hours"><option value="1">Last hour</option><option value="24" selected>Last 24 hours</option><option value="168">Last 7 days</option><option value="720">Last 30 days</option></select>
+        <select name="logger"><option value="">Every part</option></select>
+        <input name="text" placeholder="Search messages">
+        <button class="ghost" type="button" id="serverrefresh">Refresh</button>
+      </form>
+      <div id="servertable"></div><div id="servermore"></div>
+    </div>
+    <div id="logpane-runs" class="logpane" hidden>
+      <p class="muted small">Every scan job and collector run (AD import, DC logons, SNMP, PC inventory) with its result.</p>
+      <form id="runsf" class="toolbar logfilters">
+        <select name="failed"><option value="">All runs</option><option value="1">Failed runs only</option></select>
+        <select name="hours"><option value="24">Last 24 hours</option><option value="168" selected>Last 7 days</option><option value="720">Last 30 days</option></select>
+        <input name="text" placeholder="Search job or message">
+      </form>
+      <div id="runstable"></div>
+    </div>
+    <div id="logpane-files" class="logpane" hidden>
+      <p class="muted small" id="logfolder"></p>
+      <div id="filestable"></div>
+      <div id="fileview"></div>
     </div>
   </section>
 </main>

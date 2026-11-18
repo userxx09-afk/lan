@@ -60,7 +60,7 @@ function showTab(name) {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === name));
   loaders[name]?.();
-  try { localStorage.setItem("tab", name); } catch {}
+  try { sessionStorage.setItem("tab", name); } catch {}
 }
 
 // ------------------------------------------------------------ dashboard: KPIs + alerts grouped by priority
@@ -2344,7 +2344,9 @@ $("#updreinstall").onclick = () => startInstall(true);
 
 // ------------------------------------------------------------ signed-in user, sign-in settings
 api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});
-$("#logout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
+// Nothing one person chose in this browser (open tab, filters...) carries over to the next person who signs in.
+function clearLocalState() { try { sessionStorage.clear(); localStorage.clear(); } catch {} }
+$("#logout").onclick = async () => { clearLocalState(); await fetch("/api/logout", { method: "POST" }); location.replace("/login"); };
 // ------------------------------------------------------------ HTTPS certificate
 // ------------------------------------------------------------ NetInventory Agent: enrollment, approvals, revoke
 async function loadAgents(newToken = null) {
@@ -2556,7 +2558,8 @@ $("#drawer").onclick = (e) => { if (e.target.id === "drawer") $("#drawer").hidde
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#drawer").hidden = true; });
 
 let start = "overview";
-try { start = localStorage.getItem("tab") || start; } catch {}
+// View state lives only for this sign-in: sessionStorage, wiped at sign-in and sign-out (see clearLocalState).
+try { localStorage.removeItem("tab"); start = sessionStorage.getItem("tab") || start; } catch {}
 route(start);
 pollStatus();
 loadUpdate();
@@ -2836,3 +2839,89 @@ $("#jirapick").onclick = async () => {
   jiraTypes(f.issue_type, pick.p, null);
 };
 $("#jiraform").project.onchange = (e) => { e.target.value = e.target.value.trim().toUpperCase(); };
+
+
+// ------------------------------------------------------------ Logs: audit log, server log, collector runs, log files on the server
+const LOG_PAGE = 200;
+const logTime = (v) => `<span title="${esc(v)} UTC">${esc(fmtDate(utcLocal(v)))}</span>`;
+const formQuery = (f) => new URLSearchParams([...new FormData(f)].filter(([, v]) => v !== ""));
+const AUDIT_PILL = (a, r) => /^login\.failed/.test(a) ? "bad" : /^login\./.test(a) ? "good" : /^(logout|session\.)/.test(a) ? "mute"
+  : /^HTTP [45]|fail/i.test(r || "") ? "bad" : "warn";
+let auditRows = [], serverRows = [];
+function logTab(t) {
+  $("#logtabs").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.ltab === t));
+  document.querySelectorAll(".logpane").forEach((p) => p.hidden = p.id !== `logpane-${t}`);
+  try { sessionStorage.setItem("logtab", t); } catch {}
+  ({ audit: () => loadAudit(), server: () => loadServerLog(), runs: loadRuns, files: loadLogFiles })[t]();
+}
+$("#logtabs").querySelectorAll("button").forEach((b) => b.onclick = () => logTab(b.dataset.ltab));
+loaders.logs = () => { let t = "audit"; try { t = sessionStorage.getItem("logtab") || t; } catch {} logTab(t); };
+const debounce = (fn, ms = 300) => { let h; return () => { clearTimeout(h); h = setTimeout(fn, ms); }; };
+async function loadAudit(more = false) {
+  const q = formQuery($("#auditf"));
+  q.set("limit", LOG_PAGE); q.set("offset", more ? auditRows.length : 0);
+  try {
+    const r = await api(`/api/logs/audit?${q}`);
+    auditRows = more ? auditRows.concat(r.rows) : r.rows;
+    table($("#audittable"), auditRows, ["time", "actor", "action", "target", "ip", "result"], {
+      labels: { actor: "who", ip: "from (IP)", result: "what changed / result" },
+      cell: { time: logTime, actor: (v) => esc(v), action: (v, x) => `<span class="pill ${AUDIT_PILL(v, x.result)}">${esc(v)}</span>`,
+        target: (v) => (String(v || "").startsWith("computer:") ? hostLink(v.slice(9)) : String(v || "").startsWith("user:") ? userLink(v.slice(5)) : esc(v)),
+        result: (v) => `<span class="logmsg">${esc(v)}</span>` } });
+    $("#auditmore").innerHTML = auditRows.length < r.total ? `<p><button class="ghost" id="auditnext">Show more (${auditRows.length} of ${r.total})</button></p>` : "";
+    $("#auditnext")?.addEventListener("click", () => loadAudit(true));
+  } catch (e) { $("#audittable").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; }
+}
+$("#auditf").oninput = debounce(() => loadAudit());
+$("#auditf").onsubmit = (e) => { e.preventDefault(); loadAudit(); };
+$("#auditcsv").onclick = () => { location.href = `/api/logs/audit.csv?${formQuery($("#auditf"))}`; };
+const LEVEL_PILL = { WARNING: "warn", ERROR: "bad", CRITICAL: "bad", INFO: "mute", DEBUG: "mute" };
+async function loadServerLog(more = false) {
+  const f = $("#serverf"), q = formQuery(f);
+  q.set("limit", LOG_PAGE); q.set("offset", more ? serverRows.length : 0);
+  try {
+    const r = await api(`/api/logs/server?${q}`);
+    serverRows = more ? serverRows.concat(r.rows) : r.rows;
+    const sel = f.logger, cur = sel.value;
+    sel.innerHTML = `<option value="">Every part</option>` + r.loggers.map((n) => `<option ${n === cur ? "selected" : ""}>${esc(n)}</option>`).join("");
+    table($("#servertable"), serverRows, ["time", "level", "logger", "message"], {
+      labels: { logger: "part" },
+      cell: { time: logTime, level: (v) => `<span class="pill ${LEVEL_PILL[v] || "mute"}">${esc(v)}</span>`, message: (v) => `<span class="logmsg">${esc(v)}</span>` } });
+    $("#servermore").innerHTML = serverRows.length < r.total ? `<p><button class="ghost" id="servernext">Show more (${serverRows.length} of ${r.total})</button></p>` : "";
+    $("#servernext")?.addEventListener("click", () => loadServerLog(true));
+  } catch (e) { $("#servertable").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; }
+}
+$("#serverf").oninput = debounce(() => loadServerLog());
+$("#serverf").onsubmit = (e) => { e.preventDefault(); loadServerLog(); };
+$("#serverrefresh").onclick = () => loadServerLog();
+async function loadRuns() {
+  try {
+    const r = await api(`/api/logs/runs?${formQuery($("#runsf"))}`);
+    table($("#runstable"), r.rows, ["started", "finished", "collector", "ok", "message", "ran_by"], {
+      labels: { collector: "job or collector", ok: "result", ran_by: "ran on" },
+      cell: { started: logTime, finished: (v) => (v ? logTime(v) : `<span class="pill warn">running</span>`),
+        ok: (v) => (v == null ? "" : `<span class="pill ${v ? "good" : "bad"}">${v ? "ok" : "failed"}</span>`),
+        message: (v) => `<span class="logmsg">${esc(v)}</span>` } });
+  } catch (e) { $("#runstable").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; }
+}
+$("#runsf").oninput = debounce(loadRuns);
+$("#runsf").onsubmit = (e) => { e.preventDefault(); loadRuns(); };
+async function loadLogFiles() {
+  const r = await api("/api/logs/files");
+  $("#logfolder").innerHTML = `Files in <code>${esc(r.folder)}</code> on the server: the service's own output and error logs, setup and update logs.`;
+  $("#fileview").innerHTML = "";
+  if (!r.files.length) { $("#filestable").innerHTML = `<p class="muted">No log files in that folder.</p>`; return; }
+  table($("#filestable"), r.files.map((x) => ({ ...x, act: x.name })), ["name", "size", "modified", "act"], {
+    labels: { act: "" },
+    cell: { size: (v) => esc(fmtSize(v)), modified: logTime,
+      act: (v) => `<a class="link" data-lfview="${esc(v)}">View end</a> · <a class="link" href="/api/logs/files/${encodeURIComponent(v)}?download=1" download>Download</a>` } });
+  $("#filestable").querySelectorAll("[data-lfview]").forEach((a) => a.onclick = async () => {
+    $("#fileview").innerHTML = `<p class="muted"><span class="spinner tiny"></span> Loading…</p>`;
+    try {
+      const f = await api(`/api/logs/files/${encodeURIComponent(a.dataset.lfview)}`);
+      $("#fileview").innerHTML = `<h3>${esc(f.name)} <span class="muted small">(${f.size > 256000 ? "last 250 KB of " : ""}${esc(fmtSize(f.size))})</span></h3><pre class="code logtext">${esc(f.text)}</pre>`;
+      const pre = $("#fileview pre"); pre.scrollTop = pre.scrollHeight;
+    } catch (e) { $("#fileview").innerHTML = `<p class="pill bad longtext">${esc(errText(e))}</p>`; }
+  });
+}
+if ($("#logs").classList.contains("active")) loaders.logs();   // opened straight on Logs (this code runs after the first route)

@@ -317,3 +317,9 @@ fieldset.bulkf { border: 0; padding: 0; margin: 0; }
 .colpicker li span { flex: 1; }
 .colpicker li.fixed { color: var(--muted); }
 .colpicker li a[hidden] { visibility: hidden; display: inline !important; }
+
+/* Logs page */
+.logfilters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.logfilters input { width: 180px; } .logfilters input[name=text] { width: 240px; }
+pre.logtext { max-height: 70vh; }
+.logmsg { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 900px; display: inline-block; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
