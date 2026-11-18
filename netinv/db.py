@@ -248,6 +248,13 @@ class SwitchPort(Base):
     speed_mbps: Mapped[int | None] = mapped_column(Integer)
     neighbor: Mapped[str | None] = mapped_column(String(255))  # LLDP/CDP neighbour, if any
     neighbor_port: Mapped[str | None] = mapped_column(String(255))
+    # What the LLDP/CDP neighbour says it is: switch, router, ap, phone, computer, other or unknown (no capabilities sent).
+    # Switches, routers and APs make the port an uplink; a phone or a PC that speaks LLDP is the device on the port.
+    neighbor_kind: Mapped[str | None] = mapped_column(String(16))
+    neighbor_mac: Mapped[str | None] = mapped_column(String(17))   # LLDP chassis ID, when it is a MAC
+    neighbor_ip: Mapped[str | None] = mapped_column(String(64))    # LLDP management / CDP address
+    neighbor_descr: Mapped[str | None] = mapped_column(Text)       # LLDP system description / CDP platform
+    vlan: Mapped[int | None] = mapped_column(Integer)              # untagged (access) VLAN of the port, when the switch says
     mac_count: Mapped[int] = mapped_column(Integer, default=0)
     is_uplink: Mapped[bool] = mapped_column(Boolean, default=False)
     switch: Mapped[NetworkDevice] = relationship(back_populates="ports")
