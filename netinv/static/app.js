@@ -171,6 +171,8 @@ const logonHost = (v, r) => (!v ? `<span class="pill mute">unknown</span>` : `<s
   : `${esc(v)} <span class="small muted">not in inventory</span>`}</span>`);
 const dcCell = (v, r) => (v ? esc(v) : `<span class="small muted">${esc(r.source && r.source.startsWith("local:") ? "PC's own log" : r.source || "")}</span>`);
 const userLink = (v) => (v ? `<a class="link" data-user="${esc(v)}">${esc(v)}</a>` : "");
+// "Jane Doe (gr131211)", the name from AD, linked to the user page; just the user ID when AD has no name.
+const userNameLink = (v, name) => (!v ? "" : name ? `<a class="link" data-user="${esc(v)}">${esc(name)} <span class="muted">(${esc(v)})</span></a>` : userLink(v));
 const diskPill = (v) => (v === null || v === undefined ? "" : `<span class="pill ${v < 10 ? "bad" : v < 20 ? "warn" : "good"}">${v}%</span>`);
 
 // ------------------------------------------------------------ tabs
@@ -273,7 +275,7 @@ const COL_LABELS = {
   port_last_seen: "Port last seen", asset_location: "Asset location", purchase_date: "Purchased", warranty_end: "Warranty ends",
   logon_events: "Logon events", role: "Role", av_name: "Antivirus", av_enabled: "AV on", av_up_to_date: "AV up to date",
   scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
-  ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
+  last_user_name: "Last user name", ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
   agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks", ip_source: "IP from",
   connection: "Connection", wifi_ssid: "Wi-Fi network", wifi_ap: "Access point", wifi_seen: "Wi-Fi last seen", wifi_signal: "Wi-Fi signal %", wifi_bssid: "BSSID",
 };
@@ -313,7 +315,7 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...new Set([...GRID_COLS.map((c) => c[0]), "uptime", "last_boot", "online", "online_checked", "online_changed", "online_via", "agent_status", "agent_last_seen", "agent_version", "agent_note"])],
+  dataset: "v_devices", fields: [...new Set([...GRID_COLS.map((c) => c[0]), "uptime", "last_boot", "last_user_name", "online", "online_checked", "online_changed", "online_via", "agent_status", "agent_last_seen", "agent_version", "agent_note"])],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
     ...(grid.domain ? [{ field: "domain", op: "eq", value: grid.domain }] : []),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
@@ -347,7 +349,7 @@ loaders.computers = async () => {
 };
 function gridCell(c, v, row) {
   if (c === "hostname") return `${statusDot(row)} ${hostLink(v)}`;
-  if (c === "last_user") return userLink(v);
+  if (c === "last_user") return userNameLink(v, row.last_user_name);
   if (c === "uptime") return uptimeCell(row);
   if (c === "min_disk_pct_free") return diskPill(v);
   if (c === "pending_updates") return v ? `<span class="pill warn">${v}</span>` : v === 0 ? `<span class="pill good">0</span>` : "";
@@ -546,7 +548,7 @@ function renderAssetTab(d, tab) {
           <div class="track"><div class="fill ${k.pct_free < 10 ? "bad" : k.pct_free < 20 ? "warn" : ""}" style="width:${100 - (k.pct_free || 0)}%"></div></div></div>`).join("") || `<p class="muted">No disk data yet.</p>`}
       </div>
       <div class="panel"><h3>Users</h3>
-        ${kvRow("Signed in now", esc(v.current_user))}${kvRow("Last user", `${userLink(v.last_user)} <span class="muted">${fmtDate(v.last_user_logon)}</span>`)}
+        ${kvRow("Signed in now", esc(v.current_user))}${kvRow("Last user", `${userNameLink(v.last_user, v.last_user_name)} <span class="muted">${fmtDate(v.last_user_logon)}</span>`)}
         <h3>Directory</h3>
         ${kvRow("AD enabled", v.ad_enabled === null ? "" : v.ad_enabled ? "Yes" : "No")}${kvRow("AD last logon", fmtDate(v.ad_last_logon))}
         ${kvRow("OU", esc(v.ou))}
