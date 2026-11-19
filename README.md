@@ -459,6 +459,25 @@ asked DHCP for, else its IP (switch/router ARP table or DHCP lease), else just i
 the PC behind it underneath. MACs show their maker where it is in a short built-in list (phones, printers, cameras,
 NAS, Raspberry Pi, VMs...) or *random MAC* for a privacy address; hover a device for its MAC and IP.
 
+### Wi-Fi: which access point (0.33)
+
+Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or
+**Wi-Fi**) and, on Wi-Fi, the network (SSID), signal and the BSSID of the access point. The computer page shows
+*Connection* and *Access point* with when it was last seen there and, when the AP is plugged into a polled switch,
+that switch port. The *Switch location* tab lists every AP the PC has been on, newest first, since laptops move.
+Computers list columns: Connection, Wi-Fi network, Access point, Wi-Fi last seen. On Windows 11 24H2 and later the
+SSID/BSSID need location services turned on; without it the PC still reports that it is on Wi-Fi.
+
+A BSSID is named from the wireless controller's AP list, or from a switch port whose LLDP/CDP neighbour is an access
+point with a nearby MAC (vendors number BSSIDs up from the AP's MAC), so it works without a controller when the APs
+send LLDP.
+
+**Settings > Wireless controller** (optional, read only) adds every Wi-Fi client, phones and printers included, and
+names the APs: **UniFi Network** (address, a local read-only account, site; UniFi OS consoles and the classic 8443
+controller), **Cisco Meraki** (Dashboard API key, optional organization ID) or a **Cisco WLC** (AireOS or Catalyst 9800,
+read over SNMP with the saved SNMP credentials). It is polled every 15 minutes by default; *Test connection* and *Poll
+now* are on the same panel. The password or key is stored encrypted and never shown again.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it

@@ -222,6 +222,26 @@ def seed(db) -> str:
     db.flush()
     for p in db.scalars(select(SwitchPort).where(SwitchPort.oper_up.is_(True))):
         p.last_up = now                       # a scan just saw these up
+    # Wi-Fi: the lobby AP (a switch port's LLDP neighbour) and a second AP the controller knows; three laptops on Wi-Fi
+    from .db import Device, WifiSighting, WirelessAp
+    ap.neighbor_mac = "20:4c:03:aa:00:10"
+    db.add(WirelessAp(source="unifi", key="20:4c:03:aa:00:10", name="ap-lobby-01", mac="20:4c:03:aa:00:10", ip="10.0.5.21",
+                      bssids="20:4c:03:aa:00:11,20:4c:03:aa:00:12", model="AP-535", last_seen=now))
+    db.add(WirelessAp(source="unifi", key="20:4c:03:aa:00:20", name="ap-floor2-east", mac="20:4c:03:aa:00:20", ip="10.0.5.22",
+                      bssids="20:4c:03:aa:00:21,20:4c:03:aa:00:22", model="AP-535", last_seen=now))
+    for k, host in enumerate(("WS-007", "WS-014", "WS-021")):
+        dev = db.scalar(select(Device).where(Device.hostname == host))
+        if not dev:
+            continue
+        wmac = f"a4:c3:f0:00:00:{k + 1:02x}"
+        dev.connection, dev.wifi_ssid, dev.wifi_signal, dev.wifi_seen = "wireless", "CORP", 70 + k * 8, now - timedelta(minutes=10 * k)
+        dev.wifi_bssid = "20:4c:03:aa:00:12" if k != 1 else "20:4c:03:aa:00:21"
+        dev.wifi_ap = "ap-lobby-01" if k != 1 else "ap-floor2-east"
+        db.add(WifiSighting(mac=wmac, hostname=host, ssid="CORP", bssid=dev.wifi_bssid, ap_key=dev.wifi_ap, ap_name=dev.wifi_ap,
+                            source="pc", first_seen=now - timedelta(days=2), last_seen=dev.wifi_seen))
+        db.add(WifiSighting(mac=wmac, hostname=host, ssid="CORP", bssid="20:4c:03:aa:00:22", ap_key="ap-floor2-east" if k != 1 else "ap-lobby-01",
+                            ap_name="ap-floor2-east" if k != 1 else "ap-lobby-01", source="unifi",
+                            first_seen=now - timedelta(days=9), last_seen=now - timedelta(days=3)))
     # Empty desks: ports that went down an hour ago, last week, two months ago, never since boot, and one shut down
     for j, sw in enumerate(access):
         boot = now - timedelta(seconds=sw.uptime_s)

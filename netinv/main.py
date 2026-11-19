@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, reports, scanning, updater
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, reports, scanning, updater, wireless
 from .config import settings
 from .correlate import MAC_OWNER_HOST, MAC_OWNER_VIA, create_views
 from datetime import datetime
@@ -389,7 +389,7 @@ def device(hostname: str, db=Depends(db_session)):
             "fixes_running": fixes.running(h),
             "deployments": [_dep_out(x) for x in db.scalars(select(Deployment).where(Deployment.hostname == h)
                                                                .order_by(Deployment.created.desc()).limit(200))],
-            "location": location, "nics": [{"mac": n.mac, "ip": n.ip, "description": n.description} for n in dev.nics],
+            "location": location, "wifi": wireless.history(db, h, macs), "nics": [{"mac": n.mac, "ip": n.ip, "description": n.description} for n in dev.nics],
             "groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id))),
             "rule_groups": sorted(g.name for g in db.scalars(select(DeviceGroup).where(DeviceGroup.device_id == dev.id,
                                                                                          DeviceGroup.dynamic.is_(True)))),
@@ -1846,6 +1846,53 @@ def _jira(fn, *a, **kw):
         return fn(*a, **kw)
     except jira.JiraError as exc:
         raise HTTPException(400, str(exc))
+
+
+class WlcSettingsIn(BaseModel):
+    kind: str | None = None
+    url: str | None = None
+    user: str | None = None
+    secret: str | None = None
+    clear_secret: bool = False
+    site: str | None = None
+    org: str | None = None
+    verify_tls: bool = False
+    every_min: int = 15
+
+
+@app.get("/api/wireless/settings", dependencies=UI)
+def wlc_settings(db=Depends(db_session)):
+    return wireless.config(db)
+
+
+@app.put("/api/wireless/settings")
+def put_wlc_settings(body: WlcSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        wireless.save(db, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    c = wireless.config(db)
+    db.add(AuditLog(actor=actor, action="wireless.settings", target="wireless controller",
+                    result=f"kind={c['kind']} address={c['url']} account={c['user']} site={c['site']} org={c['org']} "
+                           f"every={c['every_min']}min secret={'changed' if body.secret else 'cleared' if body.clear_secret else 'kept'}"))
+    db.commit()
+    return c
+
+
+@app.post("/api/wireless/test")
+def wlc_test(actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        return {"ok": True, "output": wireless.test(db)}
+    except Exception as exc:
+        return {"ok": False, "output": str(exc)}
+
+
+@app.post("/api/wireless/poll")
+def wlc_poll(actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        return {"ok": True, "output": wireless.poll(db)}
+    except Exception as exc:
+        return {"ok": False, "output": str(exc)}
 
 
 @app.get("/api/jira/settings", dependencies=UI)

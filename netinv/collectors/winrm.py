@@ -39,6 +39,22 @@ $cv  = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $nics = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | ForEach-Object {
   @{ mac = $_.MACAddress; ip = (@($_.IPAddress) | Where-Object { $_ -notmatch ':' } | Select-Object -First 1); description = $_.Description } })
 
+# Wired or Wi-Fi: the adapter the default route goes out of. On Wi-Fi, the SSID and the AP's BSSID (needs the WLAN
+# service; on Windows 11 24H2+ the SSID/BSSID also need location services on, else only "wireless" is known).
+$connection = $null; $wifi = $null
+$route = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object { $_.RouteMetric + $_.InterfaceMetric }) | Select-Object -First 1
+if ($route) {
+  $pa = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex
+  if ($pa) { $connection = if ($pa.NdisPhysicalMedium -eq 9 -or "$($pa.PhysicalMediaType)" -match '802\.11') { 'wireless' } else { 'wired' } }
+}
+$wl = @{}
+foreach ($ln in @(netsh wlan show interfaces)) { if ("$ln" -match '^\s+(.+?)\s+:\s(.*)$') { $k = $Matches[1].Trim(); if (-not $wl.ContainsKey($k)) { $wl[$k] = $Matches[2].Trim() } } }
+if ($wl['State'] -eq 'connected') {
+  $bssid = if ($wl['AP BSSID']) { $wl['AP BSSID'] } else { $wl['BSSID'] }
+  $wifi = @{ ssid = $wl['SSID']; bssid = $bssid; signal = (($wl['Signal'] -replace '[^0-9]', '') -as [int]); radio = $wl['Radio type']
+             channel = $wl['Channel']; mac = $wl['Physical address']; adapter = $wl['Description'] }
+}
+
 $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | ForEach-Object {
   @{ drive = $_.DeviceID; size_gb = [math]::Round($_.Size/1GB,1); free_gb = [math]::Round($_.FreeSpace/1GB,1) } })
 
@@ -102,6 +118,7 @@ if ($LogonDays -gt 0) {
   ram_gb = [math]::Round($cs.TotalPhysicalMemory/1GB,1); current_user = $cs.UserName
   nics = $nics; disks = $disks; software = $software; hotfixes = $hotfixes
   pending_updates = $pending; pending_reboot = $reboot; logons = $logons; antivirus = $av; physical_disks = $pdisks
+  connection = $connection; wifi = $wifi
 } | ConvertTo-Json -Depth 5 -Compress
 '''
 

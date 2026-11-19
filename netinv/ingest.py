@@ -17,6 +17,16 @@ from sqlalchemy.orm import Session
 from .db import ChangeEvent, Device, DeviceNic, PhysicalDisk, Disk, LogonEvent, Software, UpdateItem, norm_host, norm_mac, utcnow
 
 
+class WifiIn(BaseModel):
+    ssid: str | None = None
+    bssid: str | None = None
+    signal: int | None = None       # percent
+    radio: str | None = None
+    channel: str | None = None
+    mac: str | None = None          # the Wi-Fi adapter's MAC
+    adapter: str | None = None
+
+
 class Nic(BaseModel):
     mac: str
     ip: str | None = None
@@ -99,6 +109,8 @@ class EndpointPayload(BaseModel):
     logons: list[LogonIn] = []
     antivirus: list[AvIn] | None = None
     physical_disks: list[PhysDiskIn] | None = None
+    connection: str | None = None   # wired | wireless: the adapter the default route uses
+    wifi: WifiIn | None = None      # when connected to Wi-Fi (on any adapter)
 
 
 def get_or_create_device(db: Session, hostname: str) -> Device:
@@ -169,6 +181,9 @@ def apply_endpoint(db: Session, p: EndpointPayload) -> Device:
     if p.physical_disks is not None:
         dev.physical_disks = [PhysicalDisk(model=d.model, serial=d.serial or None, media=d.media, size_gb=d.size_gb,
                                            health=d.health, predict_failure=d.predict_failure) for d in p.physical_disks]
+    if p.connection or p.wifi:
+        from . import wireless
+        wireless.from_pc(db, dev, p.connection, p.wifi.model_dump() if p.wifi else None)
     dev.disks = [Disk(drive=d.drive, size_gb=round(d.size_gb, 1), free_gb=round(d.free_gb, 1)) for d in p.disks]
 
     seen = set()

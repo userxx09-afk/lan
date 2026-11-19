@@ -116,7 +116,7 @@ VIEWS: dict[str, str] = {
                d.os_build,
                d.manufacturer, d.model, d.serial, d.cpu, d.ram_gb,
                d.ad_enabled, d.ad_last_logon, d.ad_created, d.ad_dn,
-               d.current_user,
+               d.current_user, d.connection, d.wifi_ssid, d.wifi_ap, d.wifi_seen, d.wifi_signal, d.wifi_bssid,
                (SELECT ud.username FROM v_user_devices ud WHERE ud.hostname = d.hostname
                  ORDER BY ud.last_logon DESC LIMIT 1) AS last_user,
                (SELECT MAX(ud.last_logon) FROM v_user_devices ud WHERE ud.hostname = d.hostname) AS last_user_logon,

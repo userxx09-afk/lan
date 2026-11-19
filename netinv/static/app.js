@@ -118,6 +118,19 @@ const pluggedIn = (v, r) => {
   const shown = devs.slice(0, 4).map(devCell).join("<br>");
   return devs.length > 4 ? `${shown}<br><span class="small muted">+${devs.length - 4} more</span>` : shown;
 };
+// Wi-Fi: how the PC is connected, and the access point it was last on (with that AP's switch port when we know it).
+const WLC_KIND = { unifi: "UniFi", meraki: "Meraki", cisco: "Cisco WLC" };
+function wifiRow(v, hist) {
+  const last = (hist || [])[0];
+  if (v.connection !== "wireless" && !last) return v.connection === "wired" ? kvRow("Connection", "wired") : "";
+  const ap = last?.ap || v.wifi_ap || v.wifi_bssid;
+  const where = last?.port ? ` · plugged into ${esc(last.switch_name)} ${portLink(last.switch_name, last.switch_ip, last.port)}` : "";
+  const ssid = v.wifi_ssid || last?.ssid;
+  const when = last?.last_seen || v.wifi_seen;
+  return kvRow("Connection", `${v.connection === "wired" ? "wired now · " : ""}<span class="pill good">Wi-Fi</span>${ssid ? ` ${esc(ssid)}` : ""}${v.wifi_signal != null && v.connection === "wireless" ? ` <span class="muted">${esc(v.wifi_signal)}%</span>` : ""}`)
+    + kvRow("Access point", ap ? `<b>${esc(ap)}</b>${where} ${when ? `<span class="muted">last seen ${fmtDate(when)} (${agoUtc(when)})</span>` : ""}`
+      : `<span class="muted">not known (needs the BSSID from the PC or a wireless controller in Settings)</span>`);
+}
 const hostList = (v) => (v ? String(v).split(", ").map(hostLink).join(" ") : "");
 async function openPort(swip, port) {
   let d;
@@ -260,6 +273,7 @@ const COL_LABELS = {
   scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
   ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
   agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks", ip_source: "IP from",
+  connection: "Connection", wifi_ssid: "Wi-Fi network", wifi_ap: "Access point", wifi_seen: "Wi-Fi last seen", wifi_signal: "Wi-Fi signal %", wifi_bssid: "BSSID",
 };
 const HIDDEN_COLS = new Set(["online_checked", "online_changed", "online_via", "agent_note"]);   // shown via the status dot / tooltips
 const BOOL_COLS = new Set(["ad_enabled", "pending_reboot", "av_enabled", "av_up_to_date", "online"]);
@@ -524,6 +538,7 @@ function renderAssetTab(d, tab) {
           return `<b>${esc(v.switch_name)}</b> ${portLink(v.switch_name, at.switch_ip, v.switch_port)} · VLAN ${esc(v.vlan ?? "?")}
             ${at.phone ? ` · behind phone ${esc(at.phone)}` : ""} <span class="muted">seen ${fmtDate(v.port_last_seen)}</span> ${viaPill(at.matched_by)}`;
         })() : `<span class="muted">not found on any switch${d.nics.length || v.mac ? "" : " (no MAC address known for this PC yet: it needs the agent, a WinRM scan or a DHCP lease)"}</span>`)}
+        ${wifiRow(v, d.wifi)}
         <h3>Disks</h3>
         ${d.disks.map((k) => `<div class="disk"><div class="dl"><b>${esc(k.drive)}</b> ${k.free_gb} GB free of ${k.size_gb} GB</div>
           <div class="track"><div class="fill ${k.pct_free < 10 ? "bad" : k.pct_free < 20 ? "warn" : ""}" style="width:${100 - (k.pct_free || 0)}%"></div></div></div>`).join("") || `<p class="muted">No disk data yet.</p>`}
@@ -592,7 +607,13 @@ function renderAssetTab(d, tab) {
     table($("#up2"), d.updates.filter((u) => u.status === "installed"), ["kb", "title", "installed_on"], { sort: "installed_on" });
   } else if (tab === "location") {
     el.innerHTML = `<p class="muted">Every access port this PC's network adapters have been seen on, matched by MAC address
-      (uplinks to other switches excluded). Click a port to see everything else on it.</p><div id="loc"></div>`;
+      (uplinks to other switches excluded). Click a port to see everything else on it.</p><div id="loc"></div>
+      ${d.wifi.length ? `<h2>Wi-Fi access points</h2><p class="muted">Each access point this PC has been on, newest first, from the PC's own scan or the
+        wireless controller. The switch port is where that access point is plugged in.</p><div id="wloc"></div>` : ""}`;
+    if (d.wifi.length) table($("#wloc"), d.wifi, ["ap", "ssid", "port", "bssid", "mac", "source", "first_seen", "last_seen"], {
+      labels: { ap: "access point", ssid: "Wi-Fi network", port: "AP switch port", source: "from" },
+      cell: { port: (v, r) => (v ? `${esc(r.switch_name)} ${portLink(r.switch_name, r.switch_ip, v)}` : ""),
+        source: (v) => esc(v === "pc" ? "PC scan" : WLC_KIND[v] || v) } });
     table($("#loc"), d.location, ["switch_name", "port", "port_alias", "vlan", "phone", "mac", "matched_by", "first_seen", "last_seen"], {
       labels: { phone: "behind phone", matched_by: "MAC from" },
       cell: { port: (v, r) => portLink(r.switch_name, r.switch_ip, v), matched_by: (v) => esc(v) } });
@@ -2301,7 +2322,7 @@ let creds = [], svcAccount = null;
 const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
 const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira(); loadWlc();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
   $("#dhcpform")["dhcp:servers"].value = s["dhcp:servers"] || "";
@@ -3046,6 +3067,41 @@ $("#jirapick").onclick = async () => {
 };
 $("#jiraform").project.onchange = (e) => { e.target.value = e.target.value.trim().toUpperCase(); };
 
+
+// ------------------------------------------------------------ Settings: wireless controller
+const wlcFields = () => {
+  const k = $("#wlcform").kind.value;
+  $("#wlcpanel").querySelectorAll("[data-wlc]").forEach((el) => (el.hidden = !k || !el.dataset.wlc.split(" ").includes(k)));
+};
+async function loadWlc() {
+  const c = await api("/api/wireless/settings"), f = $("#wlcform");
+  f.kind.value = c.kind || ""; f.url.value = c.url || ""; f.user.value = c.user || ""; f.secret.value = ""; f.site.value = c.site || "";
+  f.org.value = c.org || ""; f.verify_tls.checked = c.verify_tls; f.every_min.value = c.every_min || 15;
+  $("#wlcclear").hidden = !c.secret_set;
+  wlcFields();
+  $("#wlcstate").innerHTML = kvRow("Status", c.kind ? `<span class="pill ${c.last_result && c.last_result.includes("failed") ? "bad" : "good"}">${esc(WLC_KIND[c.kind])}</span> ${c.aps} access points known`
+      : `<span class="pill mute">off</span>`)
+    + (c.last_poll ? kvRow("Last poll", `${fmtDate(c.last_poll)} <span class="muted">${agoUtc(c.last_poll)}</span><br>${esc(c.last_result || "")}`) : "");
+}
+const wlcBody = (f) => ({ kind: f.kind.value || null, url: f.url.value, user: f.user.value, secret: f.secret.value || null, site: f.site.value,
+  org: f.org.value, verify_tls: f.verify_tls.checked, every_min: +f.every_min.value || 15 });
+$("#wlcform").kind.onchange = wlcFields;
+$("#wlcform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api("/api/wireless/settings", { method: "PUT", body: JSON.stringify(wlcBody(e.target)) }); toast("Wireless controller saved. Use Test connection to check it."); loadWlc(); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#wlctest").onclick = async () => {
+  try { const r = await post("/api/wireless/test", {}); toast(r.output, !r.ok); } catch (er) { toast(errText(er), true); }
+};
+$("#wlcpoll").onclick = async () => {
+  try { const r = await post("/api/wireless/poll", {}); toast(r.output, !r.ok); loadWlc(); } catch (er) { toast(errText(er), true); }
+};
+$("#wlcclear").onclick = async () => {
+  if (!(await confirmBox("Remove the saved controller password / API key? Polling stops until a new one is saved."))) return;
+  try { await api("/api/wireless/settings", { method: "PUT", body: JSON.stringify({ ...wlcBody($("#wlcform")), secret: null, clear_secret: true }) }); loadWlc(); }
+  catch (er) { toast(errText(er), true); }
+};
 
 // ------------------------------------------------------------ Logs: audit log, server log, collector runs, log files on the server
 const LOG_PAGE = 200;
