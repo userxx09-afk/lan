@@ -2140,14 +2140,21 @@ function formModal(html, wide = false, init = null) {
 }
 
 // ------------------------------------------------------------ port map / network
-loaders.portmap = async () => {
-  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
-  table($("#pmtable"), r.rows, ["switch_name", "port", "port_alias", "vlan", "hostname", "phone", "ip", "mac", "last_seen"], { filterEl: $("#pmfilter"),
-    labels: { phone: "behind phone" },
+// Find a device on any switch (was the separate Port map page): searched on demand, so nothing big loads up front.
+async function findOnPorts(q) {
+  const box = $("#pmtable");
+  if (!q.trim()) { box.innerHTML = ""; return; }
+  box.innerHTML = `<p class="muted">Searching…</p>`;
+  let r;
+  try { r = await api(`/api/port-find?q=${encodeURIComponent(q.trim())}`); } catch (e) { box.innerHTML = `<p class="muted">${esc(errText(e))}</p>`; return; }
+  if (!r.rows.length) { box.innerHTML = `<p class="muted">Not found on any access port. It may be on Wi-Fi, behind an unpolled switch, or not seen since the last scan.</p>`; return; }
+  table(box, r.rows, ["switch_name", "port", "port_alias", "vlan", "hostname", "phone", "ip", "mac", "last_seen"], {
+    labels: { switch_name: "switch", port_alias: "alias", phone: "behind phone" },
     cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind)
         : r.dhcp_name ? `${esc(r.dhcp_name)} <span class="small muted">DHCP name</span>` : hostLink(v)),
-      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
-};
+      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v),
+      switch_name: (v, r) => `<a class="link" data-pick="${esc(r.switch_ip)}">${esc(v || r.switch_ip)}</a>` } });
+}
 loaders.network = async () => {
   const [dc, nd] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" })]);
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
@@ -2185,6 +2192,8 @@ loaders.network = async () => {
   };
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;
+  $("#pmfind").onsubmit = (e) => { e.preventDefault(); findOnPorts($("#pmq").value); };
+  $("#pmtable").onclick = (e) => { const a = e.target.closest("[data-pick]"); if (a) { e.stopPropagation(); pickSwitch(a.dataset.pick); } };
   table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "mac_count", "uptime_s", "last_polled", "poll_note", "poll_error"],
     { rowTitle: "Show this switch's ports", rowClick: (r) => pickSwitch(r.ip),
       cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""),

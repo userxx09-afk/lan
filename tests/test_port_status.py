@@ -82,4 +82,10 @@ with TestClient(m.app) as c:
     assert on[("1/1/1", "02:ee:00:00:00:01")]["current"] == 1 and on[("1/1/1", "02:ee:00:00:00:01")]["dhcp_name"] == "PRN-LOBBY"
     assert on[("1/1/3", "02:ee:00:00:00:03")]["current"] == 0          # seen 45 days ago, not at the last poll
     assert d["uplink_macs"] == 0 and d["port_map"]["error"] is None
+    # find a device on any switch (the old Port map page): by DHCP name, by MAC typed with dashes, too short
+    f = c.get("/api/port-find", params={"q": "prn-lob"}).json()["rows"]
+    assert any(r["mac"] == "02:ee:00:00:00:01" and r["port"] == "1/1/1" for r in f), f
+    f = c.get("/api/port-find", params={"q": "02-EE-00-00-00-01"}).json()["rows"]
+    assert any(r["mac"] == "02:ee:00:00:00:01" for r in f), f
+    assert c.get("/api/port-find", params={"q": "x"}).json()["rows"] == []
 print("switch port status: up/down/disabled, last active from link changes and MAC history OK")

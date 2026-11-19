@@ -476,6 +476,10 @@ were found on access ports at the last scan, how many before, and how many on up
 the switch is only learning MACs on uplinks (check the VLAN/community settings), and any error from the stored port
 map is shown there too.
 
+The separate *Port map* tab is gone (it repeated *Switch ports*). Its one extra, finding a device without knowing its
+switch, is the **Find a PC, IP or MAC on any switch** box at the top of *Switch ports*: it lists every access port the
+device was seen on, newest first, and clicking the switch opens its ports. MACs can be typed with colons, dashes or none.
+
 ### Wi-Fi: which access point (0.33)
 
 Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or

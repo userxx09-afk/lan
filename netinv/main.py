@@ -365,6 +365,26 @@ def switch_port(switch_ip: str, port: str, db=Depends(db_session)):
     return {"port": info[0], "macs": macs}
 
 
+@app.get("/api/port-find", dependencies=UI)
+def port_find(q: str, db=Depends(db_session)):
+    """Which switch port a PC, user-visible name, IP or MAC is on, across all switches (the old Port map page)."""
+    q = q.strip().lower()
+    if len(q) < 2:
+        return {"rows": []}
+    hexq = "".join(ch for ch in q if ch in "0123456789abcdef")
+    rows = _rows_of(db.execute(text("""
+        SELECT switch_name, switch_ip, port, port_alias, vlan, hostname, matched_by, device_kind, phone,
+               ip, dhcp_ip, dhcp_name, mac, last_seen
+        FROM v_port_map
+        WHERE LOWER(COALESCE(hostname, '')) LIKE :q OR LOWER(COALESCE(dhcp_name, '')) LIKE :q
+           OR LOWER(COALESCE(phone, '')) LIKE :q OR COALESCE(ip, '') LIKE :q OR COALESCE(dhcp_ip, '') LIKE :q
+           OR LOWER(COALESCE(mac, '')) LIKE :q
+           OR (:hx <> '' AND REPLACE(REPLACE(LOWER(COALESCE(mac, '')), ':', ''), '-', '') LIKE :hq)
+        ORDER BY last_seen DESC LIMIT 200"""),
+        {"q": f"%{q}%", "hx": hexq if len(hexq) >= 4 and len(hexq) * 2 >= len(q) else "", "hq": f"%{hexq}%"}))
+    return {"rows": rows}
+
+
 @app.get("/api/switch-ports", dependencies=UI)
 def switch_ports(switch_ip: str, db=Depends(db_session)):
     """One switch's ports, each with what is plugged into it: every MAC the switch learned on that port, straight from

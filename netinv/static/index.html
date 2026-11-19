@@ -16,7 +16,6 @@
     <button data-tab="groups">Groups</button>
     <button data-tab="users">Users</button>
     <button data-tab="apps">Software</button>
-    <button data-tab="portmap">Port map</button>
     <button data-tab="network">Network &amp; DCs</button>
     <button data-tab="reports">Reports</button>
     <button data-tab="scanning">Scanning</button>
@@ -205,11 +204,6 @@
     </div>
   </section>
 
-  <section id="portmap" class="tab">
-    <div class="toolbar"><input id="pmfilter" placeholder="Filter by switch, port, PC, IP or MAC"></div>
-    <div id="pmtable"></div>
-  </section>
-
   <section id="users" class="tab">
     <div id="upresets" class="presets" hidden></div>
     <div class="toolbar"><input id="ufilter" placeholder="Filter by name, department, title, OU or last PC">
@@ -261,6 +255,9 @@
       or an IP phone (and sometimes a PC that sends LLDP). Computers are found by matching the MAC addresses the switch learned on
       the port against each PC's MACs (from its inventory or DHCP lease). Uplinks are left out, so a PC shows on its own access
       port, including when it is plugged in behind a phone. Click a port to see every MAC on it.</p>
+    <div class="toolbar"><form id="pmfind" class="inline"><input id="pmq" placeholder="Find a PC, IP or MAC on any switch" autocomplete="off">
+      <button>Find</button></form></div>
+    <div id="pmtable"></div>
     <div class="toolbar"><select id="spswitch" title="Show the ports of one switch"><option value="">Pick a switch…</option></select>
       <input id="spfilter" placeholder="Filter by port, neighbor or computer"></div>
     <div id="sptable"></div>
