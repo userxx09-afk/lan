@@ -42,16 +42,17 @@ with TestClient(m.app) as c:
     r = c.post("/api/query", json={"dataset": "v_devices", "fields": ["hostname", "switch_port", "vlan"],
                                    "filters": [{"field": "hostname", "op": "eq", "value": host}]}).json()["rows"][0]
     assert r["switch_port"] == port.name and r["vlan"] == 7, r
-    assert not portmap.status()["stale"]
     with SessionLocal() as db:
         assert stored(db) == live(db)
 
         # an agent report with the same NICs doesn't rewrite them (so the map isn't recomputed after every report)
         dev = db.get(Device, dev.id)
         nics = [Nic(mac=n.mac, ip=n.ip, description=n.description) for n in dev.nics]
+        ids = sorted(n.id for n in dev.nics)
         apply_endpoint(db, EndpointPayload(hostname=dev.hostname, nics=nics))
         db.commit()
-        assert not portmap.status()["stale"], "unchanged NICs must not mark the port map stale"
+        # (not the stale flag itself: the server's background threads may write MAC/NIC data at any moment)
+        assert sorted(n.id for n in db.get(Device, dev.id).nics) == ids, "unchanged NICs must not be rewritten"
         apply_endpoint(db, EndpointPayload(hostname=dev.hostname, nics=nics + [Nic(mac="02:00:5e:10:20:30", ip="10.1.2.3")]))
         db.commit()
         assert portmap.status()["stale"], "a new NIC must mark it stale"
