@@ -82,6 +82,13 @@ with TestClient(m.app) as c:
     assert on[("1/1/1", "02:ee:00:00:00:01")]["current"] == 1 and on[("1/1/1", "02:ee:00:00:00:01")]["dhcp_name"] == "PRN-LOBBY"
     assert on[("1/1/3", "02:ee:00:00:00:03")]["current"] == 0          # seen 45 days ago, not at the last poll
     assert d["uplink_macs"] == 0 and d["port_map"]["error"] is None
+    # the same rows the Port map lists for this switch lead (current); the switch's own MAC table only adds history
+    assert d["port_map_rows"] >= 1 and any(m.get("source") == "port map" and m["port"] == "1/1/1" for m in d["macs"]), d["macs"]
+    assert len({(m["port"], m["mac"]) for m in d["macs"]}) == len(d["macs"]), "no device twice on a port"
+    # a browser must never pair the new page with an app.js it cached before an update
+    import re as _re
+    page = c.get("/").text
+    assert _re.search(r'src="/static/app\.js\?v=[0-9a-f]{12}"', page) and "style.css?v=" in page, page[:300]
     # find a device on any switch (the old Port map page): by DHCP name, by MAC typed with dashes, too short
     f = c.get("/api/port-find", params={"q": "prn-lob"}).json()["rows"]
     assert any(r["mac"] == "02:ee:00:00:00:01" and r["port"] == "1/1/1" for r in f), f

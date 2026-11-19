@@ -2172,11 +2172,14 @@ loaders.network = async () => {
     try { d = await api(`/api/switch-ports?switch_ip=${encodeURIComponent(ip)}`); } catch (e) { $("#sptable").innerHTML = `<p class="muted">${esc(errText(e))}</p>`; return; }
     if (sel.value !== ip) return;              // picked another switch while this one loaded
     const nowMacs = d.macs.filter((m) => m.current).length;
-    const summary = `<p class="muted small" id="spsummary">${nowMacs} MAC addresses on access ports at the last scan${d.macs.length > nowMacs ? `, ${d.macs.length - nowMacs} seen there before` : ""}, ${d.uplink_macs} on uplinks${d.switch?.poll_note ? ` · ${esc(d.switch.poll_note)}` : ""}${d.port_map?.error ? ` · <span class="pill bad">port map error</span> ${esc(d.port_map.error)}` : ""}</p>`;
+    const pkey = (p) => String(p ?? "").trim().toLowerCase();
+    const known = new Set(d.ports.map((r) => pkey(r.port)));
+    const stray = d.macs.filter((m) => !known.has(pkey(m.port)));
+    const summary = `<p class="muted small" id="spsummary">${d.port_map_rows} devices on this switch in the port map · ${nowMacs} MAC addresses on access ports at the last scan${d.macs.length > nowMacs ? `, ${d.macs.length - nowMacs} seen there before` : ""}, ${d.uplink_macs} on uplinks${stray.length ? ` · ${stray.length} on ports not in the list below` : ""}${d.switch?.poll_note ? ` · ${esc(d.switch.poll_note)}` : ""}${d.port_map?.error ? ` · <span class="pill bad">port map error</span> ${esc(d.port_map.error)}` : ""}</p>`;
     const byPort = {};
-    d.macs.forEach((m) => (byPort[m.port] ||= []).push(m));
+    d.macs.forEach((m) => (byPort[pkey(m.port)] ||= []).push(m));
     d.ports.forEach((r) => {
-      const all = byPort[r.port] || [];
+      const all = byPort[pkey(r.port)] || [];
       const now = all.filter((m) => m.current);
       r._devs = (now.length ? now : all.slice(0, 1)).sort((a, b) => DEV_ORDER(a) - DEV_ORDER(b));
       r._old = !now.length && all.length > 0;
@@ -2189,6 +2192,11 @@ loaders.network = async () => {
         cell: { status: portStatus, last_active: lastActive,
           port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, plugged_in: pluggedIn } });
     $("#sptable").insertAdjacentHTML("afterbegin", summary);
+    if (stray.length) {     // never hide a device: list what didn't line up with a port row
+      const box = document.createElement("div");
+      $("#sptable").append(Object.assign(document.createElement("h3"), { textContent: "Seen on ports not listed above" }), box);
+      table(box, stray, ["port", "hostname", "ip", "mac", "last_seen"], { cell: { hostname: (v, r) => devCell(r), mac: macCell } });
+    }
   };
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;
