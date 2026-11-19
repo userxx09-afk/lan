@@ -143,11 +143,14 @@ def drill(db: Session, rid: str, row: dict) -> dict:
     return {"title": title, "filters": [{"field": "hostname", "op": "in", "value": hosts}] if hosts else [], "count": len(hosts)}
 
 
-def run(db: Session, rid: str) -> dict:
+MAX_ROWS = 20000
+
+
+def run(db: Session, rid: str, limit: int = MAX_ROWS) -> dict:
     for i, c, n, d in LIBRARY:
         if i == rid:
             if "spec" in d:
-                res = run_query(db, **d["spec"], limit=20000)
+                res = run_query(db, **d["spec"], limit=limit)
             else:
                 sql = d["sql"]
                 dialect = db.get_bind().dialect.name
@@ -155,6 +158,10 @@ def run(db: Session, rid: str) -> dict:
                 if dialect == "sqlite":
                     sql = sql.replace("= TRUE", "= 1")
                 r = db.execute(text(sql))
-                res = {"columns": list(r.keys()), "rows": _rows(r)}
+                cols = list(r.keys())
+                rows = r.fetchmany(limit + 1)     # don't build a huge response (and hold it in memory) for the browser
+                res = {"columns": cols, "rows": _rows(rows[:limit])}
+                if len(rows) > limit:
+                    res["truncated"] = limit
             return {"id": i, "category": c, "name": n, **res}
     raise KeyError(rid)

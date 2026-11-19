@@ -469,6 +469,13 @@
         <p class="muted small">More than one job at once finishes sooner but puts more load on the network, the DCs and this server. Jobs over the limit wait their turn.</p>
       </div>
       <div class="panel">
+        <h3>Data retention</h3>
+        <p class="muted">How long the history tables that grow fastest keep their rows. Older rows are removed once a day; 0 keeps them forever.
+          Where a MAC is plugged in now and each PC's current details are never removed, only sightings and events older than the limit. The audit log is always kept.</p>
+        <form id="retform"><div id="rettable"></div>
+          <div class="row"><button>Save</button><button type="button" class="ghost" id="retrun">Clean up now</button><span class="muted small" id="retlast"></span></div></form>
+      </div>
+      <div class="panel">
         <h3>DameWare Mini Remote Control</h3>
         <p class="muted">The Remote button opens <code>dameware://</code> links. Each technician PC needs the NetInventory DameWare launcher (an installer option, or deploy <code>dameware-handler.reg</code> and <code>Open-DameWare.ps1</code> by GPO). Extra DWRCC switches and a custom DWRCC.exe path are set per PC in the registry, not here, so a link can never pass arbitrary arguments.</p>
         <form id="dwform" class="lifeform">

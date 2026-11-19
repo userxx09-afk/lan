@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, reports, scanning, updater, wireless
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, portmap, reports, retention, scanning, updater, wireless
 from .config import settings
 from .correlate import MAC_OWNER_HOST, MAC_OWNER_VIA, create_views
 from datetime import datetime
@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
             db.commit()
     from . import instance
     threading.Thread(target=instance.loop, args=(_stop,), daemon=True).start()
+    threading.Thread(target=portmap.loop, args=(_stop,), daemon=True, name="port-map").start()
+    threading.Thread(target=retention.loop, args=(_stop,), daemon=True, name="retention").start()
     threading.Thread(target=updater.loop, args=(_stop,), daemon=True).start()
     threading.Thread(target=catalog.loop, args=(_stop,), daemon=True).start()
     threading.Thread(target=fixes.loop, args=(_stop,), daemon=True).start()
@@ -130,6 +132,7 @@ def ingest_auth(x_ingest_token: str = Header(default="")):
 
 def db_session():
     with SessionLocal() as db:
+        portmap.ensure_fresh(db)     # a no-op unless switch/MAC/NIC/DHCP data changed since the last refresh
         yield db
 
 
@@ -308,7 +311,6 @@ def _run_name(db, collector: str) -> str:
 @app.get("/api/summary", dependencies=UI)
 def summary(db=Depends(db_session)):
     q = lambda sql: db.execute(text(sql)).scalar()  # noqa: E731
-    ins = reports.insights(db, settings.insights, settings.outdated_software)
     runs = db.scalars(select(CollectorRun).order_by(CollectorRun.started.desc()).limit(10))
     return {
         "counts": {
@@ -317,10 +319,9 @@ def summary(db=Depends(db_session)):
             "not_inventoried": q("SELECT COUNT(*) FROM devices WHERE agent_last_report IS NULL"),
             "domain_controllers": q("SELECT COUNT(*) FROM domain_controllers"),
             "network_devices": q("SELECT COUNT(*) FROM network_devices"),
-            "mapped_to_port": q("SELECT COUNT(DISTINCT hostname) FROM v_port_map WHERE hostname IS NOT NULL"),
-            "users": q("SELECT COUNT(DISTINCT username) FROM logon_events"),
+            "mapped_to_port": q("SELECT COUNT(DISTINCT hostname) FROM port_map WHERE hostname IS NOT NULL"),
+            "users": q("SELECT COUNT(*) FROM (SELECT DISTINCT username FROM logon_events) u"),
         },
-        "insight_counts": {k: len(v) for k, v in ins.items()},
         "os_breakdown": [dict(r._mapping) for r in db.execute(text(
             "SELECT COALESCE(os, 'Unknown') AS os, COALESCE(os_display_version, '') AS version, COUNT(*) AS n "
             "FROM v_devices GROUP BY 1, 2 ORDER BY n DESC"))],
@@ -2043,7 +2044,7 @@ def library_drill(rid: str, body: DrillRow, db=Depends(db_session)):
 
 @app.get("/api/library/{rid}/export/{fmt}", dependencies=UI)
 def library_export(rid: str, fmt: str, db=Depends(db_session)):
-    res = library.run(db, rid)
+    res = library.run(db, rid, limit=100000)
     body, mime, ext = exports.FORMATS[fmt](res, rid)
     return Response(body, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{rid}.{ext}"'})
 
@@ -2475,6 +2476,35 @@ def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_sess
     db.add(AuditLog(actor=actor, action="job.settings", target="schedule", result=f"max_concurrent={body.max_concurrent} reach_interval={body.reach_interval}"))
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/retention", dependencies=UI)
+def get_retention(db=Depends(db_session)):
+    return {**retention.describe(db), "port_map": portmap.status()}
+
+
+class RetentionIn(BaseModel):
+    days: dict[str, int]
+
+
+@app.put("/api/retention")
+def put_retention(body: RetentionIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        retention.save(db, body.days)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    db.add(AuditLog(actor=actor, action="retention.settings", target="data retention",
+                    result=json.dumps(retention.days(db))[:500]))
+    db.commit()
+    return get_retention(db)
+
+
+@app.post("/api/retention/run")
+def run_retention(actor=Depends(ui_auth), db=Depends(db_session)):
+    removed = retention.run(db)
+    db.add(AuditLog(actor=actor, action="retention.run", target="data retention", result=json.dumps(removed)[:500]))
+    db.commit()
+    return get_retention(db)
 
 
 # ----------------------------------------------------------------- NetInventory Agent (see agentapi.py)

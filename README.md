@@ -487,6 +487,30 @@ controller), **Cisco Meraki** (Dashboard API key, optional organization ID) or a
 read over SNMP with the saved SNMP credentials). It is polled every 15 minutes by default; *Test connection* and *Poll
 now* are on the same panel. The password or key is stored encrypted and never shown again.
 
+
+### Faster on large networks, data retention (0.35)
+
+The Computers list, dashboard, switch pages and user pages stay fast as switch MAC tables, logons and Wi-Fi history
+fill up. On a test network of 3,000 PCs, 60 switches, 330,000 MAC sightings and 2 million logon events (PostgreSQL),
+the first page of computers went from 65 s to 0.02 s and the server's peak memory from 280 MB to about 120 MB.
+
+- **Stored port map.** Where each MAC is plugged in (`v_port_map`) is kept in a `port_map` table and recomputed when
+  switch, NIC, ARP or DHCP data changes (within 20 s, at the next page load that needs it, and every 15 minutes anyway).
+  Before, every computer row recomputed it for every switch column. `v_port_map` keeps its columns, so BI tools and
+  saved reports work as before.
+- **Indexes** for the lookups the views do: logons by computer/user and time, DHCP and DNS sightings by host and MAC,
+  MAC and ARP history by MAC. The first start after the upgrade adds them (a few seconds to a minute on a big logon table).
+- Last user, last computer and logon counts read the logon table by index instead of grouping every logon.
+- Matching DC logons to computers works in batches and only re-checks the last 14 days, instead of loading every
+  unmatched logon into memory on each start and each DC import.
+- The dashboard no longer loads every installed program to count outdated software; standard reports show the first
+  20,000 rows (export for all).
+
+**Settings > Data retention** sets how long the fastest-growing history is kept; older rows are removed once a day
+(*Clean up now* runs it at once). Defaults: logon events 180 days, MAC sightings and ARP entries not seen for 90 days,
+Wi-Fi AP history 180 days, computer change history 2 years, scan runs 90 days, finished pushes 1 year. 0 keeps a table
+forever. Current data (where a MAC is now, a PC's details) and the audit log are never removed.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it
