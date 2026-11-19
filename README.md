@@ -490,6 +490,8 @@ Since 0.43 Cisco switches are always read per VLAN, even when they also answer Q
 answer Q-BRIDGE-MIB for VLAN 1 only (the uplinks and the odd VLAN 1 printer), which used to stop the per-VLAN walk and
 left access ports on every other VLAN empty. The *MAC table (last scan)* note under *Network devices* shows both
 sources, for example `412 MACs via Cisco per-VLAN BRIDGE-MIB (6 VLANs) + Q-BRIDGE-MIB (29)`.
+Each device in *Plugged in* now reads name first (the computer, else its DHCP name), then its IP beside it, and shows
+the MAC only when neither a name nor an IP is known.
 
 ### Wi-Fi: which access point (0.33)
 
