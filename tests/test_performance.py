@@ -1,4 +1,4 @@
-"""Speed and storage (0.34): the stored switch port map follows the data, retention trims old history, the dashboard
+"""Speed and storage (0.35): the stored switch port map follows the data, retention trims old history, the dashboard
 summary doesn't need the whole software table, and an agent report that changes nothing leaves the port map alone.
 Run: python tests/test_performance.py (DATABASE_URL set, demo loaded)."""
 import logging, sys

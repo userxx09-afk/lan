@@ -479,7 +479,7 @@ read over SNMP with the saved SNMP credentials). It is polled every 15 minutes b
 now* are on the same panel. The password or key is stored encrypted and never shown again.
 
 
-### Faster on large networks, data retention (0.34)
+### Faster on large networks, data retention (0.35)
 
 The Computers list, dashboard, switch pages and user pages stay fast as switch MAC tables, logons and Wi-Fi history
 fill up. On a test network of 3,000 PCs, 60 switches, 330,000 MAC sightings and 2 million logon events (PostgreSQL),
