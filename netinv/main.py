@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
@@ -143,12 +145,27 @@ UI = [Depends(ui_auth)]
 def index(request: Request):
     if not current_user(request) and auth.auth_required():
         return RedirectResponse("/login", status_code=303)
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+    return HTMLResponse(_with_asset_versions("index.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/login")
 def login_page():
-    return FileResponse(STATIC / "login.html", headers={"Cache-Control": "no-store"})
+    return HTMLResponse(_with_asset_versions("login.html"), headers={"Cache-Control": "no-store"})
+
+
+def _with_asset_versions(page: str) -> str:
+    """The page with ?v=<content hash> on /static/*.js|css, so a browser never pairs a new page with an app.js it
+    cached before an update (StaticFiles sends no Cache-Control, so browsers may reuse their copy for a while)."""
+    html = (STATIC / page).read_text(encoding="utf-8")
+
+    def tag(mt):
+        f = STATIC / mt.group(2)
+        try:
+            v = hashlib.sha256(f.read_bytes()).hexdigest()[:12]
+        except OSError:
+            return mt.group(0)
+        return f'{mt.group(1)}/static/{mt.group(2)}?v={v}"'
+    return re.sub(r'((?:src|href)=")/static/([\w./-]+\.(?:js|css))"', tag, html)
 
 
 class LoginIn(BaseModel):
@@ -409,12 +426,25 @@ def switch_ports(switch_ip: str, db=Depends(db_session)):
     for m in macs:      # learned at (about) the last poll; an hour of slack for polls that take a while
         seen, polled = _dt(m.get("last_seen")), _dt(m.pop("last_polled", None))
         m["current"] = 1 if seen is None or polled is None or seen >= polled - timedelta(hours=1) else 0
+    # Where each device is now, exactly as the Port map lists it (the same rows, filtered to this switch). These lead;
+    # the switch's own MAC table above only adds what the port map doesn't have (older sightings).
+    pm = reports.run_query(db, "v_port_map", filters=[{"field": "switch_ip", "op": "eq", "value": switch_ip}],
+                           sort="last_seen", desc=True, limit=20000)["rows"]
+    have = {(r["port"], (r["mac"] or "").lower()) for r in pm}
+    macs = [{"port": r["port"], "mac": r["mac"], "last_seen": r["last_seen"], "hostname": r.get("hostname"),
+             "device_kind": r.get("device_kind"), "phone": r.get("phone"), "ip": r.get("ip"), "dhcp_ip": r.get("dhcp_ip"),
+             "dhcp_name": r.get("dhcp_name"), "matched_by": r.get("matched_by"), "current": 1, "source": "port map"}
+            for r in pm] + [m for m in macs if (m["port"], (m["mac"] or "").lower()) not in have]
+    polled = _dt(db.execute(text("SELECT last_polled FROM network_devices WHERE ip = :ip"), {"ip": switch_ip}).scalar())
+    for m in macs:
+        if m.get("source") == "port map" and polled is not None and (_dt(m["last_seen"]) or polled) < polled - timedelta(hours=1):
+            m["current"] = 0        # still its last known place, but not learned at the last scan
     nd = reports.run_query(db, "v_network_devices", filters=[{"field": "ip", "op": "eq", "value": switch_ip}])["rows"]
     uplink_macs = db.execute(text("SELECT COUNT(*) FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id "
                                   "JOIN network_devices nd ON nd.id = sp.switch_id WHERE nd.ip = :ip AND sp.is_uplink = :t"),
                              {"ip": switch_ip, "t": True}).scalar()
     return {"switch": nd[0] if nd else None, "ports": ports, "macs": macs, "uplink_macs": uplink_macs,
-            "port_map": portmap.status()}
+            "port_map": portmap.status(), "port_map_rows": len(pm)}
 
 
 def _dt(v):

@@ -480,6 +480,12 @@ The separate *Port map* tab is gone (it repeated *Switch ports*). Its one extra,
 switch, is the **Find a PC, IP or MAC on any switch** box at the top of *Switch ports*: it lists every access port the
 device was seen on, newest first, and clicking the switch opens its ports. MACs can be typed with colons, dashes or none.
 
+Since 0.42 *Plugged in* starts from exactly the rows the port map holds for that switch (the same data the old *Port
+map* tab showed) and only adds older sightings from the switch's MAC table; the summary line says how many port map
+devices the switch has, and anything that doesn't line up with a listed port is shown under the table instead of being
+dropped. The dashboard page now links `app.js` and `style.css` with a content hash, so after an update the browser
+always loads the new script instead of a copy it cached from the previous version.
+
 ### Wi-Fi: which access point (0.33)
 
 Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or
