@@ -26,7 +26,7 @@ REFRESH_DELAY = 20          # seconds: let a burst of writes (a switch poll, a D
 SAFETY_INTERVAL = 900       # seconds: refresh at least this often, whatever the hook saw
 
 _lock = threading.Lock()
-_state = {"dirty": True, "dirty_since": 0.0, "last": 0.0, "seconds": None, "rows": None}
+_state = {"dirty": True, "dirty_since": 0.0, "last": 0.0, "seconds": None, "rows": None, "error": None}
 _WATCH = {"mac_sightings", "switch_ports", "network_devices", "device_nics", "ip_sightings", "arp_entries"}
 
 
@@ -75,11 +75,12 @@ def refresh(db: Session) -> int:
             n = db.execute(text(f"INSERT INTO port_map ({cols}) SELECT {cols} FROM ("
                                 f"{dialect_sql(PORT_MAP_LIVE, db.get_bind().dialect.name)}) live")).rowcount
             db.commit()
-        except Exception:
+        except Exception as exc:
             db.rollback()
             _state["dirty"] = True
+            _state["error"] = f"{type(exc).__name__}: {str(getattr(exc, 'orig', None) or exc).splitlines()[0][:300]}"
             raise
-        _state.update(last=time.time(), seconds=round(time.time() - t0, 2), rows=n)
+        _state.update(last=time.time(), seconds=round(time.time() - t0, 2), rows=n, error=None)
         return n or 0
 
 
@@ -94,7 +95,8 @@ def ensure_fresh(db: Session) -> None:
 
 
 def status() -> dict:
-    return {"stale": _state["dirty"], "refreshed": _state["last"], "seconds": _state["seconds"], "rows": _state["rows"]}
+    return {"stale": _state["dirty"], "refreshed": _state["last"], "seconds": _state["seconds"], "rows": _state["rows"],
+            "error": _state["error"]}
 
 
 def loop(stop: threading.Event) -> None:
