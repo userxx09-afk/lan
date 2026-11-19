@@ -47,6 +47,13 @@ assert sorted(d["fdb"]) == sorted([(A, 10101, 20), (B, 10102, 20), (C, 10103, 30
 assert d["fdb_method"] == "Cisco per-VLAN BRIDGE-MIB (3 VLANs)", d["fdb_method"]
 assert snmp.mac_table_note(d) == "3 MACs via Cisco per-VLAN BRIDGE-MIB (3 VLANs)"
 
+# an IOS-XE switch that also answers Q-BRIDGE-MIB, but only for VLAN 1: the per-VLAN walk must still run
+UP = "02:c1:00:00:00:99"
+WALK[(snmp.DOT1Q_FDB_PORT, None)] = [((1,) + mac_idx(UP), Integer(1)), ((1,) + mac_idx(A), Integer(1))]
+d = asyncio.run(snmp.poll_device("10.88.0.4", {}))
+assert sorted(d["fdb"]) == sorted([(UP, 10101, 1), (A, 10101, 1), (B, 10102, 20), (C, 10103, 30)]), d["fdb"]
+assert d["fdb_method"] == "Cisco per-VLAN BRIDGE-MIB (3 VLANs) + Q-BRIDGE-MIB (2)", d["fdb_method"]
+
 # a switch with BRIDGE-MIB but no dot1dBasePortIfIndex: bridge port numbers are the ifIndexes
 WALK.clear()
 KIND[0] = "other"

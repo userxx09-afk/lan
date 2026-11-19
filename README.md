@@ -486,6 +486,11 @@ devices the switch has, and anything that doesn't line up with a listed port is 
 dropped. The dashboard page now links `app.js` and `style.css` with a content hash, so after an update the browser
 always loads the new script instead of a copy it cached from the previous version.
 
+Since 0.43 Cisco switches are always read per VLAN, even when they also answer Q-BRIDGE-MIB. Some IOS-XE releases
+answer Q-BRIDGE-MIB for VLAN 1 only (the uplinks and the odd VLAN 1 printer), which used to stop the per-VLAN walk and
+left access ports on every other VLAN empty. The *MAC table (last scan)* note under *Network devices* shows both
+sources, for example `412 MACs via Cisco per-VLAN BRIDGE-MIB (6 VLANs) + Q-BRIDGE-MIB (29)`.
+
 ### Wi-Fi: which access point (0.33)
 
 Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or
