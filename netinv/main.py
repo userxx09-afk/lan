@@ -1882,6 +1882,7 @@ class JiraSettingsIn(BaseModel):
     project: str | None = None
     issue_type: str | None = None
     match_text: bool = True
+    mode: str | None = None             # off | test | on; blank keeps the saved one
 
 
 def _jira(fn, *a, **kw):
@@ -1951,7 +1952,7 @@ def put_jira_settings(body: JiraSettingsIn, actor=Depends(ui_auth), db=Depends(d
         raise HTTPException(400, str(exc))
     c = jira.config(db)
     db.add(AuditLog(actor=actor, action="jira.settings", target="jira",
-                    result=f"site={c['site']} account={c['email']} project={c['project']} type={c['issue_type']} "
+                    result=f"mode={c['mode']} site={c['site']} account={c['email']} project={c['project']} type={c['issue_type']} "
                            f"token={'changed' if body.token else 'cleared' if body.clear_token else 'kept'}"))
     db.commit()
     return c
@@ -2011,6 +2012,8 @@ class JiraIssueIn(BaseModel):
 
 @app.post("/api/jira/issue")
 def jira_create(body: JiraIssueIn, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    if not jira.enabled(db):
+        raise HTTPException(400, "Jira isn't turned on, so no issue was created. Set it to On in Settings > Jira.")
     d = _jira_subject(db, body.kind, body.ref)       # labels and back-link come from the server, not the browser
     from .agentpush import server_url
     link = f"{server_url(db, str(request.base_url))}/{d['path']}"

@@ -332,3 +332,5 @@ pre.logtext { max-height: 70vh; }
 #rcset > label input:not([type=checkbox]) { min-width: 22em; }
 #rcset .row { margin: 8px 0; gap: 16px; }
 #rcset p.small { margin: 2px 0 6px; }
+
+body.nojira .jira-ui { display: none !important; }
