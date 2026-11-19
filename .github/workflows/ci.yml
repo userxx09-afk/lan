@@ -59,6 +59,7 @@ jobs:
           python tests/test_switch_links.py
           python tests/test_port_status.py
           python tests/test_wireless.py
+          python tests/test_mac_tables.py
           python tests/test_performance.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js

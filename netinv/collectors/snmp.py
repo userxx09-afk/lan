@@ -68,6 +68,7 @@ class Snmp:
         self.ip, self.cfg = ip, cfg
         self.engine = SnmpEngine()
         self.target = None
+        self.errors: list[str] = []     # walks that stopped on an error (timeout, no access to a VLAN context...)
 
     def auth(self, vlan: int | None = None):
         if str(self.cfg.get("version", "2c")) == "3":
@@ -102,6 +103,7 @@ class Snmp:
                 self.engine, self.auth(vlan), await self._tgt(), self.context(vlan), 0, 25,
                 ObjectType(ObjectIdentity(oid)), lexicographicMode=False):
             if err or status:
+                self.errors.append(f"{oid}{f' (VLAN {vlan})' if vlan else ''}: {err or status.prettyPrint()}")
                 break
             for name, val in binds:
                 t = tuple(name)
@@ -206,6 +208,15 @@ async def poll_device(ip: str, cfg: dict) -> dict:
     baseport = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX)}
 
     fdb: list[tuple[str, int, int | None]] = []  # (mac, ifindex, vlan)
+    method = ""
+
+    def to_ifindex(port: int, bp: dict[int, int]) -> int | None:
+        # dot1dBasePortIfIndex maps bridge ports to interfaces; some switches don't serve it, and on many the
+        # bridge port number is the ifIndex anyway
+        if port in bp:
+            return bp[port]
+        return port if (not bp and port in names) else None
+
     fdb_vlan: dict[int, set[int]] = {}
     for idx, v in await s.walk(DOT1Q_VLAN_FDBID):
         fdb_vlan.setdefault(int(v), set()).add(idx[-1])
@@ -213,21 +224,34 @@ async def poll_device(ip: str, cfg: dict) -> dict:
         fid, mac = idx[0], norm_mac(bytes(idx[1:7]).hex())
         vl = fdb_vlan.get(fid)
         vlan = next(iter(vl)) if vl and len(vl) == 1 else fid   # shared FDBs (IVL off) can't name one VLAN
-        if mac and int(port) in baseport:
-            fdb.append((mac, baseport[int(port)], vlan))
-    if not fdb:
+        ifi = to_ifindex(int(port), baseport)
+        if mac and ifi is not None:
+            fdb.append((mac, ifi, vlan))
+    if fdb:
+        method = "Q-BRIDGE-MIB"
+    vendor = _vendor(sysinfo["descr"])
+    if not fdb and vendor != "Cisco":
         status = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS)}
         for idx, port in await s.walk(DOT1D_FDB_PORT):
-            if status.get(idx, 3) == 3 and int(port) in baseport:
-                fdb.append((norm_mac(bytes(idx[:6]).hex()), baseport[int(port)], None))
-    if not fdb and _vendor(sysinfo["descr"]) == "Cisco":
-        # Cisco IOS only exposes BRIDGE-MIB per VLAN (community@vlan / context vlan-N).
+            ifi = to_ifindex(int(port), baseport)
+            if status.get(idx, 3) == 3 and ifi is not None:
+                fdb.append((norm_mac(bytes(idx[:6]).hex()), ifi, None))
+        method = "BRIDGE-MIB" if fdb else ""
+    if not fdb and vendor == "Cisco":
+        # Cisco IOS / IOS-XE only expose BRIDGE-MIB per VLAN (community@vlan, or SNMPv3 context vlan-N). The plain
+        # community answers for VLAN 1 alone, which is usually empty or just the switch itself, so always walk
+        # every active VLAN.
         vlans = [i[1] for i, v in await s.walk(CISCO_VTP_VLAN_STATE) if int(v) == 1 and i[1] not in range(1002, 1006)]
-        for vlan in vlans:
-            bp = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX, vlan)}
+        seen: set[tuple[str, int]] = set()
+        for vlan in vlans or [None]:
+            bp = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX, vlan)} if vlan else baseport
+            st = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS, vlan)}
             for idx, port in await s.walk(DOT1D_FDB_PORT, vlan):
-                if int(port) in bp:
-                    fdb.append((norm_mac(bytes(idx[:6]).hex()), bp[int(port)], vlan))
+                mac, ifi = norm_mac(bytes(idx[:6]).hex()), to_ifindex(int(port), bp)
+                if mac and ifi is not None and st.get(idx, 3) == 3 and (mac, ifi) not in seen:
+                    seen.add((mac, ifi))
+                    fdb.append((mac, ifi, vlan))
+        method = f"Cisco per-VLAN BRIDGE-MIB ({len(vlans)} VLANs)" if vlans else "BRIDGE-MIB (no VLAN list from VTP-MIB)"
 
     port_vlan: dict[int, int] = {}
     for i, v in await s.walk(DOT1Q_PVID):
@@ -303,7 +327,7 @@ async def poll_device(ip: str, cfg: dict) -> dict:
             arp.append((ipaddr, mac))
 
     return dict(sys=sysinfo, names=names, aliases=aliases, speeds=speeds, oper=oper, admin=admin, last_change=last_change,
-                fdb=fdb, neighbors=neighbors, arp=arp, port_vlan=port_vlan)
+                fdb=fdb, neighbors=neighbors, arp=arp, port_vlan=port_vlan, fdb_method=method, errors=s.errors[:20])
 
 
 def expand_targets(targets: list[str]) -> list[str]:
@@ -352,6 +376,21 @@ def port_activity(now, uptime_ticks: int | None, change_ticks: int | None, oper_
     return when, since_boot, max(candidates) if candidates else None
 
 
+def mac_table_note(data: dict) -> str:
+    """One line for the Network devices list: how many MACs came back and from which MIB, or why none did."""
+    n, how, errs = len(data.get("fdb") or []), data.get("fdb_method"), data.get("errors") or []
+    if n:
+        note = f"{n} MACs via {how}" if how else f"{n} MACs"
+    elif not data.get("names"):
+        note = "no interfaces returned: check the SNMP view / access list allows IF-MIB and BRIDGE-MIB"
+    else:
+        note = ("no MAC table returned: the switch answered IF-MIB but not Q-BRIDGE-MIB or BRIDGE-MIB. Check the SNMP view "
+                "includes 1.3.6.1.2.1.17; on Cisco with SNMPv3 the group needs 'context vlan- match prefix'")
+    if errs:
+        note += f". Stopped early: {errs[0]}" + (f" (+{len(errs) - 1} more)" if len(errs) > 1 else "")
+    return note[:1000]
+
+
 def store(db: Session, ip: str, data: dict, threshold: int) -> str:
     now = utcnow()
     nd = db.scalar(select(NetworkDevice).where(NetworkDevice.ip == ip)) or NetworkDevice(ip=ip)
@@ -362,6 +401,7 @@ def store(db: Session, ip: str, data: dict, threshold: int) -> str:
     uptime_ticks = int(sysd["uptime"]) if sysd["uptime"].isdigit() else None
     nd.uptime_s = uptime_ticks // 100 if uptime_ticks is not None else None
     nd.last_polled, nd.poll_error = now, None
+    nd.poll_note = mac_table_note(data)
     db.flush()
 
     ports = {p.ifindex: p for p in nd.ports}
