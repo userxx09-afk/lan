@@ -95,27 +95,31 @@ def status(db, request_base: str | None = None) -> dict:
 
 
 # ------------------------------------------------------------------ one-time enrollment tickets
-def _key(host: str) -> str:
-    return f"agent:push:{norm_host(host)}"[:64]
+def _key(host: str, kind: str = "agent") -> str:
+    return f"{kind}:push:{norm_host(host)}"[:64]
 
 
-def new_ticket(db, host: str) -> str:
-    tok = "nip_" + pysecrets.token_urlsafe(24)
-    set_setting(db, _key(host), json.dumps({"h": hashlib.sha256(tok.encode()).hexdigest(),
+# kind "agent" = the inventory agent (nip_ tickets), "rc" = the remote control agent (nrp_ tickets, rcontrol.py)
+TICKET_PREFIX = {"agent": "nip_", "rc": "nrp_"}
+
+
+def new_ticket(db, host: str, kind: str = "agent") -> str:
+    tok = TICKET_PREFIX[kind] + pysecrets.token_urlsafe(24)
+    set_setting(db, _key(host, kind), json.dumps({"h": hashlib.sha256(tok.encode()).hexdigest(),
                                             "exp": (utcnow() + timedelta(hours=TICKET_HOURS)).isoformat()}))
     db.commit()
     return tok
 
 
-def drop_ticket(db, host: str) -> None:
-    if get_setting(db, _key(host), None):
-        set_setting(db, _key(host), None)
+def drop_ticket(db, host: str, kind: str = "agent") -> None:
+    if get_setting(db, _key(host, kind), None):
+        set_setting(db, _key(host, kind), None)
 
 
-def use_ticket(db, host: str, token: str) -> bool:
+def use_ticket(db, host: str, token: str, kind: str = "agent") -> bool:
     """True (and the ticket is gone) when token is this hostname's valid push ticket."""
-    raw = get_setting(db, _key(host), None) if host else None
-    if not raw or not token.startswith("nip_"):
+    raw = get_setting(db, _key(host, kind), None) if host else None
+    if not raw or not token.startswith(TICKET_PREFIX[kind]):
         return False
     try:
         t = json.loads(raw)
@@ -126,7 +130,7 @@ def use_ticket(db, host: str, token: str) -> bool:
     except (ValueError, KeyError, TypeError):
         return False
     if ok:
-        set_setting(db, _key(host), None)
+        set_setting(db, _key(host, kind), None)
     return ok
 
 

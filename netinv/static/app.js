@@ -668,6 +668,8 @@ function renderAssetTab(d, tab) {
     $("#cform").onsubmit = async (e) => { e.preventDefault(); const t = e.target.t.value.trim(); if (t) { await post(`/api/devices/${current}/comments`, { text: t }); openDevice(current); } };
   } else if (tab === "jira") {
     jiraTab(el, "pc", current);
+  } else if (tab === "rc") {
+    rcTab(el, current);
   }
 }
 document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
@@ -680,6 +682,7 @@ document.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
   }
   if (act === "back") { showTab("computers"); return; }
   if (act === "dameware") { dameware(host); return; }
+  if (act === "rc") { rcOpen(host); return; }
   if (act === "reboot" && !(await confirmBox(`Reboot ${host} now? Anyone signed in will lose unsaved work.`))) return;
   b.disabled = true;
   try {
@@ -919,6 +922,8 @@ async function pushAgentDialog(hosts, group = null) {
   } catch (e) { toast(errText(e), true); }
 }
 $("#pushagent").onclick = () => pushAgentDialog([current]);
+$("#pushrc").onclick = () => pushRcDialog([current]);
+$("#bulkrc").onclick = () => grid.selected.size ? pushRcDialog([...grid.selected]) : toast("Select one or more computers first.", true);
 $("#bulkagent").onclick = () => grid.selected.size ? pushAgentDialog([...grid.selected]) : toast("Select one or more computers first.", true);
 $("#bulkscript").onclick = () => grid.selected.size ? runScriptDialog({ hosts: [...grid.selected] }) : toast("Select one or more computers first.", true);
 async function viewDeployment(id) {
@@ -2322,7 +2327,7 @@ let creds = [], svcAccount = null;
 const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
 const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira(); loadWlc();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadRc(); loadJira(); loadWlc();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
   $("#dhcpform")["dhcp:servers"].value = s["dhcp:servers"] || "";
@@ -3187,3 +3192,133 @@ async function loadLogFiles() {
   });
 }
 if ($("#logs").classList.contains("active")) loaders.logs();   // opened straight on Logs (this code runs after the first route)
+
+// ------------------------------------------------------------ remote control: NetInventory Remote (rcontrol.py, rc.html)
+function rcOpen(host) {
+  if (!host) return toast("No computer known for this user yet.", true);
+  const w = window.open(`/static/rc.html?host=${encodeURIComponent(host)}`, `rc_${host.replace(/[^A-Za-z0-9]/g, "_")}`, "width=1320,height=860");
+  if (!w) toast("The browser blocked the remote control window: allow pop-ups for this site.", true);
+}
+const RC_ST = { ended: "mute", connected: "good", connecting: "warn", asking: "warn", denied: "bad", failed: "bad" };
+function rcSessionsTable(el, rows, withHost) {
+  if (!rows.length) { el.innerHTML = `<p class="muted">No remote control sessions yet.</p>`; return; }
+  const cols = [...(withHost ? ["hostname"] : []), "created", "tech", "status", "consent", "pc_user", "minutes", "reason", "end_reason", "act"];
+  table(el, rows.map((r) => ({ ...r, act: r.live ? r.sid : "" })), cols, {
+    labels: { created: "when", tech: "technician", consent: "how", pc_user: "user at the PC", end_reason: "ended", act: "" },
+    cell: { hostname: hostLink, status: (v, r) => `<span class="pill ${RC_ST[v] || "mute"}">${esc(v)}</span>${r.view_only ? ` <span class="muted small">view only</span>` : ""}`,
+      consent: (v, r) => esc(r.direct && v === "direct" ? "direct (allowed group)" : v || ""), minutes: (v) => v == null ? "" : esc(String(v)),
+      act: (sid) => sid ? `<a class="link" data-rcend="${esc(sid)}">End</a>` : "" } });
+  el.querySelectorAll("[data-rcend]").forEach((a) => a.onclick = async () => {
+    if (!(await confirmBox("End this remote control session now?"))) return;
+    try { await post(`/api/rc/sessions/${a.dataset.rcend}/end`, {}); toast("Session ended."); } catch (e) { toast(errText(e), true); }
+    a.closest("table") && loadRc();
+  });
+}
+async function rcTab(el, host) {
+  el.innerHTML = `<p class="muted">Loading…</p>`;
+  let d;
+  try { d = await api(`/api/devices/${encodeURIComponent(host)}/rc`); } catch (e) { el.innerHTML = `<p class="pill bad">${esc(errText(e))}</p>`; return; }
+  const st = !d.installed ? `<span class="pill mute">not installed</span> <a class="link" id="rcinst">Install it</a>`
+    : d.status !== "active" ? `<span class="pill warn">${esc(d.status)}</span> <span class="muted small">approve it in Settings &gt; Remote control</span>`
+    : d.online ? `<span class="pill good">connected</span>` : `<span class="pill bad">not connected</span> <span class="muted small">(PC off or agent stopped)</span>`;
+  el.innerHTML = `<div class="kvr"><span>Remote control agent</span><div>${st} ${d.version ? `<span class="muted small">version ${esc(d.version)}</span>` : ""}</div></div>
+    ${d.user ? `<div class="kvr"><span>Signed in at the PC</span><div>${esc(d.user)}</div></div>` : ""}
+    ${d.always_ask ? `<div class="kvr"><span>PC policy</span><div>always asks the user (AlwaysAsk)</div></div>` : ""}
+    ${d.disabled ? `<div class="kvr"><span>PC policy</span><div><span class="pill bad">remote control turned off on this PC</span></div></div>` : ""}
+    <div class="row"><button id="rcgo" ${d.online && !d.disabled ? "" : "disabled"}>Remote control</button></div>
+    <h4>Sessions</h4><div id="rchist"></div>`;
+  rcSessionsTable($("#rchist"), d.history || [], false);
+  $("#rcgo").onclick = () => rcOpen(host);
+  if ($("#rcinst")) $("#rcinst").onclick = () => pushRcDialog([host]);
+}
+async function pushRcDialog(hosts, group = null) {
+  let d, p;
+  try { [d, p] = await Promise.all([api("/api/rc"), api("/api/agents/push")]); } catch (e) { return toast(errText(e), true); }
+  if (!d.pin) return toast("This server isn't on HTTPS yet. The remote control agent only talks HTTPS: set up the certificate in Settings first.", true);
+  const one = !group && hosts.length === 1 ? hosts[0] : null;
+  const who = group ? `every computer in the group ${group}` : one || `${hosts.length} computers`;
+  const f = await formModal(`<h3>Remote control agent on ${esc(who)}</h3>
+    <p class="muted small">Installs (or updates) NetInventory Remote over WinRM, like other deployments. It's a separate service from the
+      inventory agent; each PC gets a one-time ticket, is approved automatically and only counts as done once it has connected to this server.
+      ${d.msi_local ? "" : `<b>This server has no NetInventory-Remote.msi yet: update the server first.</b>`}</p>
+    <label>Install using <select name="credential_id">
+      <option value="">The scan credentials (from the scan targets)${p.credential ? "" : " (none set up)"}</option>
+      ${(p.accounts || []).map((a) => `<option value="${a.id}">${esc(a.name)}${a.username ? ` (${esc(a.username)})` : ""}</option>`).join("")}
+      <option value="0">This server's own Windows account: ${esc(p.service_account || "")}</option></select></label>
+    <label>Server address the PCs use <input name="server_url" value="${esc(p.server)}" required></label>
+    <label><input type="checkbox" name="remove"> Remove the remote control agent instead</label>`, true);
+  if (!f) return;
+  if (!(await confirmBox(`${f.remove ? "Remove remote control from" : "Install remote control on"} ${who}?`))) return;
+  try {
+    const r = await post("/api/rc/push", { hostnames: hosts, group, server_url: f.server_url, remove: !!f.remove,
+      credential_id: f.credential_id === "" || f.credential_id == null ? null : Number(f.credential_id) });
+    toast(r.output, !r.ok);
+  } catch (e) { toast(errText(e), true); }
+}
+async function loadRc(newToken = null) {
+  let d;
+  try { d = await api("/api/rc"); } catch (e) { $("#rcinfo").innerHTML = `<p class="pill bad">${esc(errText(e))}</p>`; return; }
+  const s = d.settings, sel = (v, cur) => v === cur ? "selected" : "";
+  $("#rcset").innerHTML = `
+    <label><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""}> Remote control is on</label>
+    <label>Who can use it <input name="allowed_group" value="${esc(s.allowed_group)}" placeholder="everyone who can sign in to NetInventory"></label>
+    <p class="muted small">Optional AD security group (name or distinguished name, nested groups count). When set, only its members can start a session.</p>
+    <label>Connect without asking <input name="direct_group" value="${esc(s.direct_group)}" placeholder="nobody: always ask the user"></label>
+    <p class="muted small">AD security group whose members connect directly, without the user at the PC accepting. Everyone else's request is shown
+      to the signed-in user, who has to click Yes. Membership is checked live in AD at every request; if AD can't be asked, the user is asked
+      (and with "Who can use it" set, the request is refused). The local admin account always asks.</p>
+    <div class="row">
+      <label>The user has <input name="ask_seconds" type="number" min="10" max="300" value="${s.ask_seconds}" style="width:4.5em"> seconds to answer (then it's No)</label>
+      <label>Nobody signed in <select name="nouser"><option value="allow" ${sel("allow", s.nouser)}>connect (nobody to ask)</option>
+        <option value="deny" ${sel("deny", s.nouser)}>refuse</option></select></label></div>
+    <div class="row">
+      <label>End sessions after <input name="max_hours" type="number" min="1" max="24" value="${s.max_hours}" style="width:4em"> hours</label>
+      <label>or <input name="idle_minutes" type="number" min="5" max="480" value="${s.idle_minutes}" style="width:4.5em"> minutes without input</label></div>
+    <label><input type="checkbox" name="require_reason" ${s.require_reason ? "checked" : ""}> Require a reason (shown to the user and kept in the log)</label>
+    <label>New PCs (installed by hand or GPO) <select name="approve">
+      <option value="ad" ${sel("ad", s.approve)}>are approved if they're in Active Directory</option>
+      <option value="all" ${sel("all", s.approve)}>are always approved</option>
+      <option value="manual" ${sel("manual", s.approve)}>wait for my approval</option></select></label>
+    <div class="row"><button>Save</button><button type="button" class="ghost" id="rccheck">Check my access</button></div>`;
+  $("#rcset").onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target;
+    try {
+      await api("/api/rc/settings", { method: "PUT", body: JSON.stringify({ enabled: f.enabled.checked, allowed_group: f.allowed_group.value.trim(),
+        direct_group: f.direct_group.value.trim(), ask_seconds: +f.ask_seconds.value, nouser: f.nouser.value, max_hours: +f.max_hours.value,
+        idle_minutes: +f.idle_minutes.value, require_reason: f.require_reason.checked, approve: f.approve.value }) });
+      toast("Remote control settings saved.");
+    } catch (er) { toast(errText(er), true); }
+  };
+  $("#rccheck").onclick = async () => { try { const r = await post("/api/rc/check", {}); toast(r.output, !r.allowed); } catch (e) { toast(errText(e), true); } };
+  const cmd = (tok) => `msiexec /i NetInventory-Remote.msi /qn SERVER=${d.server} TOKEN=${tok}${d.pin ? ` PIN=${d.pin}` : ""}`;
+  $("#rcinfo").innerHTML = `
+    ${!d.pin ? `<p class="pill bad longtext">This server isn't on HTTPS. The remote control agent only talks HTTPS with a pinned certificate: set up the certificate first.</p>` : ""}
+    <div class="kvr"><span>Push</span><div>Select PCs in Computers and click <b>Push remote control</b>, or <b>Install or update remote control</b> on a PC's page.</div></div>
+    <div class="kvr"><span>Download</span><div><a class="link" href="${esc(d.msi_url)}" download="NetInventory-Remote.msi">NetInventory-Remote.msi</a> <span class="muted small">(for GPO, Intune or a script)</span></div></div>
+    <div class="kvr"><span>Enrollment token</span><div>${newToken ? `<code>${esc(newToken)}</code> <span class="pill warn">shown once: copy it now</span>`
+      : d.token.set ? `set ${esc(fmtDate(d.token.created))}, ends in <code>…${esc(d.token.hint)}</code>` : `<span class="muted">none (pushes don't need one)</span>`}
+      <button class="ghost small" id="rctok">${d.token.set ? "New token" : "Create token"}</button>${d.token.set ? ` <button class="ghost small" id="rctokoff">Turn off enrollment</button>` : ""}
+      <div class="muted small">Separate from the inventory agent's token. Only for installs by hand or GPO.</div></div></div>
+    ${newToken ? `<div class="kvr"><span>Install command</span><div><code class="small">${esc(cmd(newToken))}</code></div></div>` : ""}
+    <p class="muted small">GPO: <code>HKLM\\SOFTWARE\\Policies\\NetInventory\\Remote</code> takes <code>Server</code>, <code>EnrollToken</code>, <code>Pin</code> (strings),
+      and on PCs that need it <code>AlwaysAsk</code>=1 (always ask the user, whatever the group) or <code>Disabled</code>=1 (no remote control) as DWORDs.</p>`;
+  $("#rctok").onclick = async () => {
+    if (d.token.set && !(await confirmBox("Make a new remote control enrollment token? The old one stops working for new PCs."))) return;
+    const r = await post("/api/rc/token", {}); loadRc(r.token);
+  };
+  if ($("#rctokoff")) $("#rctokoff").onclick = async () => { if (await confirmBox("Turn off remote control enrollment by token? Pushes still work.")) { await api("/api/rc/token", { method: "DELETE" }); loadRc(); } };
+  const AST = { active: "good", pending: "warn", revoked: "bad" };
+  if (!d.agents.length) $("#rcagents").innerHTML = `<p class="muted">No remote control agents yet.</p>`;
+  else table($("#rcagents"), d.agents.map((a) => ({ ...a, act: a.id })), ["hostname", "status", "online", "user", "version", "last_seen", "last_ip", "act"], {
+    labels: { online: "connected", user: "signed in", last_seen: "last seen", last_ip: "from", act: "" },
+    cell: { hostname: hostLink, status: (v, r) => `<span class="pill ${AST[v] || "mute"}">${esc(v)}</span>${r.note ? `<div class="muted small">${esc(r.note)}</div>` : ""}${r.disabled ? ` <span class="pill bad">off by PC policy</span>` : r.always_ask ? ` <span class="pill mute">always asks</span>` : ""}`,
+      online: (v) => v ? `<span class="pill good">yes</span>` : `<span class="muted">no</span>`, last_seen: (v) => esc(fmtDate(v) || ""),
+      act: (id, r) => [r.status === "pending" ? `<a class="link" data-rca="approve" data-id="${id}">Approve</a>` : "",
+        `<a class="link" data-rca="revoke" data-id="${id}">Revoke</a>`].filter(Boolean).join(" · ") } });
+  $("#rcagents").querySelectorAll("[data-rca]").forEach((a) => a.onclick = async () => {
+    if (a.dataset.rca === "revoke" && !(await confirmBox("Revoke this PC's remote control agent? It disconnects now and can't connect again until it's pushed again."))) return;
+    try { toast((await post(`/api/rc/agents/${a.dataset.id}/${a.dataset.rca}`, {})).output); } catch (e) { toast(errText(e), true); }
+    loadRc();
+  });
+  rcSessionsTable($("#rcsessions"), d.sessions || [], true);
+}

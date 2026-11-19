@@ -38,7 +38,7 @@ from .ingest import log_change
 log = logging.getLogger(__name__)
 SERVICES = {"WinDefend": "Microsoft Defender Antivirus", "wuauserv": "Windows Update", "BITS": "Background Intelligent Transfer"}
 ACTIONS = {"tool", "windows_updates", "app_update", "start_service", "reboot", "cancel_reboot", "app_uninstall", "app_repair", "script",
-           "agent_install", "agent_remove"}
+           "agent_install", "agent_remove", "rc_install", "rc_remove"}
 LANGS = {"powershell": "PowerShell", "cmd": "Command prompt"}
 # Who a script runs as on the PC, least privileged first. "select" is only stored on a saved script: it means ask.
 RUN_MODES = {"user": "Currently logged on user", "account": "Scanning credentials", "system": "System account"}
@@ -255,7 +255,7 @@ if (Test-Path $f) {
 def _task_name(action: str, pkg: str | None = None) -> str:
     if action == "windows_updates":
         return "windows-updates"
-    if action in ("agent_install", "agent_remove"):
+    if action in ("agent_install", "agent_remove", "rc_install", "rc_remove"):
         return action.replace("_", "-")
     prefix = {"app_uninstall": "remove-", "app_repair": "repair-"}.get(action, "app-")
     return prefix + re.sub(r"[^A-Za-z0-9.\-]", "_", pkg or "")[:80]
@@ -291,7 +291,8 @@ def _audit(db, who: str, action: str, host: str, result: str) -> None:
 # Every push is a Deployment row: queued -> sending -> running (long jobs on the PC) -> success | failed.
 # A PC that can't be reached stays queued and is retried when it's back online, until the deadline
 # (Settings, default 7 days): then it's "expired". At most `fix:parallel` pushes are sent at once.
-LONG = {"windows_updates": 4, "app_update": 1, "app_uninstall": 1, "app_repair": 1, "agent_install": 0.5, "agent_remove": 0.5}       # hours to wait for the result on the PC
+LONG = {"windows_updates": 4, "app_update": 1, "app_uninstall": 1, "app_repair": 1, "agent_install": 0.5, "agent_remove": 0.5,
+        "rc_install": 0.5, "rc_remove": 0.5}       # hours to wait for the result on the PC
 OFFLINE_RETRY_MIN = 10
 
 
@@ -374,6 +375,10 @@ def _validate(action: str, value: str | None) -> tuple[str, str | None]:
         return f"Install NetInventory Agent (runs as {RUN_AS[run_as]})", run_as
     if action == "agent_remove":
         return "Remove NetInventory Agent", None
+    if action == "rc_install":
+        return "Install NetInventory Remote (remote control agent)", None
+    if action == "rc_remove":
+        return "Remove NetInventory Remote (remote control agent)", None
     if action == "start_service":
         if value not in SERVICES:
             raise ValueError("That service can't be started from here.")
@@ -486,6 +491,14 @@ def _execute(db, dev: Device, dep) -> str:
         from . import agentpush
         _launch(addr, cfg, _task_name(action), agentpush.REMOVE)
         return "Sent. Removing the agent."
+    if action == "rc_install":
+        from . import rcontrol
+        _launch(addr, cfg, _task_name(action), rcontrol.install_script(db, dev.hostname, _task_name(action)))
+        return "Sent. Installing the remote control agent and waiting for it to connect."
+    if action == "rc_remove":
+        from . import rcontrol
+        _launch(addr, cfg, _task_name(action), rcontrol.REMOVE)
+        return "Sent. Removing the remote control agent."
     if action == "script":
         p = json.loads(dep.payload or "{}")
         check_script(p.get("language"), p.get("body") or "", p.get("timeout") or 0)
@@ -783,6 +796,16 @@ def _check_running(db, dep) -> None:
                 msg += f"; {st}"
             if res.get("log") and not ok:
                 msg += f"\nAgent log:\n{res['log']}"
+        elif dep.action == "rc_install":
+            from . import agentpush
+            agentpush.drop_ticket(db, dev.hostname, kind="rc")
+            if res.get("signature") and res["signature"] != "Valid":
+                msg += f" (MSI signature on the PC: {res['signature']})"
+            if res.get("log") and not ok:
+                msg += f"\nAgent log:\n{res['log']}"
+        elif dep.action == "rc_remove" and ok:
+            from . import rcontrol
+            rcontrol.after_remove(db, dev.hostname, dep.who or "?")
         elif dep.action == "agent_remove" and ok:
             from .db import Agent
             for a in db.scalars(select(Agent).where(Agent.hostname == dev.hostname, Agent.status != "revoked")):

@@ -66,6 +66,7 @@
         <button class="ghost" data-bulk="set_state">Set state</button>
         <button class="ghost" id="bulkscript">Run script</button>
         <button class="ghost" id="bulkagent">Push agent</button>
+        <button class="ghost" id="bulkrc">Push remote control</button>
         <button class="ghost" id="bulkconfig">Configure…</button>
         <span id="selinfo" class="muted"></span> <a class="link small" id="clearsel">clear selection</a>
       </div>
@@ -102,6 +103,7 @@
         <button class="ghost wide" data-act="back">‹ Back to list</button>
         <h3>Actions</h3>
         <button class="act" data-act="ping">Ping</button>
+        <button class="act" data-act="rc">Remote control</button>
         <button class="act" data-act="dameware">Remote control (DameWare)</button>
         <button class="act" data-act="rdp">Remote desktop</button>
         <button class="act" data-act="cshare">Open C$</button>
@@ -115,6 +117,7 @@
         <button class="act" data-fix="cancel_reboot">Cancel scheduled reboot</button>
         <button class="act" id="runscript">Run a script or command</button>
         <button class="act" id="pushagent">Install or update the agent</button>
+        <button class="act" id="pushrc">Install or update remote control</button>
         <h3>Power</h3>
         <button class="act danger" data-act="reboot">Reboot now</button>
         <button class="act" data-pow="restart">Restart with a warning</button>
@@ -146,6 +149,7 @@
           <button data-atab="printers">Printers &amp; drives</button>
           <button data-atab="accounts">Local accounts</button>
           <button data-atab="sessions">Sessions</button>
+          <button data-atab="rc">Remote control</button>
           <button data-atab="command">Command</button>
           <button data-atab="files">Files</button>
           <button data-atab="security">Security</button>
@@ -369,6 +373,19 @@
           It only connects out to this server over HTTPS, never listens, checks this server's certificate fingerprint, and never runs anything the server sends.</p>
         <div id="agentinfo"></div>
         <div id="agenttable"></div>
+      </div>
+      <div class="panel" id="rcpanel">
+        <h3>Remote control (NetInventory Remote)</h3>
+        <p class="muted">A second, separate agent that only does remote control from the dashboard (the agent above stays report-only).
+          The PC connects out to this server (TLS, certificate pinned, signed); nothing listens on the PC. By default the user at the PC
+          must accept each connection; members of the AD group below connect directly. The PC shows a bar with who is connected and an End button
+          for the whole session. No clipboard, files or commands. Every request, answer and session is in the audit log and below.</p>
+        <form id="rcset"></form>
+        <div id="rcinfo"></div>
+        <h4>Remote control agents</h4>
+        <div id="rcagents"></div>
+        <h4>Sessions</h4>
+        <div id="rcsessions"></div>
       </div>
       <div class="panel">
         <h3>HTTPS certificate</h3>

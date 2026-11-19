@@ -1,0 +1,56 @@
+<!--
+  NetInventory Remote: the remote control agent MSI (WiX v4). Built by installer/remote/build-remote.ps1 in CI.
+  Separate from the inventory agent (NetInventory-Agent.msi), which stays report-only.
+  Silent install, for a push from the dashboard, GPO software installation, Intune or a script:
+    msiexec /i NetInventory-Remote.msi /qn SERVER=https://netinv.corp.local:8080 TOKEN=nra_... PIN=<sha256>
+  With GPO software installation (no command line), leave the properties out and set Server, EnrollToken and Pin under
+  HKLM\SOFTWARE\Policies\NetInventory\Remote with Group Policy Preferences > Registry instead (plus, where needed,
+  AlwaysAsk=1 or Disabled=1 as DWORDs).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="NetInventory Remote" Manufacturer="NetInventory" Version="$(var.Version)"
+           UpgradeCode="7686c9eb-6f9a-4cc1-aa89-d6d25ec562a9" Scope="perMachine" Compressed="yes" InstallerVersion="500">
+    <MajorUpgrade DowngradeErrorMessage="A newer NetInventory Remote is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="TOKEN" Secure="yes" Hidden="yes" />
+    <Property Id="PIN" Secure="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPCOMMENTS" Value="Remote control from NetInventory, with the user's consent. Connects out to the NetInventory server only; nothing listens on this PC." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NetInventory Remote">
+        <Component Id="ExeC">
+          <File Id="Exe" Source="$(var.Src)\NetInventoryRemote.exe" KeyPath="yes" />
+          <ServiceInstall Id="Svc" Name="NetInventoryRemote" DisplayName="NetInventory Remote"
+                          Description="Remote control sessions started from NetInventory, with the signed-in user's consent unless the technician is allowed to connect directly. Outbound connection to the NetInventory server only."
+                          Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem" Arguments="service" Vital="yes">
+            <ServiceConfig DelayedAutoStart="yes" OnInstall="yes" OnReinstall="yes" />
+            <util:ServiceConfig FirstFailureActionType="restart" SecondFailureActionType="restart" ThirdFailureActionType="restart"
+                                RestartServiceDelayInSeconds="60" ResetPeriodInDays="1" />
+          </ServiceInstall>
+          <ServiceControl Id="SvcCtl" Name="NetInventoryRemote" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="NetInventory Remote">
+      <ComponentRef Id="ExeC" />
+    </Feature>
+
+    <!-- Write the config (locked-down folder: SYSTEM and Administrators only) before the service starts; remove the
+         data on uninstall (not on upgrade, so the PC keeps its enrollment). As SYSTEM, hidden, via WixQuietExec. -->
+    <SetProperty Id="RcConfigure" Sequence="execute" Before="RcConfigure"
+      Value="&quot;[INSTALLFOLDER]NetInventoryRemote.exe&quot; configure -server &quot;[SERVER]&quot; -token &quot;[TOKEN]&quot; -pin &quot;[PIN]&quot;" />
+    <CustomAction Id="RcConfigure" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" HideTarget="yes" />
+
+    <SetProperty Id="RcCleanup" Sequence="execute" Before="RcCleanup"
+      Value="&quot;[INSTALLFOLDER]NetInventoryRemote.exe&quot; cleanup" />
+    <CustomAction Id="RcCleanup" DllEntry="WixQuietExec64" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RcConfigure" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="RcCleanup" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

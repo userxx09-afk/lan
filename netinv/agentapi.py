@@ -150,7 +150,18 @@ async def signed(request: Request) -> tuple[str, bytes]:
             raise HTTPException(401, "agent revoked")
         import base64
         key = base64.b64decode(decrypt(a.secret_enc))
-    msg = f"{ts}\n{nonce}\n{request.url.path}\n{hashlib.sha256(body).hexdigest()}".encode()
+    check_sig(key, ts, nonce, request.url.path, body, sig)
+    return aid, body
+
+
+def check_sig(key: bytes, ts: str, nonce: str, path: str, body: bytes, sig: str) -> None:
+    """HMAC-SHA256(key, "<ts>\\n<nonce>\\n<path>\\n<sha256 hex of body>"), within 5 minutes, each nonce once.
+    Shared with the remote control agent (rcontrol.py)."""
+    if not (ts.isdigit() and 16 <= len(nonce) <= 64 and len(sig) == 64):
+        raise HTTPException(401, "unsigned request")
+    if abs(time.time() - int(ts)) > SKEW:
+        raise HTTPException(401, "clock skew: the PC's clock is more than 5 minutes off")
+    msg = f"{ts}\n{nonce}\n{path}\n{hashlib.sha256(body).hexdigest()}".encode()
     if not hmac.compare_digest(hmac.new(key, msg, hashlib.sha256).hexdigest(), sig.lower()):
         raise HTTPException(401, "bad signature")
     now = time.time()
@@ -161,7 +172,6 @@ async def signed(request: Request) -> tuple[str, bytes]:
         if len(_nonces) > 50000:
             for k in [k for k, v in _nonces.items() if now - v > 2 * SKEW]:
                 _nonces.pop(k, None)
-    return aid, body
 
 
 def _agent(db, aid: str, request: Request) -> Agent:

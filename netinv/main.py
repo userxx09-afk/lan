@@ -289,8 +289,9 @@ def test_auth(body: LoginIn, request: Request, actor=Depends(ui_auth), db=Depend
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
-from . import agentapi, agentpush  # noqa: E402
+from . import agentapi, agentpush, rcontrol  # noqa: E402
 app.include_router(agentapi.router)
+app.include_router(rcontrol.router)
 
 
 # ----------------------------------------------------------------- overview
@@ -2715,6 +2716,186 @@ def logs_file(name: str, download: bool = False):
     if download:
         return FileResponse(p, filename=p.name, media_type="text/plain")
     return {"name": p.name, "size": p.stat().st_size, "text": logs.tail(p)}
+
+
+# ----------------------------------------------------------------- remote control (NetInventory Remote, see rcontrol.py)
+RC_MSI = "https://github.com/userxx09-afk/prod/releases/download/lan-latest/NetInventory-Remote.msi"
+
+
+@app.get("/api/rc", dependencies=UI)
+def rc_overview(request: Request, db=Depends(db_session)):
+    from .db import RcAgent
+    p = rcontrol.msi_path()
+    return {"settings": rcontrol.config(db),
+            "token": {"set": bool(get_setting(db, "rc:token_hash", None)), "created": get_setting(db, "rc:token_created", None),
+                      "hint": get_setting(db, "rc:token_hint", None)},
+            "pin": agentpush.pin(), "server": agentpush.server_url(db, str(request.base_url)),
+            "msi_url": "/api/rc/msi" if p else RC_MSI, "msi_local": bool(p),
+            "agents": [rcontrol.agent_out(a) for a in db.scalars(select(RcAgent).where(RcAgent.status != "revoked")
+                                                                 .order_by(RcAgent.status != "pending", RcAgent.hostname))],
+            "revoked": db.query(RcAgent).filter(RcAgent.status == "revoked").count(),
+            "sessions": rcontrol.history(db, limit=100)}
+
+
+class RcSettingsIn(BaseModel):
+    enabled: bool = True
+    allowed_group: str = ""
+    direct_group: str = ""
+    ask_seconds: int = 30
+    nouser: str = "allow"
+    max_hours: int = 8
+    idle_minutes: int = 30
+    approve: str = "ad"
+    require_reason: bool = False
+
+
+@app.put("/api/rc/settings")
+def rc_settings(body: RcSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    if (body.nouser not in rcontrol.NOUSER or body.approve not in rcontrol.APPROVE or not 10 <= body.ask_seconds <= 300
+            or not 1 <= body.max_hours <= 24 or not 5 <= body.idle_minutes <= 480):
+        raise HTTPException(400, "bad settings")
+    for g in (body.allowed_group, body.direct_group):
+        if len(g) > 255 or any(ch in g for ch in "()*\\\0"):
+            raise HTTPException(400, "Group: the AD group's name (CN or pre-Windows 2000 name) or its distinguished name.")
+    before = rcontrol.config(db)
+    new = {"enabled": "1" if body.enabled else "0", "allowed_group": body.allowed_group.strip(), "direct_group": body.direct_group.strip(),
+           "ask_seconds": str(body.ask_seconds), "nouser": body.nouser, "max_hours": str(body.max_hours),
+           "idle_minutes": str(body.idle_minutes), "approve": body.approve, "require_reason": "1" if body.require_reason else "0"}
+    for k, v in new.items():
+        set_setting(db, f"rc:{k}", v or None)
+    after = rcontrol.config(db)
+    changed = {k: f"{before[k]} -> {after[k]}" for k in after if before[k] != after[k]}
+    db.add(AuditLog(actor=actor, action="rc.settings", target="remote control", result=json.dumps(changed or "no change")[:1000]))
+    db.commit()
+    return after
+
+
+@app.post("/api/rc/check")
+def rc_check(request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    """What remote control would do for the signed-in user right now (the group checks, live)."""
+    s = rcontrol._session_of(request)
+    r = rcontrol.rights(db, s.user if s else actor, s.source if s else "local")
+    cfg = rcontrol.config(db)
+    if not r["allowed"]:
+        out = r["why"]
+    elif r["direct"]:
+        out = f"You can connect without asking (member of {cfg['direct_group']})."
+    else:
+        out = "You can connect; the user at the PC is asked first." + (f" ({r['why']})" if r["why"] else "")
+    return {**r, "output": out}
+
+
+@app.post("/api/rc/token")
+def rc_token(actor=Depends(ui_auth), db=Depends(db_session)):
+    tok = rcontrol.new_token(db)
+    db.add(AuditLog(actor=actor, action="rc.token", target="remote control enrollment", result="new token"))
+    db.commit()
+    return {"token": tok}
+
+
+@app.delete("/api/rc/token")
+def rc_token_off(actor=Depends(ui_auth), db=Depends(db_session)):
+    for k in ("rc:token_hash", "rc:token_hint", "rc:token_created"):
+        set_setting(db, k, "")
+    db.add(AuditLog(actor=actor, action="rc.token", target="remote control enrollment", result="turned off"))
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/rc/agents/{aid}/{what}")
+async def rc_agent_action(aid: int, what: str, actor=Depends(ui_auth)):
+    from .db import RcAgent
+    from starlette.concurrency import run_in_threadpool
+
+    def act():
+        with SessionLocal() as db:
+            a = db.get(RcAgent, aid)
+            if not a or what not in ("approve", "revoke", "delete"):
+                raise HTTPException(404)
+            host = a.hostname
+            if what == "approve":
+                for other in db.scalars(select(RcAgent).where(RcAgent.hostname == host, RcAgent.status == "active", RcAgent.id != a.id)):
+                    other.status, other.note = "revoked", f"replaced by agent {a.agent_id[:8]} (approved by {actor})"
+                a.status, a.note = "active", None
+            elif what == "revoke":
+                a.status, a.note = "revoked", f"revoked by {actor}"
+            else:
+                db.delete(a)
+            db.add(AuditLog(actor=actor, action=f"rc.agent.{what}", target=f"computer:{host}", result="ok"))
+            db.commit()
+            return host
+    host = await run_in_threadpool(act)
+    if what in ("revoke", "delete"):
+        await rcontrol.close_control(host)
+    return {"ok": True, "output": {"approve": f"{host} approved: it connects within 2 minutes.",
+                                   "revoke": f"{host}'s remote control agent revoked: it can't connect any more.",
+                                   "delete": "Removed."}[what]}
+
+
+@app.get("/api/rc/msi", dependencies=UI)
+def rc_msi():
+    p = rcontrol.msi_path()
+    if not p:
+        raise HTTPException(404, "This server has no remote control agent MSI; download it from the prod release.")
+    return FileResponse(p, media_type="application/x-msi", filename="NetInventory-Remote.msi",
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/rc/history", dependencies=UI)
+def rc_history(host: str | None = None, limit: int = 200, db=Depends(db_session)):
+    return {"rows": rcontrol.history(db, host, limit)}
+
+
+@app.get("/api/devices/{hostname}/rc", dependencies=UI)
+def device_rc(hostname: str, db=Depends(db_session)):
+    return {**rcontrol.status_for(db, hostname), "history": rcontrol.history(db, hostname, 20)}
+
+
+class RcPushIn(BaseModel):
+    hostnames: list[str] = []
+    group: str | None = None
+    server_url: str | None = None
+    remove: bool = False
+    credential_id: int | None = None
+
+
+@app.post("/api/rc/push")
+def rc_push(body: RcPushIn, user=Depends(ui_auth)):
+    """Install (or remove) the remote control agent on PCs over WinRM through the deployment queue."""
+    with SessionLocal() as db:
+        if not body.remove:
+            if not rcontrol.msi_path():
+                raise HTTPException(400, "This server has no NetInventory-Remote.msi to push (agent-msi folder). Update the server first.")
+            if not agentpush.pin():
+                raise HTTPException(400, "This server isn't on HTTPS. The remote control agent only talks HTTPS: set up the certificate in Settings first.")
+            try:
+                url = agentpush.check_url(body.server_url or agentpush.server_url(db))
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            if get_setting(db, "agent:server_url", None) != url:
+                set_setting(db, "agent:server_url", url)
+                db.add(AuditLog(actor=user, action="agent.settings", target="agent", result=f"server address for pushes: {url}"))
+            db.commit()
+        if body.credential_id is not None:
+            try:
+                fixes.cred_for_push(db, body.credential_id)
+            except PermissionError as exc:
+                raise HTTPException(400, str(exc))
+        hosts = list(body.hostnames)
+        if body.group:
+            hosts += groups.hosts(db, body.group)
+    if not hosts:
+        raise HTTPException(400, "pick at least one computer")
+    if len(set(hosts)) > 2000:
+        raise HTTPException(400, "at most 2,000 computers at a time")
+    try:
+        n = fixes.run_many(hosts, "rc_remove" if body.remove else "rc_install", user,
+                           **({"cred_id": body.credential_id} if body.credential_id is not None else {}))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    what = "Removal of the remote control agent" if body.remove else "Remote control agent install"
+    return {"ok": True, "count": n, "output": f"{what} queued for {n} computer{'s' if n != 1 else ''}. "
+                                               "Each PC's result shows in Software > Deployments."}
 
 
 # Settings that belong to the person, not the server: kept per signed-in user (settings key "user:<name>:<key>"),
