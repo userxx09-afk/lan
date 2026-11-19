@@ -1902,6 +1902,7 @@ class JiraSettingsIn(BaseModel):
     project: str | None = None
     issue_type: str | None = None
     match_text: bool = True
+    mode: str | None = None             # off | test | on; blank keeps the saved one
 
 
 def _jira(fn, *a, **kw):
@@ -1971,7 +1972,7 @@ def put_jira_settings(body: JiraSettingsIn, actor=Depends(ui_auth), db=Depends(d
         raise HTTPException(400, str(exc))
     c = jira.config(db)
     db.add(AuditLog(actor=actor, action="jira.settings", target="jira",
-                    result=f"site={c['site']} account={c['email']} project={c['project']} type={c['issue_type']} "
+                    result=f"mode={c['mode']} site={c['site']} account={c['email']} project={c['project']} type={c['issue_type']} "
                            f"token={'changed' if body.token else 'cleared' if body.clear_token else 'kept'}"))
     db.commit()
     return c
@@ -2031,6 +2032,8 @@ class JiraIssueIn(BaseModel):
 
 @app.post("/api/jira/issue")
 def jira_create(body: JiraIssueIn, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    if not jira.enabled(db):
+        raise HTTPException(400, "Jira isn't turned on, so no issue was created. Set it to On in Settings > Jira.")
     d = _jira_subject(db, body.kind, body.ref)       # labels and back-link come from the server, not the browser
     from .agentpush import server_url
     link = f"{server_url(db, str(request.base_url))}/{d['path']}"
@@ -2656,6 +2659,36 @@ def agents_msi():
         raise HTTPException(404, "This server has no agent MSI; download it from the prod release.")
     return FileResponse(p, media_type="application/x-msi", filename="NetInventory-Agent.msi",
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+# ----------------------------------------------------------------- DameWare launcher for technician PCs
+@app.get("/api/dameware/kit", dependencies=UI)
+def dameware_kit(db=Depends(db_session)):
+    """What Settings > DameWare offers to download, and the domains the zip fills in as allowed suffixes."""
+    from . import dwkit
+    return {"files": list(dwkit.FILES), "suffixes": dwkit.suffixes(db), "zip": f"{dwkit.FOLDER}.zip"}
+
+
+@app.get("/api/dameware/kit.zip", dependencies=UI)
+def dameware_kit_zip(request: Request, db=Depends(db_session)):
+    """Everything a technician PC (or a GPO share) needs, with Install.cmd and plain instructions."""
+    from . import dwkit
+    data = dwkit.zip_bytes(dwkit.suffixes(db), str(request.base_url).rstrip("/"))
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{dwkit.FOLDER}.zip"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/dameware/files/{name}", dependencies=UI)
+def dameware_file(name: str, db=Depends(db_session)):
+    from . import dwkit
+    try:
+        data = dwkit.file_bytes(name, dwkit.suffixes(db))
+    except KeyError:
+        raise HTTPException(404, "No such DameWare launcher file.")
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/agents/push", dependencies=UI)

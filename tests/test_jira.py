@@ -84,6 +84,35 @@ with TestClient(m.app) as c:
     c.put("/api/jira/settings", json={**{k: cfg[k] for k in ("site", "email", "project", "issue_type")}, "token": ""})
     assert c.get("/api/jira/settings").json()["token_set"]
 
+    # new installs start off: saved settings don't reach Jira, and Test says it's off
+    assert cfg["mode"] == "off" and cfg["configured"] and not cfg["enabled"]
+    t = c.post("/api/jira/test").json()
+    assert not t["ok"] and "turned off" in t["output"] and not calls, t
+    assert c.put("/api/jira/settings", json={**{k: cfg[k] for k in ("site", "email")}, "mode": "maybe"}).status_code == 400
+
+    # test only: Test connection works, but nothing shows on pages and nothing can be created
+    cfg = c.put("/api/jira/settings", json={**{k: cfg[k] for k in ("site", "email", "project", "issue_type")}, "mode": "test"}).json()
+    assert cfg["mode"] == "test" and not cfg["enabled"]
+    t = c.post("/api/jira/test").json()
+    assert t["ok"] and "NetInventory Service" in t["output"], t
+    assert not c.get(f"/api/jira/draft?kind=pc&ref={host}").json()["enabled"]
+    assert c.get(f"/api/jira/related?kind=pc&ref={host}").json() == {"enabled": False, "issues": []}
+    n = len(calls)
+    r = c.post("/api/jira/issue", json={"kind": "pc", "ref": host, "summary": "should not be created"})
+    assert r.status_code == 400 and "isn't turned on" in r.text and len(calls) == n, r.text
+    try:   # and the client itself refuses to write in test mode, whoever calls it
+        with SessionLocal() as db:
+            jira.create(db, "IT", "Task", "nope", "", [], None, None)
+        raise SystemExit("created an issue in test mode")
+    except jira.JiraError as e:
+        assert "Test only" in str(e)
+    assert not any(m_ == "POST" for m_, *_ in calls[n:])
+    assert c.get("/api/jira/projects?q=it").status_code == 200     # Find still works while testing
+
+    # on
+    cfg = c.put("/api/jira/settings", json={**{k: cfg[k] for k in ("site", "email", "project", "issue_type")}, "mode": "on"}).json()
+    assert cfg["enabled"]
+    calls.clear()
     t = c.post("/api/jira/test").json()
     assert t["ok"] and "NetInventory Service" in t["output"] and "IT" in t["output"], t
     assert calls[0][3] == "Basic " + base64.b64encode(f"svc@corp.example.com:{TOKEN}".encode()).decode()
