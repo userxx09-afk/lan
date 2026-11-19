@@ -2641,6 +2641,36 @@ def agents_msi():
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
+# ----------------------------------------------------------------- DameWare launcher for technician PCs
+@app.get("/api/dameware/kit", dependencies=UI)
+def dameware_kit(db=Depends(db_session)):
+    """What Settings > DameWare offers to download, and the domains the zip fills in as allowed suffixes."""
+    from . import dwkit
+    return {"files": list(dwkit.FILES), "suffixes": dwkit.suffixes(db), "zip": f"{dwkit.FOLDER}.zip"}
+
+
+@app.get("/api/dameware/kit.zip", dependencies=UI)
+def dameware_kit_zip(request: Request, db=Depends(db_session)):
+    """Everything a technician PC (or a GPO share) needs, with Install.cmd and plain instructions."""
+    from . import dwkit
+    data = dwkit.zip_bytes(dwkit.suffixes(db), str(request.base_url).rstrip("/"))
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{dwkit.FOLDER}.zip"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/dameware/files/{name}", dependencies=UI)
+def dameware_file(name: str, db=Depends(db_session)):
+    from . import dwkit
+    try:
+        data = dwkit.file_bytes(name, dwkit.suffixes(db))
+    except KeyError:
+        raise HTTPException(404, "No such DameWare launcher file.")
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
 @app.get("/api/agents/push", dependencies=UI)
 def agents_push_info(request: Request, db=Depends(db_session)):
     return agentpush.status(db, str(request.base_url))

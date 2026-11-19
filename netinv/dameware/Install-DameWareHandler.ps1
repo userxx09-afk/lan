@@ -6,9 +6,10 @@
     .\Install-DameWareHandler.ps1 -DWRCCPath "D:\Apps\DWRCC.exe" -AllowedSuffixes ".corp.example.com"
     .\Install-DameWareHandler.ps1 -Uninstall
 
-  For many PCs, deploy by GPO instead: copy Open-DameWare.ps1 to C:\ProgramData\NetInventory\
-  (Computer Configuration > Preferences > Windows Settings > Files) and import dameware-handler.reg
-  (Preferences > Windows Settings > Registry, or a startup script running reg import).
+  For many PCs by GPO: run this script as a computer startup script from a share (it runs as SYSTEM and
+  is safe to run at every start), or copy Open-DameWare.ps1 to C:\ProgramData\NetInventory\ with a Files
+  preference and set the keys in dameware-handler.reg with Registry preferences.
+  Settings > DameWare in NetInventory has a zip with all of this plus Install.cmd and step-by-step notes.
 #>
 param([string]$DWRCCPath, [string]$AllowedSuffixes, [string]$ExtraArgs, [switch]$Uninstall)
 $ErrorActionPreference = 'Stop'
@@ -26,6 +27,8 @@ if ($Uninstall) {
 }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Open-DameWare.ps1') -Destination $script -Force
+# a copy from a downloaded zip keeps the "came from the internet" mark; clear it
+Unblock-File -LiteralPath $script -ErrorAction SilentlyContinue
 New-Item -Path "$cls\shell\open\command" -Force | Out-Null
 Set-ItemProperty -Path $cls -Name '(default)' -Value 'URL:DameWare Remote Control (NetInventory)'
 Set-ItemProperty -Path $cls -Name 'URL Protocol' -Value ''

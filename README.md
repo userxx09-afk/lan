@@ -598,11 +598,15 @@ computer list open `dameware://connect/?host=PC&mode=windows`. A small launcher 
 `DWRCC.exe -c: -m:PC -a:1 -x` (the technician's own Windows logon) or, with *Saved host entry* chosen in
 Settings, `DWRCC.exe -c: -m:PC -h:` (the credentials saved for that host in DameWare).
 
-Install the launcher:
-- On one PC: tick *Install the DameWare launcher on this PC* in the installer, or run
-  `tools\dameware\Install-DameWareHandler.ps1` as administrator.
-- On many PCs by GPO: copy `Open-DameWare.ps1` to `C:\ProgramData\NetInventory\` with a Files preference and import
-  `dameware-handler.reg` with a Registry preference (both are in `tools\dameware`; a Start menu shortcut opens the folder).
+Install the launcher (Settings > DameWare has **Download the launcher (zip)** and each file on its own; the zip
+fills in the server's DNS domains as allowed suffixes and has a README.txt with these steps):
+- On one PC: unzip, double-click `Install.cmd` and click Yes (or tick *Install the DameWare launcher on this PC* in the
+  NetInventory installer, or run `Install-DameWareHandler.ps1` as administrator).
+- On many PCs by GPO: put the unzipped folder on a share (for example NETLOGON) and add `Install-DameWareHandler.ps1` as
+  a computer startup script; it runs as SYSTEM and is safe to repeat. Or, with no script, copy `Open-DameWare.ps1` to
+  `C:\ProgramData\NetInventory\` with a Files preference and set the keys from `dameware-handler.reg` with Registry
+  preferences. The files ship in `netinv\dameware` (on the server also in `<install dir>\tools\dameware`, which a Start
+  menu shortcut opens).
 
 Optional per-PC registry values under `HKLM\SOFTWARE\NetInventory`: `DameWarePath` (if `DWRCC.exe` isn't found
 automatically), `DameWareExtraArgs`, and `DameWareAllowedSuffixes` (for example `.corp.example.com`). The launcher accepts only
@@ -849,6 +853,6 @@ netinv/
   static/            dashboard (plain HTML/JS, no build step)
 agent/Send-Inventory.ps1   older one-shot push script (prefer netinv/agent)
   netinv/agent/              the NetInventory Agent scripts (MSI: installer/agent)
-tools/dameware/            dameware:// launcher, installer script and GPO .reg for technician PCs
+netinv/dameware/           dameware:// launcher, installer script and GPO .reg for technician PCs
 installer/                 Windows installer (Inno Setup) and its build script
 ```

@@ -47,8 +47,8 @@ Source: "{#Build}\winsw\WinSW-x64.exe"; DestDir: "{app}\service"; DestName: "Net
 Source: "{#Build}\pgsql\*"; DestDir: "{app}\pgsql"; Flags: recursesubdirs ignoreversion; Check: UseBundledPg
 Source: "scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion
 ; DameWare launcher: always shipped for GPO deployment, installed on this PC only if the task is ticked.
-Source: "..\tools\dameware\*"; DestDir: "{app}\tools\dameware"; Flags: ignoreversion
-Source: "..\tools\dameware\Open-DameWare.ps1"; DestDir: "{commonappdata}\{#AppName}"; Flags: ignoreversion; Tasks: dameware
+Source: "..\netinv\dameware\*"; DestDir: "{app}\tools\dameware"; Flags: ignoreversion
+Source: "..\netinv\dameware\Open-DameWare.ps1"; DestDir: "{commonappdata}\{#AppName}"; Flags: ignoreversion; Tasks: dameware
 ; Prerequisite: Microsoft Visual C++ 2015-2022 runtime (PostgreSQL and some Python wheels need it).
 Source: "{#Build}\redist\vc_redist.x64.exe"; DestDir: "{tmp}"; Check: NeedsVcRedist
 ; Wizard helper that checks whether a port is free; extracted to {tmp} when needed, never installed.
