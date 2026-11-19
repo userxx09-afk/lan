@@ -564,6 +564,48 @@ class Agent(Base):
     want_inventory: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class RcAgent(Base):
+    """An enrolled remote control agent (NetInventory Remote, rcontrol.py): separate from the inventory agent, with
+    its own identity and secret. The secret signs its control connection; it's stored encrypted."""
+    __tablename__ = "rc_agents"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    hostname: Mapped[str] = mapped_column(String(64), index=True)
+    fqdn: Mapped[str | None] = mapped_column(String(255))
+    machine_guid: Mapped[str | None] = mapped_column(String(64))
+    secret_enc: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active")    # active | pending | revoked
+    note: Mapped[str | None] = mapped_column(String(255))
+    enrolled: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    last_ip: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[str | None] = mapped_column(String(32))
+    console_user: Mapped[str | None] = mapped_column(String(128))
+    always_ask: Mapped[bool | None] = mapped_column(Boolean)                  # the PC's own policy forces the question
+    disabled: Mapped[bool | None] = mapped_column(Boolean)                    # the PC's own policy turns sessions off
+
+
+class RcSession(Base):
+    """One remote control session (or attempt): who, which PC, how it was allowed, and how it ended."""
+    __tablename__ = "rc_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sid: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    hostname: Mapped[str] = mapped_column(String(64), index=True)
+    tech: Mapped[str] = mapped_column(String(128))
+    tech_ip: Mapped[str | None] = mapped_column(String(64))
+    reason: Mapped[str | None] = mapped_column(String(255))
+    direct: Mapped[bool] = mapped_column(Boolean, default=False)            # allowed to connect without asking
+    view_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(16), default="asking")      # asking | connecting | connected | denied | failed | ended
+    consent: Mapped[str | None] = mapped_column(String(32))                 # accepted | direct | denied | timeout | nouser-allowed ...
+    pc_user: Mapped[str | None] = mapped_column(String(128))
+    created: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    started: Mapped[datetime | None] = mapped_column(DateTime)
+    ended: Mapped[datetime | None] = mapped_column(DateTime)
+    end_reason: Mapped[str | None] = mapped_column(String(255))
+    bytes_sent: Mapped[int | None] = mapped_column(Integer)
+
+
 class Deployment(Base):
     """One push to one PC (app update, Windows updates, service start, reboot): the queue and the log (fixes.py).
     status: queued (waiting for its turn, or for the PC to come online) | sending | running | success | failed |

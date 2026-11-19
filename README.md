@@ -739,10 +739,77 @@ Deploy:
 `agent/Send-Inventory.ps1` (the older one-shot script using the shared `ingest_token`) still works but has no pinning
 or per-PC secret; prefer the agent.
 
+## Remote control (NetInventory Remote, 0.36)
+
+A **second, separate agent** for remote control from the dashboard. The NetInventory Agent above stays report-only;
+NetInventory Remote does nothing but screen sharing with mouse and keyboard, and only when a session is asked for.
+
+**Using it.** On a PC's page click **Remote control** (or the *Remote control* tab for its status and session history).
+A window opens; give an optional reason (Settings can require one), tick *View only* if you only need to look, and
+click Connect. The toolbar has Ctrl+Alt+Del, Win, Alt+Tab, a display picker, picture quality, fit/actual size and
+full screen. Close the window or click **End session** to disconnect.
+
+**Who can connect, and when the user is asked** (Settings > Remote control):
+- *Who can use it*: optional AD security group. Empty = anyone who can sign in to NetInventory.
+- *Connect without asking*: AD security group whose members connect directly. Everyone else's request pops up on
+  the PC for the signed-in user ("<technician> wants to see and control this computer… Allow?"); the default answer
+  is No, and no answer within 30 seconds (configurable) is No. Nested groups count. Membership is checked live in AD
+  at each request with the scan credential; if AD can't be asked, the user is asked (and with an allowed group set, the
+  request is refused). The local admin account always asks.
+- Nobody signed in at the PC: connect (default) or refuse. A locked PC whose user doesn't answer is refused.
+- Sessions end after 8 hours, or 30 minutes without input (both configurable).
+- Per-PC policy (GPO, `HKLM\SOFTWARE\Policies\NetInventory\Remote`, DWORDs): `AlwaysAsk=1` always asks the user,
+  whatever the technician's group (for HR, finance, executives); `Disabled=1` turns remote control off on that PC.
+
+**What the user at the PC sees.** The question (unless the technician is in the direct group), then for the whole
+session a bar at the top of the screen: *Remote control by <technician> (NetInventory)* with an **End session**
+button. Requests, answers, starts and ends are also written to the PC's Application event log (source *NetInventory Remote*).
+
+**Installing.** Computers > select PCs > **Push remote control**, or **Install or update remote control** on a PC's
+page: over WinRM like other deployments, with a one-time ticket per PC (approved at once). It counts as done when the
+PC has connected to the server. For GPO/Intune: Settings > Remote control > download `NetInventory-Remote.msi` and
+`msiexec /i NetInventory-Remote.msi /qn SERVER=https://server:port TOKEN=nra_... PIN=<sha256>` (a separate token from
+the inventory agent's). PCs installed that way are approved by the *New PCs* rule; a second PC claiming a name that
+already has an agent always waits for approval. *Revoke* disconnects a PC at once.
+
+**Security design.**
+- Nothing listens on the PC: the service (`NetInventoryRemote`, LocalSystem) keeps one outbound WebSocket over TLS 1.2+
+  to the server, which can't be reached from anywhere else. No inbound firewall rule, no port scan surface.
+- The server's certificate is pinned (SHA-256). No proxy, no redirects. The PC's own secret (from enrollment) is kept
+  DPAPI-encrypted in `%ProgramData%\NetInventory Remote`, readable only by SYSTEM and Administrators, and signs the
+  connection (HMAC-SHA256 over time, nonce and path; replays and >5 min clock skew are refused).
+- The server can only *ask* for a session. Consent is decided on the PC (with the PC's policy winning over the server).
+- Each session has two random one-time tokens (viewer and PC), good for 2 minutes. The viewer's WebSocket also needs
+  the same signed-in user and a same-origin request (no cross-site WebSocket hijacking); basic auth can't start sessions.
+- The screen is captured by a helper process started for that one session in the user's Windows session (so it also
+  works on the sign-in screen and UAC prompts), with its token passed over a pipe, never on the command line.
+- The server re-builds every viewer message from checked values: only mouse (in-screen coordinates), key codes,
+  wheel, display and quality pass; view-only sessions pass no input; at most 600 messages a second.
+  **No clipboard, no file transfer, no command channel**: the agent has no code that could run anything.
+- One session per PC; any signed-in user can end any session from Settings > Remote control.
+- Everything is in the audit log (`rc.request`, `rc.consent`/`rc.denied`, `rc.start`, `rc.cad`, `rc.end`,
+  `rc.refused`, `rc.settings`, `rc.agent.*`) and in the session list with who, which PC, how it was allowed, the user at
+  the PC, the reason, the duration and why it ended.
+- The exe and the MSI are Authenticode-signed by CI (Code signing, below); the push reports the MSI's signature status on the PC.
+
+**Why our own small agent instead of VNC, RustDesk or MeshCentral.** VNC servers (UltraVNC, TightVNC) listen on a port,
+have a long CVE history (memory corruption in the protocol parsers) and weak built-in authentication. RustDesk and
+MeshCentral are good, but each brings its own server, relay, accounts and update channel to run and patch, plus
+features (file transfer, terminal, clipboard) we'd then have to lock down. RDP shadowing needs inbound 3389 and can't
+apply "group may skip the prompt" per technician. NetInventory Remote is under 1,800 lines of Go: memory-safe, one
+static 7 MB exe with two dependencies (`golang.org/x/sys` from the Go team, and `coder/websocket`), using Windows'
+own APIs for everything sensitive (WTSSendMessage for the question, DPAPI, SendInput, SendSAS), and it reuses the
+server's existing sign-in, TLS certificate, audit log, push queue and code signing. Only what remote control needs.
+
+**Limits.** Screen pictures are JPEG tiles of what changed (GDI capture): fine for support work on a LAN or VPN,
+not for video. Only the console session (not other RDP sessions on a server). Ctrl+Alt+Del needs *SoftwareSASGeneration*
+allowing services; the MSI sets it to 1 when it isn't set. Check a PC: `%ProgramData%\NetInventory Remote\agent.log`
+(as admin) and `Get-Service NetInventoryRemote`.
+
 ## Code signing (0.28)
 
-CI signs the agent scripts (`netinv/agent/*.ps1`, `agent/Send-Inventory.ps1`), the agent MSI and the server
-installer with Authenticode when the repository has two secrets: `CODESIGN_PFX_BASE64` (the code-signing .pfx,
+CI signs the agent scripts (`netinv/agent/*.ps1`, `agent/Send-Inventory.ps1`), the agent MSI, the remote control
+agent (`NetInventoryRemote.exe` and `NetInventory-Remote.msi`) and the server installer with Authenticode when the repository has two secrets: `CODESIGN_PFX_BASE64` (the code-signing .pfx,
 base64-encoded) and `CODESIGN_PFX_PASSWORD`. The certificate must have the Code Signing purpose (EKU
 1.3.6.1.5.5.7.3.3): a TLS or wildcard certificate can't sign code. An internal AD CS *Code Signing* certificate works;
 domain PCs already trust the CA, and a GPO adds the certificate to **Trusted Publishers** so `AllSigned` execution

@@ -36,6 +36,14 @@ def main() -> None:
                 return not isinstance(exc, (ConnectionResetError, ConnectionAbortedError))
 
         logging.getLogger("asyncio").addFilter(_QuietResets())
+
+        class _QuietDenials(logging.Filter):
+            """uvicorn logs an error after a WebSocket is refused with an HTTP answer (rcontrol._deny: a remote control
+            agent waiting for approval, a used session link). The refusal is intended and already logged."""
+            def filter(self, record: logging.LogRecord) -> bool:
+                return record.getMessage() != "ASGI callable returned without completing handshake."
+
+        logging.getLogger("uvicorn.error").addFilter(_QuietDenials())
         tls = {}
         if settings.tls_cert and settings.tls_key:
             tls = {"ssl_certfile": settings.tls_cert, "ssl_keyfile": settings.tls_key}

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Remote control</title>
+<style>
+  :root { --bg: #0f1217; --bar: #1a1e26; --text: #e6e9ef; --muted: #98a1b2; --line: #2a303b; --accent: #6ea0ff; --bad: #f2786f; --good: #6fcf97; --warn: #e9b35a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bar); border-bottom: 1px solid var(--line); }
+  header b { font-size: 15px; }
+  #state { color: var(--muted); flex: 1; min-width: 160px; }
+  #state.good { color: var(--good); } #state.bad { color: var(--bad); } #state.warn { color: var(--warn); }
+  button, select { font: inherit; background: #2a303b; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.end { background: #5a2420; border-color: #7a312b; }
+  button.primary { background: var(--accent); color: #0b1020; border-color: var(--accent); }
+  main { flex: 1; overflow: auto; display: flex; align-items: flex-start; justify-content: center; position: relative; }
+  main.fit { overflow: hidden; align-items: center; }
+  canvas { display: none; background: #000; outline: none; cursor: default; image-rendering: auto; }
+  main.fit canvas { max-width: 100%; max-height: 100%; }
+  #start { margin: 48px auto; max-width: 460px; padding: 0 16px; }
+  #start label { display: block; margin: 12px 0 4px; }
+  #start input[type=text] { width: 100%; font: inherit; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line); background: #11151b; color: var(--text); }
+  .muted { color: var(--muted); } .small { font-size: 12px; }
+  #msg { position: absolute; top: 40%; left: 0; right: 0; text-align: center; color: var(--muted); font-size: 16px; padding: 0 16px; }
+  .sep { width: 1px; height: 22px; background: var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <b id="host">Remote control</b>
+  <span id="state">Not connected</span>
+  <span id="tools" hidden>
+    <button id="cad" title="Send Ctrl+Alt+Del to the PC">Ctrl+Alt+Del</button>
+    <button id="win" title="Windows key">Win</button>
+    <button id="alttab" title="Alt+Tab">Alt+Tab</button>
+    <span class="sep"></span>
+    <select id="mon" title="Display"></select>
+    <select id="quality" title="Picture quality">
+      <option value="40">Fast</option><option value="70" selected>Balanced</option><option value="90">Sharp</option>
+    </select>
+    <button id="fit" title="Fit the screen in the window, or show it at full size">Actual size</button>
+    <button id="full" title="Full screen">Full screen</button>
+  </span>
+  <button id="endbtn" class="end" hidden>End session</button>
+</header>
+<main id="main" class="fit">
+  <form id="start">
+    <h2 style="margin:0 0 6px">Remote control <span id="h2host"></span></h2>
+    <p id="how" class="muted">Checking…</p>
+    <label for="reason">Reason <span class="muted small" id="reasonhint">(optional, shown to the user and kept in the log)</span></label>
+    <input type="text" id="reason" maxlength="200" autocomplete="off">
+    <label><input type="checkbox" id="viewonly"> View only (no mouse or keyboard)</label>
+    <p><button class="primary" id="go">Connect</button></p>
+    <p class="muted small">The PC shows a bar at the top of its screen for the whole session, with your name and an End button.
+      There's no clipboard or file transfer. Close this window or click End session to disconnect.</p>
+  </form>
+  <canvas id="screen" tabindex="0"></canvas>
+  <div id="msg" hidden></div>
+</main>
+<script src="/static/rc.js"></script>
+</body>
+</html>

@@ -61,8 +61,22 @@ jobs:
           python tests/test_wireless.py
           python tests/test_mac_tables.py
           python tests/test_performance.py
+          python tests/test_rcontrol.py
       - name: JavaScript syntax
-        run: node --check netinv/static/app.js
+        run: node --check netinv/static/app.js && node --check netinv/static/rc.js
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rcagent/go.mod
+          cache-dependency-path: rcagent/go.sum
+      - name: Remote control agent builds for Windows (vet)
+        working-directory: rcagent
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt"; exit 1; }
+          go vet ./... && go build -mod=readonly -trimpath -o /dev/null .
       - name: Agent inventory script matches the WinRM one
         run: python tools/gen_agent.py --check
 
@@ -92,6 +106,20 @@ jobs:
           .\installer\agent\build-agent.ps1 -Version $v
           .\installer\sign.ps1 "installer\output\NetInventory-Agent-$v.msi"
           Copy-Item "installer\output\NetInventory-Agent-$v.msi" installer\output\NetInventory-Agent.msi -Force
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rcagent/go.mod
+          cache-dependency-path: rcagent/go.sum
+      # The remote control agent (NetInventory Remote): Go service, signed exe and MSI, shipped with the server too.
+      - name: Build remote control agent MSI
+        continue-on-error: true      # never let the optional agent block the server release
+        shell: powershell
+        env:
+          CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
+          CODESIGN_PFX_PASSWORD: ${{ secrets.CODESIGN_PFX_PASSWORD }}
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim() + '.${{ github.run_number }}'
+          .\installer\remote\build-remote.ps1 -Version $v
       - name: Build installer
         shell: powershell
         env:
@@ -148,6 +176,7 @@ jobs:
           Copy-Item "$out\$($m.file)" "$out\NetInventory-Setup.exe"   # fixed name for downloading by hand
           $files = @("$out\$($m.file)", "$out\NetInventory-Setup.exe", "$out\latest.json")
           if (Test-Path "$out\NetInventory-Agent.msi") { $files += "$out\NetInventory-Agent.msi" } else { Write-Host "::warning::Agent MSI wasn't built; publishing without it." }
+          if (Test-Path "$out\NetInventory-Remote.msi") { $files += "$out\NetInventory-Remote.msi" } else { Write-Host "::warning::Remote control agent MSI wasn't built; publishing without it." }
           $notes = ("$env:NOTES" -split "`n")[0]; if (-not $notes) { $notes = 'Update' }
           gh release delete "lan-v$v" --repo $prod --yes --cleanup-tag 2>$null
           # Through a file: Windows PowerShell 5.1 doesn't escape double quotes in arguments to native programs, so a
