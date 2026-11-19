@@ -38,11 +38,27 @@ def config(db) -> dict:
     return {"site": get_setting(db, "jira:site"), "email": get_setting(db, "jira:email"),
             "token_set": bool(get_setting(db, "jira:token")), "project": get_setting(db, "jira:project"),
             "issue_type": get_setting(db, "jira:issue_type"),
-            "match_text": get_setting(db, "jira:match_text", "1") == "1"}
+            "match_text": get_setting(db, "jira:match_text", "1") == "1",
+            "mode": mode(db), "configured": configured(db), "enabled": enabled(db)}
+
+
+MODES = ("off", "test", "on")
+
+
+def mode(db) -> str:
+    """off: nothing talks to Jira. test: Settings can save and Test connection, but nothing shows on the computer,
+    user and alert pages and no issue can be created. on: everything. New installs start off."""
+    m = get_setting(db, "jira:mode") or "off"
+    return m if m in MODES else "off"
+
+
+def configured(db) -> bool:
+    return bool(get_setting(db, "jira:site") and get_setting(db, "jira:email") and get_setting(db, "jira:token"))
 
 
 def enabled(db) -> bool:
-    return bool(get_setting(db, "jira:site") and get_setting(db, "jira:email") and get_setting(db, "jira:token"))
+    """Jira shows on the pages and issues can be created."""
+    return mode(db) == "on" and configured(db)
 
 
 def clean_site(site: str | None) -> str | None:
@@ -66,9 +82,13 @@ def save(db, body: dict) -> None:
     project = (body.get("project") or "").strip().upper() or None
     if project and not PROJECT_RE.match(project):
         raise ValueError("The default project must be a Jira project key, like IT or HELP")
+    m = (body.get("mode") or mode(db)).strip().lower()
+    if m not in MODES:
+        raise ValueError("Jira mode must be off, test or on")
     itype = (body.get("issue_type") or "").strip() or None
     if itype and len(itype) > 100:
         raise ValueError("Issue type name is too long")
+    set_setting(db, "jira:mode", m)
     set_setting(db, "jira:site", site)
     set_setting(db, "jira:email", email)
     set_setting(db, "jira:project", project)
@@ -83,6 +103,10 @@ def save(db, body: dict) -> None:
 
 # ------------------------------------------------------------------ HTTP
 def _call(db, method: str, path: str, body: dict | None = None, query: dict | None = None):
+    if mode(db) == "off":
+        raise JiraError("Jira is turned off. Set it to Test only or On in Settings > Jira.")
+    if method != "GET" and not path.startswith("/rest/api/3/search") and mode(db) != "on":   # test mode only reads; it can never create anything
+        raise JiraError("Jira is in Test only mode, so nothing is created. Set it to On in Settings > Jira to create issues.")
     site, email, tok = get_setting(db, "jira:site"), get_setting(db, "jira:email"), get_setting(db, "jira:token")
     if not (site and email and tok):
         raise JiraError("Jira isn't set up yet. Add the site, account and API token in Settings > Jira.")
