@@ -82,6 +82,42 @@ const lastActive = (v, r) => {
     : days >= 30 ? `<span class="pill mute" title="No link for 30 days or more">unused 30+ days</span> ` : "";
   return `${tag}${esc(fmtDate(v))} <span class="muted">${agoUtc(v)}</span>`;
 };
+// Maker of a network card, from the first half of its MAC: a short built-in list of the makers of things often found
+// on access ports with no computer record (phones, printers, cameras, NAS, IoT, VMs). Random MACs are flagged.
+const OUI = {};
+Object.entries({
+  VMware: "000c29 005056 000569", "Hyper-V VM": "00155d", VirtualBox: "080027", "QEMU/KVM VM": "525400",
+  "Raspberry Pi": "b827eb dca632 e45f01 d83add 28cdc1", Ubiquiti: "24a43c 44d9e7 788a20 b4fbe4 f09fc2 fcecda 802aa8 dc9fdb",
+  Polycom: "0004f2 64167f", Yealink: "001565 805ec0", Grandstream: "000b82", Snom: "000413", Mitel: "08000f",
+  Brother: "008077 30055c 3c2af4", Xerox: "0000aa", Lexmark: "000400 0021b7", Canon: "000085", Kyocera: "00c0ee", Zebra: "00074d",
+  Axis: "00408c accc8e b8a44f", Synology: "001132", QNAP: "245ebe 00089b", APC: "00c0b7", Sonos: "000e58",
+  Espressif: "240ac4", Nest: "18b430", Meraki: "00180a", Aruba: "000b86 24dec6", Realtek: "00e04c",
+  Dell: "001422 b8ac6f f8b156 1866da d4bed9 002170",
+}).forEach(([vendor, list]) => list.split(" ").forEach((o) => (OUI[o] = vendor)));
+const macVendor = (mac) => {
+  const h = String(mac || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (h.length < 6) return "";
+  return OUI[h.slice(0, 6)] || (parseInt(h[1], 16) & 2 ? "random MAC" : "");
+};
+const macCell = (v) => (v ? `${esc(v)}${macVendor(v) ? ` <span class="small muted">${esc(macVendor(v))}</span>` : ""}` : "");
+// What is plugged into a port, best name first: the computer, else the name the device gave DHCP, else its IP, else its MAC.
+const devLabel = (d) => d.hostname || d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac;
+const devCell = (d) => {
+  const vendor = macVendor(d.mac);
+  const tip = [d.mac, vendor, d.ip || d.dhcp_ip].filter(Boolean).join(" · ");
+  if (d.hostname) return `<span title="${esc(tip)}">${hostLink(d.hostname)}</span>`;
+  if (d.device_kind) return `<span title="${esc(tip)}">${kindPill(d.device_kind)} ${esc(d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac)}</span>`;
+  const name = d.dhcp_name || d.ip || d.dhcp_ip;
+  return `<span title="${esc(tip)}">${name ? esc(name) : `<code>${esc(d.mac)}</code>`}${vendor ? ` <span class="small muted">${esc(vendor)}</span>` : ""}</span>`;
+};
+// phones first (the PC is usually plugged in behind it), then computers, then the rest
+const DEV_ORDER = (d) => (d.device_kind && d.device_kind !== "computer" ? 0 : d.hostname ? 1 : 2);
+const pluggedIn = (v, r) => {
+  const devs = r._devs || [];
+  if (r.port_type === "uplink") return devs.length ? `<span class="small muted">${devs.length} MACs (uplink)</span>` : "";
+  const shown = devs.slice(0, 4).map(devCell).join("<br>");
+  return devs.length > 4 ? `${shown}<br><span class="small muted">+${devs.length - 4} more</span>` : shown;
+};
 const hostList = (v) => (v ? String(v).split(", ").map(hostLink).join(" ") : "");
 async function openPort(swip, port) {
   let d;
@@ -102,8 +138,9 @@ async function openPort(swip, port) {
   $("#detail .panel").querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
   table($("#pmacs"), d.macs, ["mac", "hostname", "ip", "vlan", "device_kind", "now_on", "last_seen"], {
     labels: { device_kind: "is", now_on: "now on" },
-    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? "" : `<span class="pill mute">unknown</span>`),
-      device_kind: kindPill } });
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.dhcp_name ? `${esc(r.dhcp_name)} <span class="small muted">DHCP name</span>`
+        : r.device_kind ? "" : `<span class="pill mute">unknown</span>`),
+      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, device_kind: kindPill } });
 }
 document.addEventListener("click", (e) => {
   const a = e.target.closest("[data-swport]");
@@ -2074,15 +2111,24 @@ function formModal(html, wide = false, init = null) {
 
 // ------------------------------------------------------------ port map / network
 loaders.portmap = async () => {
-  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
+  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
   table($("#pmtable"), r.rows, ["switch_name", "port", "port_alias", "vlan", "hostname", "phone", "ip", "mac", "last_seen"], { filterEl: $("#pmfilter"),
     labels: { phone: "behind phone" },
-    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind) : hostLink(v)),
-      port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind)
+        : r.dhcp_name ? `${esc(r.dhcp_name)} <span class="small muted">DHCP name</span>` : hostLink(v)),
+      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
 };
 loaders.network = async () => {
   const [dc, nd, sp] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
     post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 })]);
+  // every MAC on an access port, grouped onto its port, so each port shows what is plugged into it
+  const pm = await post("/api/query", { dataset: "v_port_map", fields: ["switch_ip", "port", "mac", "hostname", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name"], limit: 200000 });
+  const byPort = {};
+  pm.rows.forEach((d) => (byPort[`${d.switch_ip}|${d.port}`] ||= []).push(d));
+  sp.rows.forEach((r) => {
+    r._devs = (byPort[`${r.switch_ip}|${r.port}`] || []).sort((a, b) => DEV_ORDER(a) - DEV_ORDER(b));
+    r.plugged_in = r._devs.map((d) => [devLabel(d), d.mac, macVendor(d.mac)].join(" ")).join(" ");   // for the filter box
+  });
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
   // Clicking a switch (or picking it in the drop-down) shows only that switch's ports.
   const sel = $("#spswitch");
@@ -2094,12 +2140,11 @@ loaders.network = async () => {
     const ip = sel.value;
     $("#spall").hidden = !ip;
     table($("#sptable"), ip ? sp.rows.filter((r) => r.switch_ip === ip) : sp.rows,
-      ["switch_name", "port", "alias", "status", "last_active", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
+      ["switch_name", "port", "alias", "status", "last_active", "plugged_in", "speed_mbps", "vlan", "port_type", "neighbor"],
       { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
-        labels: { last_active: "last active", port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+        labels: { last_active: "last active", plugged_in: "plugged in", port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
         cell: { status: portStatus, last_active: lastActive,
-          port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
-          unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
+          port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, plugged_in: pluggedIn } });
   };
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;

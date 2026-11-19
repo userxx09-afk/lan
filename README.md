@@ -454,6 +454,11 @@ saw the port up, and the newest MAC learned on it, so ports polled before 0.33 g
 next scan. A port that has been down since the switch restarted, with nothing seen on it before, shows *not since switch
 restart*. The *Switch ports down* report lists them oldest first.
 
+**Plugged in** lists what is on each access port, best name first: the computer (linked), else the name the device
+asked DHCP for, else its IP (switch/router ARP table or DHCP lease), else just its MAC. A phone is listed first with
+the PC behind it underneath. MACs show their maker where it is in a short built-in list (phones, printers, cameras,
+NAS, Raspberry Pi, VMs...) or *random MAC* for a privacy address; hover a device for its MAC and IP.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it

@@ -204,6 +204,13 @@ def seed(db) -> str:
         db.flush()
         db.add(MacSighting(mac=vendor_mac, port_id=port.id, vlan=20, last_seen=now))
         db.add(ArpEntry(ip=ip, mac=vendor_mac, source="core-sw01", last_seen=now))
+        if j == 0:          # the printer asked DHCP for a name
+            db.add(IpSighting(ip=ip, hostname="BRN3C2AF4112233", mac=vendor_mac, source="dhcp:DC01", first_seen=now, last_seen=now))
+    # something with no IP or name at all: only its MAC is known
+    odd = SwitchPort(switch=access[2], ifindex=210, name="1/1/44", alias="Lab bench", oper_up=True, speed_mbps=100, mac_count=1)
+    db.add(odd)
+    db.flush()
+    db.add(MacSighting(mac="b8:27:eb:12:34:56", port_id=odd.id, vlan=30, last_seen=now))
     # A ceiling access point: its wireless clients are learned on its port, which is an uplink
     ap = SwitchPort(switch=access[1], ifindex=300, name="1/1/45", alias="AP lobby", oper_up=True, speed_mbps=2500, mac_count=9,
                     neighbor="ap-lobby-01", neighbor_port="eth0", neighbor_kind="ap", neighbor_ip="10.0.5.21",

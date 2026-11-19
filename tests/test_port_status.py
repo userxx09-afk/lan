@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 import netinv.main as m
 from netinv.collectors import snmp
-from netinv.db import MacSighting, NetworkDevice, SessionLocal, SwitchPort, utcnow
+from netinv.db import IpSighting, MacSighting, NetworkDevice, SessionLocal, SwitchPort, utcnow
 
 now = utcnow()
 day = 8_640_000                     # one day in TimeTicks (1/100 s)
@@ -64,4 +64,15 @@ with TestClient(m.app) as c:
     assert sorted(x["status"] for x in demo) == ["disabled", "down", "down", "down", "down"], demo
     rep = [x for x in c.get("/api/library").json() if x["id"] == "net_ports_down"]
     assert rep and c.get("/api/library/net_ports_down").status_code == 200
+    # what is plugged in where there is no computer record: the DHCP name and IP, else only the MAC
+    with SessionLocal() as db:
+        if not db.scalar(select(IpSighting).where(IpSighting.mac == "02:ee:00:00:00:01")):
+            db.add(IpSighting(ip="10.77.9.9", hostname="PRN-LOBBY", mac="02:ee:00:00:00:01", source="dhcp:DC1", first_seen=now, last_seen=now))
+            db.commit()
+    pm = {x["mac"]: x for x in c.post("/api/query", json={"dataset": "v_port_map", "limit": 100000,
+          "filters": [{"field": "switch_ip", "op": "eq", "value": "10.77.0.252"}]}).json()["rows"]}
+    assert pm["02:ee:00:00:00:01"]["dhcp_name"] == "PRN-LOBBY" and pm["02:ee:00:00:00:01"]["dhcp_ip"] == "10.77.9.9", pm
+    assert not pm["02:ee:00:00:00:03"]["dhcp_name"] and not pm["02:ee:00:00:00:03"]["ip"] and not pm["02:ee:00:00:00:03"]["hostname"]
+    r = c.get("/api/switch-port", params={"switch_ip": "10.77.0.252", "port": "1/1/1"}).json()["macs"]
+    assert r[0]["dhcp_name"] == "PRN-LOBBY" and r[0]["dhcp_ip"] == "10.77.9.9", r
 print("switch port status: up/down/disabled, last active from link changes and MAC history OK")

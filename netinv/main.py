@@ -352,6 +352,10 @@ def switch_port(switch_ip: str, port: str, db=Depends(db_session)):
                {MAC_OWNER_HOST} AS hostname, {MAC_OWNER_VIA} AS matched_by,
                (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
                CASE WHEN ms.mac = sp.neighbor_mac THEN sp.neighbor_kind END AS device_kind,
+               (SELECT s.ip FROM ip_sightings s WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%'
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
+               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name,
                (SELECT pm.switch_name || ' ' || pm.port FROM v_port_map pm WHERE pm.mac = ms.mac
                   AND NOT (pm.switch_ip = nd.ip AND pm.port = sp.name)) AS now_on
         FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id JOIN network_devices nd ON nd.id = sp.switch_id

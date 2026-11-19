@@ -29,7 +29,12 @@ VIEWS: dict[str, str] = {
         SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip,
                hostname, matched_by,
                CASE WHEN hostname IS NOT NULL THEN 'computer' WHEN mac = neighbor_mac THEN neighbor_kind END AS device_kind,
-               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone
+               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone,
+               -- for MACs that are not one of our computers: the DHCP lease's IP and the name the device asked for
+               (SELECT s.ip FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%'
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
+               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name
         FROM (
           SELECT ms.mac, nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port,
                  sp.alias AS port_alias, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.last_seen, ms.first_seen,
