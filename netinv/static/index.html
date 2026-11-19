@@ -6,7 +6,7 @@
 <title>NetInventory</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="nojira">
 <header>
   <div class="brand">NetInventory <a id="updbadge" class="pill warn small" hidden>Update available</a>
     <a id="scanind" class="pill small scanind" hidden title="Open the Scanning view"><span class="spinner tiny"></span><span id="scanindtext">Scanning</span></a></div>
@@ -132,8 +132,8 @@
         <button class="act" id="pcshot">Screenshot of the user's screen</button>
         <h3>Report</h3>
         <button class="act" id="pcaudit">Audit report (printable)</button>
-        <h3>Jira</h3>
-        <button class="act" id="pcjira">Create Jira issue</button>
+        <h3 class="jira-ui">Jira</h3>
+        <button class="act jira-ui" id="pcjira">Create Jira issue</button>
       </aside>
       <div class="assetmain">
         <div id="assettitle"></div>
@@ -164,7 +164,7 @@
           <button data-atab="deployments">Deployments<i></i></button>
           <button data-atab="history">History<i></i></button>
           <button data-atab="comments">Comments<i></i></button>
-          <button data-atab="jira">Jira<i></i></button>
+          <button data-atab="jira" class="jira-ui">Jira<i></i></button>
         </nav>
         <div id="assetbody"></div>
       </div>
@@ -235,8 +235,8 @@
         <h3>Copy</h3>
         <button class="act" data-uact="copy_email">Copy e-mail address</button>
         <button class="act" data-uact="copy_dn">Copy distinguished name</button>
-        <h3>Jira</h3>
-        <button class="act" id="userjira">Create Jira issue</button>
+        <h3 class="jira-ui">Jira</h3>
+        <button class="act jira-ui" id="userjira">Create Jira issue</button>
       </aside>
       <div class="assetmain">
         <div id="usertitle"></div>
@@ -246,7 +246,7 @@
           <button data-utab="groups">Groups<i></i></button>
           <button data-utab="logons">Logons<i></i></button>
           <button data-utab="audit">Audit<i></i></button>
-          <button data-utab="jira">Jira<i></i></button>
+          <button data-utab="jira" class="jira-ui">Jira<i></i></button>
         </nav>
         <div id="userbody"></div>
       </div>
@@ -335,8 +335,13 @@
         <p class="muted">Create Jira issues from a computer, a user or an alert, and see the issues related to each one on its Jira tab.
           Use a Jira account's e-mail and an API token (<a class="link" href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener">id.atlassian.com &gt; Security &gt; API tokens</a>);
           a dedicated service account with access to the right projects works best. The token is encrypted on this server and never shown again.
-          Nothing is sent to Jira until someone clicks Create, and only inventory facts go in, never passwords or recovery keys.</p>
+          Start in Test only to save the settings and check them with Test connection; issues can only be created once it's On, and only inventory facts go in, never passwords or recovery keys.</p>
         <form id="jiraform" class="lifeform">
+          <label>Mode <select name="mode">
+            <option value="off">Off: nothing talks to Jira</option>
+            <option value="test">Test only: save the settings and test the connection, no issues are created</option>
+            <option value="on">On: Jira tabs and Create Jira issue on computers, users and alerts</option></select></label>
+          <p class="muted small">Until it's On, nothing about Jira shows on the computer, user or alert pages.</p>
           <label>Jira site <input name="site" placeholder="https://yourcompany.atlassian.net"></label>
           <label>Account e-mail <input name="email" autocomplete="off" placeholder="svc-netinventory@example.org"></label>
           <label>API token <input name="token" type="password" autocomplete="new-password" placeholder="blank = keep the saved token"></label>

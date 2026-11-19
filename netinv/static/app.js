@@ -244,7 +244,7 @@ async function openAlert(id) {
     $("#alhosts").onclick = () => { $("#drawer").hidden = true; showComputers([{ field: "hostname", op: "in", value: hosts }], a.title); };
   }
   $("#altable").querySelectorAll("[data-host]").forEach((x) => x.onclick = () => { $("#drawer").hidden = true; openDevice(x.dataset.host); });
-  if (a.rows.length) {
+  if (a.rows.length && jiraOn) {
     $("#altable").insertAdjacentHTML("beforebegin", `<p><button class="ghost" id="aljira">Create Jira issue for this alert</button></p>`);
     $("#aljira").onclick = () => jiraDialog("alert", id);
   }
@@ -3003,6 +3003,12 @@ $("#grpnew").onclick = () => editGroup();
 
 // ------------------------------------------------------------ Jira
 const JIRA_CAT = { new: "mute", indeterminate: "warn", done: "good" };
+let jiraOn = false;    // Jira shows on the pages only once Settings > Jira is On and set up
+function jiraUi(on) {
+  jiraOn = !!on;
+  document.body.classList.toggle("nojira", !jiraOn);
+}
+api("/api/jira/settings").then((c) => jiraUi(c.enabled)).catch(() => jiraUi(false));
 async function jiraTypes(select, project, want) {
   if (!project) return;
   try {
@@ -3014,7 +3020,7 @@ async function jiraTypes(select, project, want) {
 async function jiraDialog(kind, ref) {
   let d;
   try { d = await api(`/api/jira/draft?kind=${kind}&ref=${encodeURIComponent(ref)}`); } catch (e) { return toast(errText(e), true); }
-  if (!d.enabled) return toast("Jira isn't set up yet: add the site, account and API token in Settings > Jira.", true);
+  if (!d.enabled) return toast("Jira isn't turned on. Set it up and choose On in Settings > Jira.", true);
   const f = await formModal(`<h3>Create Jira issue</h3>
     <p class="hint">Labels ${d.labels.map((l) => `<code>${esc(l)}</code>`).join(" ")} and a link back to NetInventory are added, so it shows on the Jira tab.</p>
     <label>Project <input name="project" value="${esc(d.project || "")}" placeholder="project key, like IT" required></label>
@@ -3041,7 +3047,7 @@ async function jiraTab(el, kind, ref) {
   let r;
   try { r = await api(`/api/jira/related?kind=${kind}&ref=${encodeURIComponent(ref)}`); } catch (e) { return toolErr(el, e); }
   if (!r.enabled) {
-    el.innerHTML = `<p class="muted">Jira isn't set up yet. Add the site, account and API token in <a class="link" id="jiraset">Settings &gt; Jira</a>.</p>`;
+    el.innerHTML = `<p class="muted">Jira is off. It can be turned on in <a class="link" id="jiraset">Settings &gt; Jira</a>.</p>`;
     $("#jiraset").onclick = () => showTab("settings");
     return;
   }
@@ -3060,14 +3066,18 @@ async function jiraTab(el, kind, ref) {
 async function loadJira() {
   const c = await api("/api/jira/settings"), f = $("#jiraform");
   f.site.value = c.site || ""; f.email.value = c.email || ""; f.token.value = ""; f.project.value = c.project || "";
-  f.match_text.checked = c.match_text;
+  f.match_text.checked = c.match_text; f.mode.value = c.mode;
+  jiraUi(c.enabled);
   f.issue_type.innerHTML = `<option value="">Task</option>${c.issue_type ? `<option selected>${esc(c.issue_type)}</option>` : ""}`;
   $("#jiraclear").hidden = !c.token_set;
-  $("#jirastate").innerHTML = kvRow("Status", c.site && c.email && c.token_set ? `<span class="pill good">set up</span> ${esc(c.site)} as ${esc(c.email)}`
-    : `<span class="pill mute">off</span> needs the site, an account e-mail and an API token`);
+  const who = c.configured ? ` ${esc(c.site)} as ${esc(c.email)}` : "";
+  $("#jirastate").innerHTML = kvRow("Status", c.mode === "off" ? `<span class="pill mute">off</span>${who}`
+    : !c.configured ? `<span class="pill warn">${c.mode === "test" ? "test only" : "on"}</span> needs the site, an account e-mail and an API token`
+    : c.mode === "test" ? `<span class="pill warn">test only</span>${who}, no issues are created and nothing shows on the pages`
+    : `<span class="pill good">on</span>${who}`);
   if (c.token_set && c.project) jiraTypes(f.issue_type, c.project, c.issue_type);
 }
-const jiraBody = (f) => ({ site: f.site.value, email: f.email.value, token: f.token.value || null, project: f.project.value,
+const jiraBody = (f) => ({ mode: f.mode.value, site: f.site.value, email: f.email.value, token: f.token.value || null, project: f.project.value,
   issue_type: f.issue_type.value, match_text: f.match_text.checked });
 $("#jiraform").onsubmit = async (e) => {
   e.preventDefault();
