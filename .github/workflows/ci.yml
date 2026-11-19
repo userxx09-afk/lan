@@ -63,6 +63,7 @@ jobs:
           python tests/test_performance.py
           python tests/test_rcontrol.py
           python tests/test_last_user_name.py
+          python tests/test_dameware_kit.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js && node --check netinv/static/rc.js
       - uses: actions/setup-go@v5
@@ -94,7 +95,7 @@ jobs:
         env:
           CODESIGN_PFX_BASE64: ${{ secrets.CODESIGN_PFX_BASE64 }}
           CODESIGN_PFX_PASSWORD: ${{ secrets.CODESIGN_PFX_PASSWORD }}
-        run: .\installer\sign.ps1 netinv\agent\*.ps1 agent\*.ps1
+        run: .\installer\sign.ps1 netinv\agent\*.ps1 agent\*.ps1 netinv\dameware\*.ps1
       # Built before the server installer, which ships it so the server can serve and push it.
       - name: Build agent MSI
         continue-on-error: true      # never let the optional agent block the server release
@@ -135,7 +136,7 @@ jobs:
         shell: powershell
         run: |
           $bad = 0
-          foreach ($f in @(Get-ChildItem netinv\agent\*.ps1) + @(Get-ChildItem installer\scripts\*.ps1)) {
+          foreach ($f in @(Get-ChildItem netinv\agent\*.ps1) + @(Get-ChildItem installer\scripts\*.ps1) + @(Get-ChildItem netinv\dameware\*.ps1)) {
             $err = $null; [void][Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$err)
             if ($err) { $bad++; $err | ForEach-Object { Write-Host "::error file=$($f.Name)::$($_.Message) (line $($_.Extent.StartLineNumber))" } }
           }

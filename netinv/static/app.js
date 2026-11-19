@@ -2388,6 +2388,10 @@ loaders.settings = async () => {
   $("#targettable").querySelectorAll("[data-tscan]").forEach((a) => a.onclick = async () => { await post(`/api/targets/${a.dataset.tscan}/scan`, {}); toast("Scan started."); setTimeout(pollStatus, 500); });
   loadJobs(t);
   $("#dwform").dameware_mode.value = s.dameware_mode;
+  api("/api/dameware/kit").then((k) => {
+    $("#dwsfx").textContent = k.suffixes.length ? `The zip lets full names in ${k.suffixes.map((x) => "." + x).join(", ")} through as well as short names and private IPs.`
+      : "No DNS domain is known yet, so the launcher accepts short names (like WS-031) and private IPs only.";
+  }).catch(() => {});
 };
 const kick = () => document.querySelector(".modal [name=kind]")?.dispatchEvent(new Event("change", { bubbles: true }));
 async function editCred(x = {}) {
