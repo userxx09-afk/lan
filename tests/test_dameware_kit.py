@@ -30,7 +30,8 @@ with TestClient(m.app) as c:
     assert c.get("/api/dameware/files/..%2Fmain.py").status_code == 404
     assert c.get("/api/dameware/files/config.toml").status_code == 404
     reg = c.get("/api/dameware/files/dameware-handler.reg").text
-    assert '\n"DameWareAllowedSuffixes"=".corp.example.com' in reg, reg       # filled in, uncommented
+    line = next(l for l in reg.splitlines() if "DameWareAllowedSuffixes" in l)
+    assert line.startswith('"DameWareAllowedSuffixes"="') and ".corp.example.com" in line, reg       # filled in, uncommented
 
     r = c.get("/api/dameware/kit.zip")
     assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
