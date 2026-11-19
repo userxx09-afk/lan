@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
+    Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -110,7 +110,7 @@ class DeviceNic(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
     mac: Mapped[str] = mapped_column(String(17), index=True)
-    ip: Mapped[str | None] = mapped_column(String(64))
+    ip: Mapped[str | None] = mapped_column(String(64), index=True)
     description: Mapped[str | None] = mapped_column(String(255))
     device: Mapped[Device] = relationship(back_populates="nics")
 
@@ -199,7 +199,12 @@ class DomainController(Base):
 class LogonEvent(Base):
     """Raw interactive / remote logons (4624) pulled from DC or workstation Security logs."""
     __tablename__ = "logon_events"
-    __table_args__ = (UniqueConstraint("source", "username", "time", "ip", "logon_type"),)
+    __table_args__ = (UniqueConstraint("source", "username", "time", "ip", "logon_type"),
+                      # last user of a PC / last PC of a user without grouping every logon (v_devices, v_users)
+                      Index("ix_logon_host_time", "hostname", "time"),
+                      Index("ix_logon_user_time", "username", "time"),
+                      Index("ix_logon_user_host", "username", "hostname"),
+                      Index("ix_logon_ip_time", "ip", "time"))
     id: Mapped[int] = mapped_column(primary_key=True)
     time: Mapped[datetime] = mapped_column(DateTime, index=True)
     username: Mapped[str] = mapped_column(String(128), index=True)
@@ -218,7 +223,9 @@ class IpSighting(Base):
     DHCP leases and the DHCP audit log (source dhcp:<server>) and DNS A/AAAA lookups of AD computers (dns).
     first_seen..last_seen is when the binding held (for the DHCP audit log: the first grant to the last renewal)."""
     __tablename__ = "ip_sightings"
-    __table_args__ = (UniqueConstraint("ip", "hostname", "source"),)
+    __table_args__ = (UniqueConstraint("ip", "hostname", "source"),
+                      Index("ix_ipsight_host_src", "hostname", "source", "last_seen"),
+                      Index("ix_ipsight_mac_src", "mac", "source", "last_seen"))
     id: Mapped[int] = mapped_column(primary_key=True)
     ip: Mapped[str] = mapped_column(String(64), index=True)
     hostname: Mapped[str | None] = mapped_column(String(64), index=True)
@@ -279,7 +286,8 @@ class SwitchPort(Base):
 class MacSighting(Base):
     """A MAC address seen in a switch forwarding table on a given port."""
     __tablename__ = "mac_sightings"
-    __table_args__ = (UniqueConstraint("mac", "port_id"),)
+    __table_args__ = (UniqueConstraint("mac", "port_id"), Index("ix_macsight_mac_seen", "mac", "last_seen"),
+                      Index("ix_macsight_seen", "last_seen"))
     id: Mapped[int] = mapped_column(primary_key=True)
     mac: Mapped[str] = mapped_column(String(17), index=True)
     port_id: Mapped[int] = mapped_column(ForeignKey("switch_ports.id", ondelete="CASCADE"), index=True)
@@ -327,19 +335,42 @@ class WifiSighting(Base):
 class ArpEntry(Base):
     """IP-to-MAC bindings from router / L3 switch ARP tables."""
     __tablename__ = "arp_entries"
-    __table_args__ = (UniqueConstraint("ip", "mac"),)
+    __table_args__ = (UniqueConstraint("ip", "mac"), Index("ix_arp_mac_seen", "mac", "last_seen"))
     id: Mapped[int] = mapped_column(primary_key=True)
     ip: Mapped[str] = mapped_column(String(64), index=True)
     mac: Mapped[str] = mapped_column(String(17), index=True)
     source: Mapped[str | None] = mapped_column(String(64))
-    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class PortMapRow(Base):
+    """Where each MAC is plugged in now: v_port_map's rows, worked out by portmap.refresh() from the MAC tables, NICs and
+    DHCP leases whenever those change. Kept as a table because computing it means ranking every MAC sighting, which is
+    far too slow to redo inside every Computers-list, switch-port and dashboard query."""
+    __tablename__ = "port_map"
+    __table_args__ = (Index("ix_portmap_host_seen", "hostname", "last_seen"), Index("ix_portmap_port", "switch_ip", "port"))
+    mac: Mapped[str] = mapped_column(String(17), primary_key=True)
+    switch_name: Mapped[str | None] = mapped_column(String(255))
+    switch_ip: Mapped[str | None] = mapped_column(String(64))
+    port: Mapped[str | None] = mapped_column(String(64))
+    port_alias: Mapped[str | None] = mapped_column(String(255))
+    vlan: Mapped[int | None] = mapped_column(Integer)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    hostname: Mapped[str | None] = mapped_column(String(64))
+    matched_by: Mapped[str | None] = mapped_column(String(16))
+    device_kind: Mapped[str | None] = mapped_column(String(16))
+    phone: Mapped[str | None] = mapped_column(String(255))
+    dhcp_ip: Mapped[str | None] = mapped_column(String(64))
+    dhcp_name: Mapped[str | None] = mapped_column(String(64))
 
 
 class CollectorRun(Base):
     __tablename__ = "collector_runs"
     id: Mapped[int] = mapped_column(primary_key=True)
     collector: Mapped[str] = mapped_column(String(32))
-    started: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     finished: Mapped[datetime | None] = mapped_column(DateTime)
     ok: Mapped[bool | None] = mapped_column(Boolean)
     message: Mapped[str | None] = mapped_column(Text)
@@ -415,6 +446,7 @@ class Comment(Base):
 class ChangeEvent(Base):
     """What changed on a device between scans (software added/removed, OS build, RAM, port moves...)."""
     __tablename__ = "change_events"
+    __table_args__ = (Index("ix_change_dev_time", "device_id", "time"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     device_id: Mapped[int] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
     time: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
@@ -539,7 +571,7 @@ class Deployment(Base):
     __tablename__ = "deployments"
     id: Mapped[int] = mapped_column(primary_key=True)
     hostname: Mapped[str] = mapped_column(String(64), index=True)
-    action: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(32), index=True)
     value: Mapped[str | None] = mapped_column(String(255))          # winget package id, service, reboot timing
     label: Mapped[str] = mapped_column(String(255))
     who: Mapped[str | None] = mapped_column(String(64))
@@ -654,11 +686,16 @@ SessionLocal = sessionmaker(expire_on_commit=False)
 
 def init_db(url: str) -> None:
     global _engine
-    kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {}
+    if url.startswith("sqlite"):
+        kwargs = {"connect_args": {"check_same_thread": False}}
+    else:
+        # A small pool: the server runs in one process, and every idle Postgres connection costs memory on both sides.
+        kwargs = {"pool_size": 5, "max_overflow": 10, "pool_recycle": 1800, "pool_pre_ping": True}
     _engine = create_engine(url, **kwargs)
     SessionLocal.configure(bind=_engine)
     Base.metadata.create_all(_engine)
     _add_missing_columns()
+    _add_missing_indexes()
 
 
 def _add_missing_columns() -> None:
@@ -672,3 +709,17 @@ def _add_missing_columns() -> None:
                 if col.name not in existing:
                     ddl = col.type.compile(dialect=_engine.dialect)
                     conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}'))
+
+
+def _add_missing_indexes() -> None:
+    """create_all() only makes indexes for new tables: add the ones newer versions declared on existing tables.
+    The first start after an upgrade builds them (a few seconds on a large logon table)."""
+    import logging
+    from sqlalchemy import inspect as sa_inspect
+    insp = sa_inspect(_engine)
+    for table in Base.metadata.sorted_tables:
+        have = {i["name"] for i in insp.get_indexes(table.name)}
+        for idx in table.indexes:
+            if idx.name not in have:
+                logging.getLogger(__name__).info("adding index %s on %s", idx.name, table.name)
+                idx.create(_engine, checkfirst=True)

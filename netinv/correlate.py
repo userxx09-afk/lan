@@ -25,28 +25,13 @@ VIEWS: dict[str, str] = {
     """,
     # Where each MAC physically is: latest sighting on an edge (non-uplink) port. matched_by says how the MAC was
     # tied to the computer; device_kind is 'computer', or 'phone' etc. when the MAC is the port's LLDP/CDP neighbour.
+    # Where each MAC physically is: latest sighting on an edge (non-uplink) port. matched_by says how the MAC was
+    # tied to the computer; device_kind is 'computer', or 'phone' etc. when the MAC is the port's LLDP/CDP neighbour.
+    # Read from the port_map table, which portmap.refresh() fills from PORT_MAP_LIVE whenever the inputs change.
     "v_port_map": """
-        SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip,
-               hostname, matched_by,
-               CASE WHEN hostname IS NOT NULL THEN 'computer' WHEN mac = neighbor_mac THEN neighbor_kind END AS device_kind,
-               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone,
-               -- for MACs that are not one of our computers: the DHCP lease's IP and the name the device asked for
-               (SELECT s.ip FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%'
-                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
-               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
-                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name
-        FROM (
-          SELECT ms.mac, nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port,
-                 sp.alias AS port_alias, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.last_seen, ms.first_seen,
-                 sp.neighbor, sp.neighbor_kind, sp.neighbor_mac,
-                 (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
-                 MAC_OWNER_HOST_ AS hostname, MAC_OWNER_VIA_ AS matched_by,
-                 ROW_NUMBER() OVER (PARTITION BY ms.mac ORDER BY ms.last_seen DESC, sp.mac_count ASC) AS rn
-          FROM mac_sightings ms
-          JOIN switch_ports sp ON sp.id = ms.port_id
-          JOIN network_devices nd ON nd.id = sp.switch_id
-          WHERE sp.is_uplink = FALSE
-        ) x WHERE rn = 1
+        SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip, hostname, matched_by,
+               device_kind, phone, dhcp_ip, dhcp_name
+        FROM port_map
     """,
     "v_user_devices": """
         SELECT username, hostname, MAX(time) AS last_logon, MIN(time) AS first_logon, COUNT(*) AS logon_count
@@ -94,10 +79,10 @@ VIEWS: dict[str, str] = {
                   AND (n2.ip = sp.neighbor_ip OR LOWER(n2.sysname) = LOWER(sp.neighbor)
                        OR LOWER(sp.neighbor) LIKE LOWER(n2.sysname) || '.%' OR LOWER(sp.neighbor) LIKE LOWER(n2.sysname) || '(%')
                 LIMIT 1) AS neighbor_switch_ip,
-               (SELECT COUNT(*) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name) AS devices_on_port,
-               (SELECT STRING_AGG_(pm.hostname) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
+               (SELECT COUNT(*) FROM port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name) AS devices_on_port,
+               (SELECT STRING_AGG_(pm.hostname) FROM port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
                   AND pm.hostname IS NOT NULL) AS computers,
-               (SELECT COUNT(*) FROM v_port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
+               (SELECT COUNT(*) FROM port_map pm WHERE pm.switch_ip = nd.ip AND pm.port = sp.name
                   AND pm.hostname IS NULL AND pm.device_kind IS NULL) AS unknown_devices
         FROM switch_ports sp JOIN network_devices nd ON nd.id = sp.switch_id
     """,
@@ -118,9 +103,10 @@ VIEWS: dict[str, str] = {
                d.manufacturer, d.model, d.serial, d.cpu, d.ram_gb,
                d.ad_enabled, d.ad_last_logon, d.ad_created, d.ad_dn,
                d.current_user, d.connection, d.wifi_ssid, d.wifi_ap, d.wifi_seen, d.wifi_signal, d.wifi_bssid,
-               (SELECT ud.username FROM v_user_devices ud WHERE ud.hostname = d.hostname
-                 ORDER BY ud.last_logon DESC LIMIT 1) AS last_user,
-               (SELECT MAX(ud.last_logon) FROM v_user_devices ud WHERE ud.hostname = d.hostname) AS last_user_logon,
+               -- straight from logon_events by (hostname, time): grouping every logon per PC is far too slow
+               (SELECT l.username FROM logon_events l WHERE l.hostname = d.hostname
+                 ORDER BY l.time DESC LIMIT 1) AS last_user,
+               (SELECT MAX(l.time) FROM logon_events l WHERE l.hostname = d.hostname) AS last_user_logon,
                d.last_boot, d.pending_updates, d.pending_reboot, d.last_patch_installed,
                (SELECT MIN(k.pct_free) FROM v_disks k WHERE k.hostname = d.hostname) AS min_disk_pct_free,
                (SELECT k.free_gb FROM v_disks k WHERE k.hostname = d.hostname AND k.drive = 'C:') AS c_free_gb,
@@ -137,20 +123,19 @@ VIEWS: dict[str, str] = {
                     WHEN EXISTS (SELECT 1 FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source LIKE 'dhcp:%') THEN 'DHCP'
                     WHEN EXISTS (SELECT 1 FROM ip_sightings s WHERE s.hostname = d.hostname AND s.source = 'dns') THEN 'DNS'
                     END AS ip_source,
-               (SELECT pm.switch_name FROM v_port_map pm WHERE pm.hostname = d.hostname
+               (SELECT pm.switch_name FROM port_map pm WHERE pm.hostname = d.hostname
                  ORDER BY pm.last_seen DESC LIMIT 1) AS switch_name,
-               (SELECT pm.port FROM v_port_map pm WHERE pm.hostname = d.hostname
+               (SELECT pm.port FROM port_map pm WHERE pm.hostname = d.hostname
                  ORDER BY pm.last_seen DESC LIMIT 1) AS switch_port,
-               (SELECT pm.vlan FROM v_port_map pm WHERE pm.hostname = d.hostname
+               (SELECT pm.vlan FROM port_map pm WHERE pm.hostname = d.hostname
                  ORDER BY pm.last_seen DESC LIMIT 1) AS vlan,
-               (SELECT pm.last_seen FROM v_port_map pm WHERE pm.hostname = d.hostname
-                 ORDER BY pm.last_seen DESC LIMIT 1) AS port_last_seen,
+               (SELECT MAX(pm.last_seen) FROM port_map pm WHERE pm.hostname = d.hostname) AS port_last_seen,
                d.agent_last_report AS inventory_last_collected,
                d.gpu, d.state, d.asset_location, d.purchase_date, d.warranty_end, d.first_seen,
                GREATEST_(COALESCE(d.agent_last_report, '1900-01-01'), COALESCE(d.ad_last_logon, '1900-01-01'),
-                   COALESCE((SELECT MAX(pm.last_seen) FROM v_port_map pm WHERE pm.hostname = d.hostname), '1900-01-01')) AS last_seen,
+                   COALESCE((SELECT MAX(pm.last_seen) FROM port_map pm WHERE pm.hostname = d.hostname), '1900-01-01')) AS last_seen,
                (SELECT STRING_AGG_(g.name) FROM device_groups g WHERE g.device_id = d.id) AS groups,
-               (SELECT COUNT(*) FROM v_logons l WHERE l.hostname = d.hostname) AS logon_events,
+               (SELECT COUNT(*) FROM logon_events l WHERE l.hostname = d.hostname) AS logon_events,
                CASE WHEN d.ad_dn IS NULL THEN NULL ELSE SUBSTR(d.ad_dn, STRPOS_(d.ad_dn, ',') + 1) END AS ou,
                DOMAIN_ AS domain,
                CASE WHEN LOWER(COALESCE(d.os_caption, d.ad_os, '')) LIKE '%server%' THEN 'Server' ELSE 'Workstation' END AS role,
@@ -186,9 +171,10 @@ VIEWS["v_users"] = """
            u.password_never_expires, u.password_last_set, u.last_logon, u.bad_pwd_count, u.created, u.changed,
            CASE WHEN u.dn IS NULL THEN NULL ELSE SUBSTR(u.dn, STRPOS_(u.dn, ',') + 1) END AS ou,
            u.logon_script, u.home_directory, u.sid,
-           (SELECT ud.hostname FROM v_user_devices ud WHERE ud.username = u.username ORDER BY ud.last_logon DESC LIMIT 1) AS last_computer,
-           (SELECT MAX(ud.last_logon) FROM v_user_devices ud WHERE ud.username = u.username) AS last_computer_logon,
-           (SELECT COUNT(*) FROM v_user_devices ud WHERE ud.username = u.username) AS computer_count,
+           (SELECT l.hostname FROM logon_events l WHERE l.username = u.username AND l.hostname IS NOT NULL
+             ORDER BY l.time DESC LIMIT 1) AS last_computer,
+           (SELECT MAX(l.time) FROM logon_events l WHERE l.username = u.username AND l.hostname IS NOT NULL) AS last_computer_logon,
+           (SELECT COUNT(DISTINCT l.hostname) FROM logon_events l WHERE l.username = u.username) AS computer_count,
            (SELECT STRING_AGG_(g.name) FROM user_groups g WHERE g.user_id = u.id) AS groups
     FROM ad_users u
 """
@@ -232,11 +218,46 @@ _OWNER = ("(SELECT {col} FROM ("
           "UNION ALL SELECT d.hostname, 'DHCP', 1, s.last_seen FROM ip_sightings s JOIN devices d ON d.hostname = s.hostname "
           "WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%') own ORDER BY o, t DESC LIMIT 1)")
 MAC_OWNER_HOST, MAC_OWNER_VIA = _OWNER.format(col="h"), _OWNER.format(col="via")
-VIEWS["v_port_map"] = VIEWS["v_port_map"].replace("MAC_OWNER_HOST_", MAC_OWNER_HOST).replace("MAC_OWNER_VIA_", MAC_OWNER_VIA)
+PORT_MAP_LIVE = """
+        SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip,
+               hostname, matched_by,
+               CASE WHEN hostname IS NOT NULL THEN 'computer' WHEN mac = neighbor_mac THEN neighbor_kind END AS device_kind,
+               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone,
+               -- for MACs that are not one of our computers: the DHCP lease's IP and the name the device asked for
+               (SELECT s.ip FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%'
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
+               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name
+        FROM (
+          SELECT ms.mac, nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port,
+                 sp.alias AS port_alias, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.last_seen, ms.first_seen,
+                 sp.neighbor, sp.neighbor_kind, sp.neighbor_mac,
+                 (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
+                 MAC_OWNER_HOST_ AS hostname, MAC_OWNER_VIA_ AS matched_by,
+                 ROW_NUMBER() OVER (PARTITION BY ms.mac ORDER BY ms.last_seen DESC, sp.mac_count ASC) AS rn
+          FROM mac_sightings ms
+          JOIN switch_ports sp ON sp.id = ms.port_id
+          JOIN network_devices nd ON nd.id = sp.switch_id
+          WHERE sp.is_uplink = FALSE
+        ) x WHERE rn = 1
+    """.replace("MAC_OWNER_HOST_", MAC_OWNER_HOST).replace("MAC_OWNER_VIA_", MAC_OWNER_VIA)
+PORT_MAP_COLS = ["mac", "switch_name", "switch_ip", "port", "port_alias", "vlan", "last_seen", "first_seen", "ip", "hostname",
+                 "matched_by", "device_kind", "phone", "dhcp_ip", "dhcp_name"]
 
 VIEW_ORDER = ["v_mac_owner", "v_port_map", "v_user_devices", "v_disks", "v_software", "v_updates", "v_logons",
               "v_switch_ports", "v_network_devices", "v_domain_controllers", "v_devices", "v_changes",
               "v_users", "v_physical_disks", "v_audit"]
+
+
+def dialect_sql(sql: str, dialect: str) -> str:
+    """The views are written once; this fills in the few spots where SQLite and PostgreSQL differ."""
+    if dialect == "sqlite":
+        sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"GROUP_CONCAT(\1, ', ')", sql)
+        return (sql.replace("= FALSE", "= 0").replace("AS NUMERIC", "AS REAL").replace("GREATEST_(", "MAX(")
+                .replace("STRPOS_(", "INSTR(").replace("= TRUE", "= 1"))
+    sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"STRING_AGG(\1, ', ')", sql)
+    return (sql.replace("GREATEST_(", "GREATEST(").replace("STRPOS_(", "STRPOS(")
+            .replace("'1900-01-01'", "TIMESTAMP '1900-01-01'"))
 
 
 def create_views(db: Session) -> None:
@@ -244,22 +265,16 @@ def create_views(db: Session) -> None:
     for name in reversed(VIEW_ORDER):
         db.execute(text(f"DROP VIEW IF EXISTS {name}" + (" CASCADE" if dialect == "postgresql" else "")))
     for name in VIEW_ORDER:
-        sql = VIEWS[name]
-        if dialect == "sqlite":
-            sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"GROUP_CONCAT(\1, ', ')", sql)
-            sql = (sql.replace("= FALSE", "= 0").replace("AS NUMERIC", "AS REAL").replace("GREATEST_(", "MAX(")
-                   .replace("STRPOS_(", "INSTR(").replace("= TRUE", "= 1"))
-        else:
-            sql = re.sub(r"STRING_AGG_\(([\w.]+)\)", r"STRING_AGG(\1, ', ')", sql)
-            sql = (sql.replace("GREATEST_(", "GREATEST(").replace("STRPOS_(", "STRPOS(")
-                   .replace("'1900-01-01'", "TIMESTAMP '1900-01-01'"))
-        db.execute(text(f"CREATE VIEW {name} AS {sql}"))
+        db.execute(text(f"CREATE VIEW {name} AS {dialect_sql(VIEWS[name], dialect)}"))
     db.commit()
+    from . import portmap
+    portmap.refresh(db)
 
 
 _LOCAL_SQL = "('', '-', '127.0.0.1', '::1')"
 NAMED_WINDOW = timedelta(hours=8)     # another event from the same IP this close in time names the PC
 LEASE_SLACK = timedelta(days=8)       # Windows DHCP's default lease: a binding holds this long after its last renewal
+RECHECK_DAYS = timedelta(days=14)     # unmatched DC logons this recent are tried again on every pass
 
 
 def _as_dt(v):
@@ -282,14 +297,28 @@ def _intervals(sightings: list[tuple]) -> list[tuple[datetime, datetime, str]]:
     return out
 
 
-def _match_in_python(db: Session, open_: str) -> int:
+def _match_in_python(db: Session, open_: str, params: dict | None = None, batch: int = 20000) -> int:
     """DHCP binding at the time of the event, then another event from that IP close in time that named the PC
-    (NTLM 4624/4776 carry WorkstationName; Kerberos 4768 only an IP)."""
-    rows = db.execute(text(f"SELECT id, ip, time FROM logon_events WHERE {open_}")).all()
-    if not rows:
-        return 0
-    ips = sorted({r[1] for r in rows})
+    (NTLM 4624/4776 carry WorkstationName; Kerberos 4768 only an IP). Works through the events in batches by id, so
+    a large backlog of unmatched events doesn't have to fit in memory at once."""
     by_mac = dict(db.execute(text("SELECT n.mac, d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id")).all())
+    dcs = {r[0] for r in db.execute(text("SELECT hostname FROM domain_controllers"))}
+    n, after = 0, 0
+    while True:
+        rows = db.execute(text(f"SELECT id, ip, time FROM logon_events WHERE {open_} AND id > :after ORDER BY id LIMIT {batch}"),
+                          {**(params or {}), "after": after}).all()
+        if not rows:
+            return n
+        after = rows[-1][0]
+        n += _match_batch(db, rows, by_mac, dcs)
+        if len(rows) < batch:
+            return n
+
+
+def _match_batch(db: Session, rows: list, by_mac: dict, dcs: set) -> int:
+    ips = sorted({r[1] for r in rows})
+    times = [_as_dt(r[2]) for r in rows]
+    lo, hi = min(times) - NAMED_WINDOW, max(times) + NAMED_WINDOW
     dhcp: dict[str, list] = {}
     named: dict[str, list] = {}
     for k in range(0, len(ips), 500):
@@ -304,10 +333,9 @@ def _match_in_python(db: Session, open_: str) -> int:
                 dhcp.setdefault(ip, []).append((host, _as_dt(first), _as_dt(last), _as_dt(exp)))
         for ip, host, t in db.execute(text(
                 f"SELECT ip, hostname, time FROM logon_events WHERE host_via = 'event' AND hostname IS NOT NULL "
-                f"AND source LIKE 'dc:%' AND ip IN ({inl})"), params):
+                f"AND source LIKE 'dc:%' AND ip IN ({inl}) AND time BETWEEN :lo AND :hi"), {**params, "lo": lo, "hi": hi}):
             if host:
                 named.setdefault(ip, []).append((_as_dt(t), host))
-    dcs = {r[0] for r in db.execute(text("SELECT hostname FROM domain_controllers"))}
     win = {ip: _intervals(v) for ip, v in dhcp.items()}
     upd = []
     for rid, ip, t in rows:
@@ -354,33 +382,40 @@ def resolve_logon_hosts(db: Session, dns: bool = True, dns_budget_s: float = 30.
         db.execute(text("UPDATE logon_events SET host_via = 'event' WHERE host_via IS NULL AND hostname IS NOT NULL"))
         set_setting(db, "migr:logon_client_v2", "1")
         db.commit()
-    open_ = f"hostname IS NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL}"
-    n += _match_in_python(db, open_)
+    # Only events stored since the last pass, and the last two weeks again (DHCP history and named events for those
+    # can still arrive). Older events that matched nothing then won't match now, and rescanning them on every DC logon
+    # import kept the whole unmatched backlog in memory.
+    mark = int(get_setting(db, "logon_match:last_id") or 0)
+    top = db.execute(text("SELECT MAX(id) FROM logon_events")).scalar() or 0
+    p = {"mark": mark, "since": utcnow() - RECHECK_DAYS}
+    open_ = f"hostname IS NULL AND ip IS NOT NULL AND ip NOT IN {_LOCAL_SQL} AND (id > :mark OR time >= :since)"
+    n += _match_in_python(db, open_, p)
     n += db.execute(text(f"""
         UPDATE logon_events SET host_via = 'nic', hostname = (
           SELECT d.hostname FROM device_nics n JOIN devices d ON d.id = n.device_id
           WHERE n.ip = logon_events.ip LIMIT 1)
         WHERE {open_} AND EXISTS (SELECT 1 FROM device_nics n WHERE n.ip = logon_events.ip)
-    """)).rowcount or 0
+    """), p).rowcount or 0
     arp = """FROM arp_entries a JOIN device_nics n ON n.mac = a.mac JOIN devices d ON d.id = n.device_id
              WHERE a.ip = logon_events.ip"""
     n += db.execute(text(f"""
         UPDATE logon_events SET host_via = 'arp', hostname = (SELECT d.hostname {arp} ORDER BY a.last_seen DESC LIMIT 1)
         WHERE {open_} AND EXISTS (SELECT 1 {arp})
-    """)).rowcount or 0
+    """), p).rowcount or 0
     fwd = "FROM ip_sightings s WHERE s.source = 'dns' AND s.ip = logon_events.ip AND s.hostname IS NOT NULL"
     n += db.execute(text(f"""
         UPDATE logon_events SET host_via = 'dns', hostname = (SELECT s.hostname {fwd} ORDER BY s.last_seen DESC LIMIT 1)
         WHERE {open_} AND EXISTS (SELECT 1 {fwd})
-    """)).rowcount or 0
+    """), p).rowcount or 0
+    set_setting(db, "logon_match:last_id", str(top))
     db.commit()
     if dns:
         since = utcnow() - timedelta(days=30)
         ips = [r[0] for r in db.execute(text(f"SELECT DISTINCT ip FROM logon_events WHERE {open_} AND time >= :s"),
-                                        {"s": since}).all()][:1000]
+                                        {**p, "s": since}).all()][:1000]
         for ip, name in reverse_dns(ips, dns_budget_s).items():
             n += db.execute(text(f"UPDATE logon_events SET hostname = :h, host_via = 'ptr' WHERE {open_} AND ip = :ip"),
-                            {"h": name, "ip": ip}).rowcount or 0
+                            {**p, "h": name, "ip": ip}).rowcount or 0
         db.commit()
     return n
 
@@ -415,6 +450,8 @@ def reverse_dns(ips: list[str], budget_s: float = 20.0) -> dict[str, str]:
 def track_port_moves(db: Session) -> int:
     """Record a history entry when a PC shows up on a different switch port than last time."""
     from .db import ChangeEvent, Device
+    from . import portmap
+    portmap.refresh(db)
     rows = db.execute(text("""
         SELECT d.id, d.last_switch_port, pm.switch_name || ' ' || pm.port AS now_port
         FROM devices d JOIN v_port_map pm ON pm.hostname = d.hostname

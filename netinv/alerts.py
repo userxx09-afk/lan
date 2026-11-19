@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import utcnow
-from .reports import DEFAULT_OUTDATED, OS_EOL_DEFAULT, _rows, _ver
+from .reports import DEFAULT_OUTDATED, OS_EOL_DEFAULT, _rows, _ver, outdated_installs
 from .reports import os_eol as eol_date
 
 HIGH, IMPORTANT, INFO = "high", "important", "info"
@@ -64,13 +64,8 @@ def not_latest_build(db, family: str):
 
 def outdated_software(db):
     rules = settings.outdated_software or DEFAULT_OUTDATED
-    sw = _q(db, "SELECT hostname, name, version FROM v_software")
-    out = []
-    for rule in rules:
-        pat, minv = re.compile(rule["match"], re.I), _ver(rule.get("min_version"))
-        out += [{**s, "required": rule.get("min_version") or "remove (end of life)"} for s in sw
-                if pat.search(s["name"]) and (rule.get("eol") or _ver(s["version"]) < minv)]
-    return out
+    return [{**s, "required": rule.get("min_version") or "remove (end of life)"}
+            for rule, s in outdated_installs(db, rules)]
 
 
 def _days(n):

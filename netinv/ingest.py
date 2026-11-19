@@ -169,8 +169,10 @@ def apply_endpoint(db: Session, p: EndpointPayload) -> Device:
     dev.last_boot = _naive(p.last_boot) or dev.last_boot
     dev.agent_last_report = utcnow()
 
-    dev.nics = [DeviceNic(mac=m, ip=n.ip, description=n.description)
-                for n in p.nics if (m := norm_mac(n.mac))]
+    nics = [(m, n.ip, n.description) for n in p.nics if (m := norm_mac(n.mac))]
+    if sorted(nics, key=str) != sorted(((x.mac, x.ip, x.description) for x in dev.nics), key=str):
+        # only when they changed: rewriting them on every report would make the switch port map stale each time
+        dev.nics = [DeviceNic(mac=m, ip=ip, description=desc) for m, ip, desc in nics]
     if p.antivirus is not None:
         av = [a for a in p.antivirus if a.name]
         on = [a for a in av if a.enabled]

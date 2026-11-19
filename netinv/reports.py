@@ -164,6 +164,24 @@ DEFAULT_OUTDATED = [
 ]
 
 
+def outdated_installs(db: Session, rules: list[dict]):
+    """(rule, {hostname, name, version}) for each install a rule flags. The rules are regexes, which SQLite can't run,
+    so they're matched against the few hundred distinct program names and only those installs are read: not every
+    software row of every PC."""
+    names = [r[0] for r in db.execute(text("SELECT DISTINCT name FROM software"))]
+    for rule in rules:
+        pat, minv = re.compile(rule["match"], re.I), _ver(rule.get("min_version"))
+        hit = [n for n in names if n and pat.search(n)]
+        for k in range(0, len(hit), 500):
+            chunk = hit[k:k + 500]
+            params = {f"n{i}": n for i, n in enumerate(chunk)}
+            sql = ("SELECT hostname, name, version FROM v_software WHERE name IN ("
+                   + ", ".join(f":n{i}" for i in range(len(chunk))) + ") ORDER BY hostname, name")
+            for s in _rows(db.execute(text(sql), params)):
+                if rule.get("eol") or _ver(s["version"]) < minv:
+                    yield rule, s
+
+
 def insights(db: Session, cfg: dict, outdated_rules: list[dict]) -> dict:
     outdated_rules = outdated_rules or DEFAULT_OUTDATED
     now = utcnow()
@@ -210,14 +228,9 @@ def insights(db: Session, cfg: dict, outdated_rules: list[dict]) -> dict:
             out["low_disk"].append(r)
 
     if outdated_rules:
-        sw = _rows(db.execute(text("SELECT hostname, name, version FROM v_software")))
-        for rule in outdated_rules:
-            pat = re.compile(rule["match"], re.I)
-            minv = _ver(rule.get("min_version"))
-            for s in sw:
-                if pat.search(s["name"]) and (rule.get("eol") or _ver(s["version"]) < minv):
-                    out["outdated_software"].append({**s, "required": rule.get("min_version") or "remove (end of life)",
-                                                     "rule": rule.get("label", rule["match"])})
+        for rule, s in outdated_installs(db, outdated_rules):
+            out["outdated_software"].append({**s, "required": rule.get("min_version") or "remove (end of life)",
+                                             "rule": rule.get("label", rule["match"])})
 
     out["unknown_on_network"] = _rows(db.execute(text(
         "SELECT mac, ip, switch_name, port, vlan, last_seen FROM v_port_map WHERE hostname IS NULL "
