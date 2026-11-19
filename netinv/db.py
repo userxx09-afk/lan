@@ -245,6 +245,13 @@ class SwitchPort(Base):
     name: Mapped[str | None] = mapped_column(String(64))
     alias: Mapped[str | None] = mapped_column(String(255))
     oper_up: Mapped[bool | None] = mapped_column(Boolean)
+    admin_up: Mapped[bool | None] = mapped_column(Boolean)         # False = shut down / disabled on the switch
+    # When the link last changed state (ifLastChange): for a down port, when it went down. The switch's boot time
+    # when it has not changed since the switch started.
+    last_change: Mapped[datetime | None] = mapped_column(DateTime)
+    changed_since_boot: Mapped[bool | None] = mapped_column(Boolean)
+    # Last time we know the link was up: seen up at a poll, went down at last_change, or a MAC learned on it.
+    last_up: Mapped[datetime | None] = mapped_column(DateTime)
     speed_mbps: Mapped[int | None] = mapped_column(Integer)
     neighbor: Mapped[str | None] = mapped_column(String(255))  # LLDP/CDP neighbour, if any
     neighbor_port: Mapped[str | None] = mapped_column(String(255))

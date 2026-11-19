@@ -72,7 +72,7 @@ LIBRARY: list[tuple[str, str, str, dict]] = [
     ("net_unknown", "Network", "Unknown MAC addresses on access ports", {"spec": S("v_port_map", ["mac", "ip", "switch_name", "port", "vlan", "last_seen"], [F("hostname", "empty")], "switch_name")}),
     ("net_moves", "Network", "Computers that moved switch port", {"spec": S("v_changes", ["time", "hostname", "detail"], [F("kind", "eq", "moved")], "time", True)}),
     ("net_devices", "Network", "Network devices", {"spec": S("v_network_devices", ["sysname", "ip", "vendor", "location", "port_count", "last_polled", "poll_error"], sort="sysname")}),
-    ("net_ports_down", "Network", "Switch ports down", {"spec": S("v_switch_ports", ["switch_name", "port", "alias", "speed_mbps"], [F("oper_up", "eq", "0")], "switch_name")}),
+    ("net_ports_down", "Network", "Switch ports down", {"spec": S("v_switch_ports", ["switch_name", "port", "alias", "status", "last_active", "status_since", "neighbor"], [F("status", "ne", "up")], "last_active")}),
 
     ("lg_last_user", "Logons", "Last user per computer", {"spec": S("v_devices", ["hostname", "last_user", "last_user_logon", "current_user"], sort="hostname")}),
     ("lg_user_devices", "Logons", "Computers per user", {"spec": S("v_user_devices", ["username", "hostname", "last_logon", "logon_count"], sort="username")}),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 from datetime import timedelta
 
+from sqlalchemy import select
 from .db import (AdGroup, AdUser, ArpEntry, IpSighting, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
 from .ingest import AvIn, PhysDiskIn, DiskIn, EndpointPayload, HotfixIn, LogonIn, Nic, PendingIn, SoftwareIn, add_logons, apply_endpoint
 
@@ -211,6 +212,20 @@ def seed(db) -> str:
     db.flush()
     for k in range(9):
         db.add(MacSighting(mac=f"de:ad:be:ef:00:{k:02x}", port_id=ap.id, vlan=40, last_seen=now))
+    db.flush()
+    for p in db.scalars(select(SwitchPort).where(SwitchPort.oper_up.is_(True))):
+        p.last_up = now                       # a scan just saw these up
+    # Empty desks: ports that went down an hour ago, last week, two months ago, never since boot, and one shut down
+    for j, sw in enumerate(access):
+        boot = now - timedelta(seconds=sw.uptime_s)
+        for k, (ago, admin) in enumerate(((timedelta(hours=1), True), (timedelta(days=6), True), (timedelta(days=62), True),
+                                          (None, True), (timedelta(days=20), False))):
+            ifi = 400 + k
+            went = max(now - ago, boot + timedelta(minutes=5)) if ago else None
+            db.add(SwitchPort(switch=sw, ifindex=ifi, name=(f"Gi1/0/{46 + k}" if sw.vendor == "Cisco" else f"1/1/{46 + k}"),
+                              alias=["Desk spare", "Meeting room", "Old printer", "", "Disabled - reception"][k], oper_up=False,
+                              admin_up=admin, speed_mbps=None, mac_count=0, vlan=20 if sw.location.startswith("HQ") else 30,
+                              last_change=went or boot, changed_since_boot=went is not None, last_up=went))
     for sw in [core] + access:
         db.flush()
     # DC kerberos events (IP only) to show IP -> PC resolution

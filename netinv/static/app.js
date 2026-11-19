@@ -60,6 +60,28 @@ const neighborCell = (v, r) => {
     : r.neighbor_switch_ip ? portLink(v, r.neighbor_switch_ip, r.neighbor_port, v) : esc(v);
   return `${kindPill(r.neighbor_kind)} ${name}${r.neighbor_port ? ` <span class="small muted">${esc(r.neighbor_port)}</span>` : ""}`;
 };
+// Port link state: green up, red down (enabled but nothing connected or switched off), grey disabled on the switch.
+const PORT_STATUS = { up: ["up", "good", "Link is up"], down: ["down", "bad", "Enabled, but the link is down: nothing plugged in or the device is off"],
+  disabled: ["disabled", "mute", "Shut down (administratively disabled) on the switch"] };
+const portStatus = (v, r) => {
+  const st = PORT_STATUS[v];
+  if (!st) return "";
+  const since = r.status_since && r.changed_since_boot !== false ? ` since ${fmtDate(r.status_since)}` : r.status_since ? " since the switch started" : "";
+  return `<span class="pill ${st[1]}" title="${esc(st[2] + since)}">${st[0]}</span>`;
+};
+// When a down port last had a link: tells "just switched off" from "nothing here for a month".
+const lastActive = (v, r) => {
+  if (r.status === "up") return `<span class="muted">now</span>`;
+  if (!r.status) return "";
+  if (!v) {
+    const boot = r.switch_uptime_s && r.last_polled ? agoUtc(new Date(utc(r.last_polled) - r.switch_uptime_s * 1000).toISOString()) : "";
+    return `<span class="muted" title="Not up while NetInventory has been watching it, and down since the switch last started">${boot ? `not since switch restart (${boot})` : "never seen up"}</span>`;
+  }
+  const days = (Date.now() - utc(v)) / 86400000;
+  const tag = days < 1 ? `<span class="pill warn" title="Had a link in the last 24 hours">recent</span> `
+    : days >= 30 ? `<span class="pill mute" title="No link for 30 days or more">unused 30+ days</span> ` : "";
+  return `${tag}${esc(fmtDate(v))} <span class="muted">${agoUtc(v)}</span>`;
+};
 const hostList = (v) => (v ? String(v).split(", ").map(hostLink).join(" ") : "");
 async function openPort(swip, port) {
   let d;
@@ -68,7 +90,8 @@ async function openPort(swip, port) {
   const p = d.port;
   drawer(`<h2>${esc(p.switch_name || p.switch_ip)} · ${esc(p.port)} ${portType(p.port_type)}</h2>
     <div class="summary"><div class="panel">
-      ${kvRow("Description", esc(p.alias))}${kvRow("Status", p.oper_up ? "up" : "down")}${kvRow("Speed", p.speed_mbps ? `${p.speed_mbps} Mb/s` : "")}
+      ${kvRow("Description", esc(p.alias))}${kvRow("Status", `${portStatus(p.status, p)}${p.status_since ? ` <span class="small muted">${p.changed_since_boot === false
+        ? "since the switch started" : `since ${esc(fmtDate(p.status_since))}`}</span>` : ""}`)}${p.status && p.status !== "up" ? kvRow("Last active", lastActive(p.last_active, p)) : ""}${kvRow("Speed", p.speed_mbps ? `${p.speed_mbps} Mb/s` : "")}
       ${kvRow("VLAN", esc(p.vlan))}${kvRow("MACs learned", esc(p.mac_count))}
       ${kvRow("Neighbor (LLDP/CDP)", neighborCell(p.neighbor, p) + (p.neighbor_ip ? ` <span class="small muted">${esc(p.neighbor_ip)}</span>` : ""))}
       ${kvRow("Computers", hostList(p.computers))}
@@ -2071,10 +2094,10 @@ loaders.network = async () => {
     const ip = sel.value;
     $("#spall").hidden = !ip;
     table($("#sptable"), ip ? sp.rows.filter((r) => r.switch_ip === ip) : sp.rows,
-      ["switch_name", "port", "alias", "oper_up", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
+      ["switch_name", "port", "alias", "status", "last_active", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
       { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
-        labels: { port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
-        cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
+        labels: { last_active: "last active", port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+        cell: { status: portStatus, last_active: lastActive,
           port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
           unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
   };

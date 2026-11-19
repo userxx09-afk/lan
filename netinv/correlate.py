@@ -74,7 +74,11 @@ VIEWS: dict[str, str] = {
     # neighbour to the Computers list or a polled switch. computers = PCs whose MAC was last learned on this port.
     "v_switch_ports": """
         SELECT nd.sysname AS switch_name, nd.ip AS switch_ip, nd.vendor, sp.name AS port, sp.alias,
-               sp.oper_up, sp.speed_mbps, sp.vlan, sp.is_uplink,
+               sp.oper_up, sp.admin_up, sp.speed_mbps, sp.vlan, sp.is_uplink,
+               CASE WHEN sp.admin_up = FALSE THEN 'disabled' WHEN sp.oper_up = TRUE THEN 'up'
+                    WHEN sp.oper_up = FALSE THEN 'down' END AS status,
+               sp.last_change AS status_since, sp.changed_since_boot, sp.last_up AS last_active,
+               nd.uptime_s AS switch_uptime_s, nd.last_polled,
                CASE WHEN sp.is_uplink = TRUE THEN 'uplink' WHEN sp.neighbor_kind = 'phone' THEN 'phone' ELSE 'access' END AS port_type,
                sp.mac_count, sp.neighbor, sp.neighbor_port, sp.neighbor_kind, sp.neighbor_ip, sp.neighbor_mac,
                (SELECT d.hostname FROM devices d WHERE sp.neighbor IS NOT NULL

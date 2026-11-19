@@ -444,6 +444,16 @@ Click a switch under *Network devices* (or pick it in the drop-down) to list onl
 computers on each port; click a port to see every MAC learned on it, which computer owns it and, for uplinks, which
 access port that computer is really on. Ports keep their old type until the next switch scan.
 
+### Port status and last active (0.33)
+
+*Switch ports* shows each port's link as a **green up**, **red down** (enabled, but nothing plugged in or the device is
+off) or **grey disabled** (shut down on the switch) pill. For a port that isn't up, **last active** says when it last had
+a link, so you can tell a PC that was just switched off (*recent*, within 24 hours) from a desk that has been empty for
+weeks (*unused 30+ days*). It comes from the switch's ifLastChange (the moment the link went down), the last scan that
+saw the port up, and the newest MAC learned on it, so ports polled before 0.33 get a time from their MAC history on the
+next scan. A port that has been down since the switch restarted, with nothing seen on it before, shows *not since switch
+restart*. The *Switch ports down* report lists them oldest first.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it
