@@ -107,6 +107,11 @@ VIEWS: dict[str, str] = {
                (SELECT l.username FROM logon_events l WHERE l.hostname = d.hostname
                  ORDER BY l.time DESC LIMIT 1) AS last_user,
                (SELECT MAX(l.time) FROM logon_events l WHERE l.hostname = d.hostname) AS last_user_logon,
+               -- the last user's name from AD ("Jane Doe"): given name + surname, else the display name
+               (SELECT COALESCE(CASE WHEN u.first_name IS NOT NULL AND u.last_name IS NOT NULL
+                                     THEN u.first_name || ' ' || u.last_name END, u.display_name, u.first_name, u.last_name)
+                  FROM ad_users u WHERE u.username = (SELECT l.username FROM logon_events l WHERE l.hostname = d.hostname
+                                                       ORDER BY l.time DESC LIMIT 1)) AS last_user_name,
                d.last_boot, d.pending_updates, d.pending_reboot, d.last_patch_installed,
                (SELECT MIN(k.pct_free) FROM v_disks k WHERE k.hostname = d.hostname) AS min_disk_pct_free,
                (SELECT k.free_gb FROM v_disks k WHERE k.hostname = d.hostname AND k.drive = 'C:') AS c_free_gb,
