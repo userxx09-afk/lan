@@ -67,6 +67,9 @@ def main() -> None:
             run = jobs.run_job(n)
             print(f"[{'ok' if run.ok else 'FAIL'}] {n}: {run.message}")
             failed |= not run.ok
+        from . import portmap
+        with SessionLocal() as db:      # the server refreshes its copy within 15 minutes; do it now
+            portmap.refresh(db)
         sys.exit(1 if failed else 0)
     elif args.cmd == "demo":
         from .demo import seed

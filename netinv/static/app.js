@@ -30,7 +30,7 @@ function table(el, rows, cols, opts = {}) {
       return `<td class="${typeof v === "number" ? "num" : ""}">${cell}</td>`;
     }).join("")}</tr>`).join("");
     el.innerHTML = rows.length ? `<div class="tablewrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
-      <p class="muted">${data.length} row${data.length === 1 ? "" : "s"}</p>` : `<p class="muted">No data yet.</p>`;
+      <p class="muted">${data.length} row${data.length === 1 ? "" : "s"}${data.length > 2000 ? " (showing the first 2000: filter or sort to find the rest)" : ""}</p>` : `<p class="muted">No data yet.</p>`;
     el.querySelectorAll("th").forEach((th) => th.onclick = () => { dir = sortKey === th.dataset.k ? -dir : 1; sortKey = th.dataset.k; render(); });
     el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
     el.querySelectorAll("[data-user]").forEach((a) => a.onclick = () => openUser(a.dataset.user));
@@ -38,7 +38,8 @@ function table(el, rows, cols, opts = {}) {
       if (!e.target.closest("[data-host],[data-user],[data-swport]")) opts.rowClick(data[+tr.dataset.ri]);
     });
   };
-  if (opts.filterEl) opts.filterEl.oninput = render;
+  // debounced: re-rendering a few thousand rows on every keystroke makes typing lag
+  if (opts.filterEl) { let h; opts.filterEl.oninput = () => { clearTimeout(h); h = setTimeout(render, rows.length > 500 ? 200 : 0); }; }
   render();
 }
 // ------------------------------------------------------------ switch ports
@@ -2140,10 +2141,10 @@ loaders.portmap = async () => {
       ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
 };
 loaders.network = async () => {
-  const [dc, nd, sp] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
-    post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 })]);
-  // every MAC on an access port, grouped onto its port, so each port shows what is plugged into it
-  const pm = await post("/api/query", { dataset: "v_port_map", fields: ["switch_ip", "port", "mac", "hostname", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name"], limit: 200000 });
+  // pm: every MAC on an access port, grouped onto its port below, so each port shows what is plugged into it
+  const [dc, nd, sp, pm] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
+    post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 }),
+    post("/api/query", { dataset: "v_port_map", fields: ["switch_ip", "port", "mac", "hostname", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name"], limit: 200000 })]);
   const byPort = {};
   pm.rows.forEach((d) => (byPort[`${d.switch_ip}|${d.port}`] ||= []).push(d));
   sp.rows.forEach((r) => {
@@ -2268,7 +2269,7 @@ async function runLibrary(id) {
   $("#libresult").innerHTML = `<p class="muted">Running…</p>`;
   try {
     const r = await api(`/api/library/${id}`);
-    $("#libtitle").innerHTML = `<div class="libbar"><b>${esc(meta.name)}</b><span class="muted">${r.rows.length} row${r.rows.length === 1 ? "" : "s"}</span>
+    $("#libtitle").innerHTML = `<div class="libbar"><b>${esc(meta.name)}</b><span class="muted">${r.truncated ? `first ${r.truncated} rows (export for all)` : `${r.rows.length} row${r.rows.length === 1 ? "" : "s"}`}</span>
       ${exportLinks(`/api/library/${id}/export`)}${meta.kind === "spec" ? ` <button class="ghost" id="tobuilder">Open in report builder</button>` : ""}</div>`;
     const libBar = $("#libtitle .libbar");
     if (meta.drill) {
@@ -2321,8 +2322,27 @@ let creds = [], svcAccount = null;
 // credential id 0 = the Windows account NetInventory runs as (no stored password)
 const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
 const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
+// ------------------------------------------------------------ Settings > Data retention
+function showRetention(d) {
+  table($("#rettable"), d.tables, ["label", "rows", "days"], {
+    labels: { label: "History", rows: "rows now", days: "keep (days)" },
+    cell: { rows: (v) => v == null ? "" : Number(v).toLocaleString(),
+      days: (v, r) => `<input name="${esc(r.key)}" type="number" min="0" max="3650" value="${v}" style="width:5.5em" title="Default ${r.default}; 0 = forever">` } });
+  $("#retlast").textContent = d.last_run ? `Last clean-up ${fmtDate(utcLocal(d.last_run))}: ${d.last_result || ""}` : "";
+}
+async function loadRetention() { try { showRetention(await api("/api/retention")); } catch {} }
+$("#retform").onsubmit = async (e) => {
+  e.preventDefault();
+  const days = Object.fromEntries([...new FormData(e.target)].map(([k, v]) => [k, +v]));
+  try { showRetention(await api("/api/retention", { method: "PUT", body: JSON.stringify({ days }) })); toast("Saved. Applied at the next clean-up (daily)."); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#retrun").onclick = async () => {
+  if (!await confirmBox("Remove the rows older than these limits now? They can't be brought back.")) return;
+  try { showRetention(await post("/api/retention/run", {})); toast("Clean-up finished."); } catch (er) { toast(errText(er), true); }
+};
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira(); loadWlc();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira(); loadWlc(); loadRetention();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
   $("#dhcpform")["dhcp:servers"].value = s["dhcp:servers"] || "";
