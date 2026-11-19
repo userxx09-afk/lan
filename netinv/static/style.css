@@ -334,3 +334,7 @@ pre.logtext { max-height: 70vh; }
 #rcset p.small { margin: 2px 0 6px; }
 
 body.nojira .jira-ui { display: none !important; }
+
+/* Not an admin: hide the controls for server-wide settings outside the Settings page too (the server refuses them anyway). */
+body.notadmin [data-admin], body.notadmin [data-apprule] { display: none !important; }
+.lifeform h4 { margin: 10px 0 0; } .lifeform h4 + p { margin: 0; }

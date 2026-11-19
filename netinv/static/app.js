@@ -179,6 +179,7 @@ const diskPill = (v) => (v === null || v === undefined ? "" : `<span class="pill
 const loaders = {};
 document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
 function showTab(name) {
+  if (name === "settings" && me && !me.admin) name = "overview";
   if (/^#(asset|user)\//.test(location.hash)) history.pushState(null, "", location.pathname);
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === name));
@@ -2224,11 +2225,13 @@ loaders.reports = async () => {
     setSpec({ dataset: "v_devices", fields: ["hostname", "os", "last_user", "switch_port", "c_free_gb"] });
   }
   const reps = await api("/api/reports");
-  $("#reportlist").innerHTML = reps.map((r) => `<li data-id="${r.id}"><span>${esc(r.name)}</span>${r.builtin ? "" : `<span class="x" data-del="${r.id}">×</span>`}</li>`).join("");
+  const tag = (r) => (r.builtin ? "" : r.mine ? (r.shared ? ` <span class="pill mute small" title="You saved it; everyone sees it">shared</span>` : "")
+    : ` <span class="pill mute small" title="${r.owner ? `Shared by ${esc(r.owner)}` : "Saved before reports were per user: everyone sees it"}">shared</span>`);
+  $("#reportlist").innerHTML = reps.map((r) => `<li data-id="${r.id}"><span>${esc(r.name)}${tag(r)}</span>${r.editable ? `<span class="x" data-del="${r.id}">×</span>` : ""}</li>`).join("");
   $("#reportlist").querySelectorAll("li").forEach((li) => li.onclick = (e) => {
     const r = reps.find((x) => x.id === li.dataset.id);
     if (e.target.dataset.del) { api(`/api/reports/${r.id}`, { method: "DELETE" }).then(loaders.reports); return; }
-    setSpec(r.spec); $("#rname").value = r.builtin ? "" : r.name; runReport();
+    setSpec(r.spec); $("#rname").value = r.builtin || !r.editable ? "" : r.name; $("#rshared").checked = !!(r.mine && r.shared); runReport();
   });
 };
 const cols = () => datasets.find((d) => d.name === $("#dataset").value)?.columns || [];
@@ -2274,7 +2277,8 @@ $("#xlsx").onclick = () => download("/api/export/xlsx", spec());
 $("#save").onclick = async () => {
   const name = $("#rname").value.trim();
   if (!name) { $("#rname").focus(); return; }
-  await post("/api/reports", { name, spec: spec() }); loaders.reports();
+  try { await post("/api/reports", { name, spec: spec(), shared: $("#rshared").checked }); toast($("#rshared").checked ? "Saved and shared with everyone." : "Saved. Only you see it."); loaders.reports(); }
+  catch (e) { toast(errText(e), true); }
 };
 
 // ------------------------------------------------------------ standard report library
@@ -2624,7 +2628,49 @@ $("#updinstall").onclick = () => startInstall(false);
 $("#updreinstall").onclick = () => startInstall(true);
 
 // ------------------------------------------------------------ signed-in user, sign-in settings
-api("/api/me").then((m) => { $("#whoami").textContent = m.user; }).catch(() => {});
+// Who is signed in. Settings is only for admins (Settings > Sign-in > Admins); the server enforces it too.
+let me = null;
+function applyMe(m) {
+  me = m; $("#whoami").textContent = m.user;
+  $("#whoami").title = m.admin ? "NetInventory admin" : "Signed in (not an admin: no Settings)";
+  const b = document.querySelector('#tabs button[data-tab="settings"]');
+  if (b) b.hidden = !m.admin;
+  document.body.classList.toggle("notadmin", !m.admin);
+  if (!m.admin && $("#settings").classList.contains("active")) showTab("overview");
+}
+// If this browser is now signed in as someone else (another tab signed in), or signed out, start over: nothing on
+// this page belongs to the new person.
+async function checkSameUser() {
+  if (!me) return;
+  try {
+    const r = await fetch("/api/me", { cache: "no-store" });
+    if (r.status === 401) { clearLocalState(); location.replace("/login"); return; }
+    const m = await r.json();
+    if (m.user !== me.user) { clearLocalState(); location.replace("/"); return; }
+    if (m.admin !== me.admin) applyMe(m);
+  } catch {}
+}
+// Your own settings (anyone, admin or not): click your name.
+$("#whoami").style.cursor = "pointer";
+$("#whoami").onclick = async () => {
+  const s = await api("/api/settings");
+  const f = await formModal(`<h3>Your settings</h3><p class="muted small">Only for you (${esc(me?.user || "")}); nobody else is affected.</p>
+    <label>DameWare signs in with <select name="dameware_mode"><option value="windows" ${s.dameware_mode !== "saved" ? "selected" : ""}>my Windows logon (default)</option>
+      <option value="saved" ${s.dameware_mode === "saved" ? "selected" : ""}>the saved host entry in DameWare</option></select></label>`);
+  if (!f) return;
+  try { appSettings = await api("/api/settings", { method: "PUT", body: JSON.stringify({ dameware_mode: f.dameware_mode }) }); toast("Saved for you."); }
+  catch (e) { toast(errText(e), true); }
+};
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkSameUser(); });
+window.addEventListener("focus", checkSameUser);
+// Back after signing out must not show the last person's page from the browser's back/forward cache.
+window.addEventListener("pageshow", (e) => { if (e.persisted) location.reload(); });
+// The browser's own autofill history would offer one person's searches and filters to the next: keep it off for
+// everything but the sign-in form.
+document.addEventListener("focusin", (e) => {
+  const t = e.target;
+  if (t.matches?.("input:not([type=password]):not([type=checkbox]):not([type=radio]), textarea") && !t.hasAttribute("autocomplete")) t.setAttribute("autocomplete", "off");
+}, true);
 // Nothing one person chose in this browser (open tab, filters...) carries over to the next person who signs in.
 function clearLocalState() { try { sessionStorage.clear(); localStorage.clear(); } catch {} }
 $("#logout").onclick = async () => { clearLocalState(); await fetch("/api/logout", { method: "POST" }); location.replace("/login"); };
@@ -2801,9 +2847,13 @@ async function loadAuth() {
   const f = $("#authform");
   f.ad_domain.value = a.ad_domain || ""; f.ad_group.value = a.ad_group || ""; f.ad_server.value = a.ad_server || "";
   f.access_group.innerHTML = `<option value="">(none)</option>` + (a.user_groups || []).map((g) => `<option ${g === a.access_group ? "selected" : ""}>${esc(g)}</option>`).join("");
+  f.admin_users.value = a.admin_users || ""; f.admin_group.value = a.admin_group || "";
+  f.admin_user_group.innerHTML = `<option value="">(none)</option>` + (a.user_groups || []).map((g) => `<option ${g === a.admin_user_group ? "selected" : ""}>${esc(g)}</option>`).join("");
   $("#authstate").innerHTML = `${kvRow("Local admin", a.local_user ? (a.local_enabled ? `<span class="pill warn">on</span> ${esc(a.local_user)}`
       : `<span class="pill good">off</span> turned back on by deleting <code>${esc(a.local_disabled_file)}</code>`) : "not configured")}
     ${kvRow("AD sign-in", a.ad_group || a.access_group ? `<span class="pill good">on</span> ${[a.ad_group && `members of ${esc(a.ad_group)}`, a.access_group && `the user group ${esc(a.access_group)}`].filter(Boolean).join(" or ")} in ${esc(a.ad_domain)}` : `<span class="pill mute">off</span>`)}
+    ${kvRow("Admins", a.admins_set ? [a.admin_users && esc(a.admin_users), a.admin_group && `members of ${esc(a.admin_group)}`, a.admin_user_group && `the user group ${esc(a.admin_user_group)}`].filter(Boolean).join(" or ") + (a.local_user ? `, and the local admin` : "")
+      : `<span class="pill warn">everyone</span> no admins set: everyone who signs in can change settings`)}
     ${kvRow("HTTPS", a.https ? `<span class="pill good">on</span>` : `<span class="pill bad">off</span> passwords cross the network unencrypted`)}`;
   if (!f.ad_domain.value) {   // suggest the domain from an AD scan target
     try { const t = (await api("/api/targets")).find((x) => x.kind === "ad_domain"); if (t) f.ad_domain.placeholder = t.value; } catch {}
@@ -2844,7 +2894,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#drawer
 let start = "overview";
 // View state lives only for this sign-in: sessionStorage, wiped at sign-in and sign-out (see clearLocalState).
 try { localStorage.removeItem("tab"); start = sessionStorage.getItem("tab") || start; } catch {}
-route(start);
+api("/api/me").then((m) => { applyMe(m); route(start); }).catch(() => route(start === "settings" ? "overview" : start));
 pollStatus();
 loadUpdate();
 

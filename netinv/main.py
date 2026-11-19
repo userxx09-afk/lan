@@ -94,28 +94,36 @@ def _scope_user(scope) -> str | None:
 app.add_middleware(logs.AuditMiddleware, client_ip=lambda scope: (scope.get("client") or ("?",))[0], user_for=_scope_user)
 
 
-def current_user(request: Request) -> str | None:
-    """The signed-in user from the session cookie, or from HTTP basic auth (scripts, BI refreshes)."""
+def current_session(request: Request) -> "auth.Session | None":
+    """The signed-in session from the cookie, or from HTTP basic auth (scripts, BI refreshes; kept for this request only)."""
+    cached = getattr(request.state, "netinv_session", None)
+    if cached is not None:
+        return cached
     s = auth.session_user(request.cookies.get(auth.COOKIE))
-    if s:
-        return s.user
-    h = request.headers.get("authorization", "")
-    if h.lower().startswith("basic "):
-        import base64
-        try:
-            user, _, pw = base64.b64decode(h[6:]).decode().partition(":")
-        except Exception:
-            return None
-        with SessionLocal() as db:
+    if not s:
+        h = request.headers.get("authorization", "")
+        if h.lower().startswith("basic "):
+            import base64
             try:
-                sess = auth.login(db, user, pw, _client_ip(request))
-            except auth.LoginError as exc:
-                db.add(AuditLog(actor=user[:64], action="login.failed", target="basic auth", result=str(exc)[:200]))
-                db.commit()
+                user, _, pw = base64.b64decode(h[6:]).decode().partition(":")
+            except Exception:
                 return None
-        auth.logout(getattr(sess, "token", None))   # basic auth is per request; keep no session
-        return sess.user
-    return None
+            with SessionLocal() as db:
+                try:
+                    s = auth.login(db, user, pw, _client_ip(request))
+                except auth.LoginError as exc:
+                    db.add(AuditLog(actor=user[:64], action="login.failed", target="basic auth", result=str(exc)[:200]))
+                    db.commit()
+                    return None
+            auth.logout(getattr(s, "token", None))   # basic auth is per request; keep no session
+    if s:
+        request.state.netinv_session = s
+    return s
+
+
+def current_user(request: Request) -> str | None:
+    s = current_session(request)
+    return s.user if s else None
 
 
 def ui_auth(request: Request):
@@ -125,6 +133,17 @@ def ui_auth(request: Request):
     if not auth.auth_required():
         return "admin"
     raise HTTPException(401, "Sign in required")
+
+
+ADMIN_ONLY = "Only NetInventory admins can change settings. Ask an admin (Settings > Sign-in > Admins) to add you."
+
+
+def admin_auth(request: Request):
+    """Signed in and an admin (Settings > Sign-in > Admins). Used by every endpoint that changes server-wide settings."""
+    user = ui_auth(request)
+    if not auth.is_admin(current_session(request)):
+        raise HTTPException(403, ADMIN_ONLY)
+    return user
 
 
 def ingest_auth(x_ingest_token: str = Header(default="")):
@@ -139,6 +158,7 @@ def db_session():
 
 
 UI = [Depends(ui_auth)]
+ADMIN = [Depends(admin_auth)]
 
 
 @app.get("/")
@@ -211,8 +231,8 @@ def do_logout(request: Request, db=Depends(db_session)):
 
 
 @app.get("/api/me")
-def me(user=Depends(ui_auth)):
-    return {"user": user, "version": __version__}
+def me(request: Request, user=Depends(ui_auth)):
+    return {"user": user, "version": __version__, "admin": auth.is_admin(current_session(request))}
 
 
 # ----------------------------------------------------------------- per-user view preferences (Computers columns)
@@ -261,23 +281,64 @@ class AuthIn(BaseModel):
     ad_group: str | None = None
     ad_server: str | None = None
     access_group: str | None = None     # a NetInventory user group (Groups tab) whose members may sign in
+    # Admins (may open Settings). None = leave as it is; "" = clear.
+    admin_users: str | None = None      # usernames, comma-separated
+    admin_group: str | None = None      # an AD group (name or DN), nested membership counts
+    admin_user_group: str | None = None  # a NetInventory user group
 
 
 def _auth_out(db) -> dict:
     return {"ad_domain": get_setting(db, "auth:ad_domain"), "ad_group": get_setting(db, "auth:ad_group"),
             "access_group": get_setting(db, "auth:access_group"), "user_groups": groups.names(db, "users"),
+            "admin_users": ", ".join(auth.admin_config(db)["users"]), "admin_group": get_setting(db, "auth:admin_group"),
+            "admin_user_group": get_setting(db, "auth:admin_user_group"),
+            "admins_set": auth.admin_configured(auth.admin_config(db)),
             "ad_server": get_setting(db, "auth:ad_server"), "local_user": settings.ui_user or None,
             "local_enabled": auth.local_enabled(), "local_disabled_file": str(auth.local_disabled_file()),
             "https": bool(settings.tls_cert)}
 
 
-@app.get("/api/auth", dependencies=UI)
+@app.get("/api/auth", dependencies=ADMIN)
 def get_auth(db=Depends(db_session)):
     return _auth_out(db)
 
 
+def _check_admin_change(db, request: Request, actor: str, new: dict) -> None:
+    """Refuse admin settings that would leave the person saving them without admin rights (no lock-out)."""
+    if not auth.admin_configured(new):
+        return
+    s = current_session(request)
+    if s is None or s.source == "local":
+        return      # the local admin is always an admin
+    try:
+        ok = auth.admin_live(db, actor, new)
+    except Exception as exc:
+        raise HTTPException(400, f"Couldn't check in AD whether you ({actor}) would still be an admin ({str(exc)[:150]}). "
+                                 f"Add your username ({actor}) to Admin usernames so you can't lock yourself out.")
+    if not ok:
+        raise HTTPException(400, f"You ({actor}) wouldn't be an admin with these settings, so you'd lose access to Settings. "
+                                 f"Add your username to Admin usernames, or pick a group you're in.")
+
+
 @app.put("/api/auth")
-def put_auth(body: AuthIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def put_auth(body: AuthIn, request: Request, actor=Depends(admin_auth), db=Depends(db_session)):
+    before = auth.admin_config(db)
+    new = dict(before)
+    if body.admin_users is not None:
+        users = [u.strip() for u in body.admin_users.replace(";", ",").split(",") if u.strip()]
+        if any(not re.fullmatch(r"[A-Za-z0-9 ._@\\$-]{1,128}", u) for u in users):
+            raise HTTPException(400, "admin usernames have characters that aren't allowed")
+        new["users"] = sorted({u.lower().split("\\")[-1].split("@")[0] for u in users})
+    if body.admin_group is not None:
+        v = body.admin_group.strip()
+        if v and not re.fullmatch(r"[A-Za-z0-9 ._=,\-]{1,255}", v):
+            raise HTTPException(400, "admin AD group has characters that aren't allowed")
+        new["ad_group"] = v
+    if body.admin_user_group is not None:
+        v = body.admin_user_group.strip()
+        if v and v not in groups.names(db, "users"):
+            raise HTTPException(400, f"there's no user group called {v} (Groups tab)")
+        new["user_group"] = v
     for k in ("ad_domain", "ad_group", "ad_server"):
         v = (getattr(body, k) or "").strip() or None
         if v and not __import__("re").fullmatch(r"[A-Za-z0-9 ._=,\-]{1,255}", v):
@@ -287,6 +348,17 @@ def put_auth(body: AuthIn, actor=Depends(ui_auth), db=Depends(db_session)):
     if access and access not in groups.names(db, "users"):
         raise HTTPException(400, f"there's no user group called {access} (Groups tab)")
     set_setting(db, "auth:access_group", access)
+    if new != before:
+        _check_admin_change(db, request, actor, new)
+        set_setting(db, "auth:admin_users", ", ".join(new["users"]) or None)
+        set_setting(db, "auth:admin_group", new["ad_group"] or None)
+        set_setting(db, "auth:admin_user_group", new["user_group"] or None)
+        s = current_session(request)
+        if s:       # the person saving keeps admin (checked above); everyone else is checked again on their next request
+            s.admin, s.admin_stamp = True, auth.admin_stamp(new)
+        db.add(AuditLog(actor=actor, action="auth.admins", target="sign-in",
+                        result=f"admin users={', '.join(new['users']) or '-'} AD group={new['ad_group'] or '-'} "
+                               f"user group={new['user_group'] or '-'}"[:1000]))
     db.add(AuditLog(actor=actor, action="auth.save", target="sign-in",
                     result=f"domain={body.ad_domain} group={body.ad_group} user group={access} server={body.ad_server}"))
     db.commit()
@@ -294,16 +366,17 @@ def put_auth(body: AuthIn, actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.post("/api/auth/test")
-def test_auth(body: LoginIn, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+def test_auth(body: LoginIn, request: Request, actor=Depends(admin_auth), db=Depends(db_session)):
     """Try an AD sign-in without signing in (and without turning off the local admin)."""
     if auth.locked_out(body.username, _client_ip(request)):
         raise HTTPException(429, "Too many failed attempts. Try again in 15 minutes.")
-    sam = auth.ad_login(db, body.username, body.password)
+    r = auth.ad_login_admin(db, body.username, body.password)
+    sam, adm = r if r else (None, False)
     if not sam:
         auth._fail(body.username, _client_ip(request))
     db.add(AuditLog(actor=actor, action="auth.test", target=f"user:{body.username[:64]}", result="ok" if sam else "refused"))
     db.commit()
-    return {"ok": bool(sam), "output": f"{sam} can sign in." if sam else
+    return {"ok": bool(sam), "admin": adm, "output": f"{sam} can sign in{' and is an admin' if adm else ' (not an admin: no Settings)'}." if sam else
             "Refused: wrong password, account disabled, not in the group, or no domain controller reachable. "
             "The server log has the reason."}
 
@@ -700,9 +773,19 @@ def group_members(name: str, db=Depends(db_session)):
                         for h, dyn in rows]}
 
 
+def _guard_sign_in_group(db, request: Request, *names: str | None) -> None:
+    """The user groups that decide who may sign in or who is an admin can only be changed by an admin, so nobody can
+    put themselves in the admin group from the Groups tab."""
+    used = {get_setting(db, "auth:access_group"), get_setting(db, "auth:admin_user_group")} - {None, ""}
+    if used & {n for n in names if n} and not auth.is_admin(current_session(request)):
+        raise HTTPException(403, "This group decides who can sign in or who is an admin (Settings > Sign-in), "
+                                 "so only NetInventory admins can change it.")
+
+
 @app.post("/api/groups")
-def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+def group_save(body: GroupIn, request: Request, old: str | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
     name = body.name.strip()
+    _guard_sign_in_group(db, request, old, name)
     kind = body.kind
     if kind not in groups.KINDS:
         raise HTTPException(400, "a group holds computers or users")
@@ -738,8 +821,9 @@ def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db
             r.name = name
         for j in db.scalars(select(ScanJob).where(ScanJob.group_name == old)):
             j.group_name = name
-        if kind == "users" and get_setting(db, "auth:access_group") == old:
-            set_setting(db, "auth:access_group", name)
+        for k in ("auth:access_group", "auth:admin_user_group"):
+            if kind == "users" and get_setting(db, k) == old:
+                set_setting(db, k, name)
     g = db.scalar(select(GroupDef).where(GroupDef.name == (old or name))) or GroupDef()
     g.name, g.kind, g.description, g.match = name, kind, (body.description or "").strip()[:1000] or None, body.match
     g.conditions, g.who, g.updated = json.dumps(conds), actor, utcnow()
@@ -767,13 +851,15 @@ def group_save(body: GroupIn, old: str | None = None, actor=Depends(ui_auth), db
 
 
 @app.delete("/api/groups/{name}")
-def group_delete(name: str, actor=Depends(ui_auth), db=Depends(db_session)):
+def group_delete(name: str, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
     jobs_using = [j.name for j in db.scalars(select(ScanJob).where(ScanJob.group_name == name))]
     if jobs_using:
         raise HTTPException(400, f"the scan job{'s' if len(jobs_using) > 1 else ''} {', '.join(jobs_using)} "
                                  f"scan{'' if len(jobs_using) > 1 else 's'} this group: change or delete {'them' if len(jobs_using) > 1 else 'it'} first")
     if get_setting(db, "auth:access_group") == name:
         raise HTTPException(400, "this group decides who can sign in (Settings > Sign-in): pick another there first")
+    if get_setting(db, "auth:admin_user_group") == name:
+        raise HTTPException(400, "this group decides who is an admin (Settings > Sign-in): pick another there first")
     from sqlalchemy import delete as sql_delete
     n = db.execute(sql_delete(DeviceGroup).where(DeviceGroup.name == name)).rowcount
     n += db.execute(sql_delete(UserGroup).where(UserGroup.name == name)).rowcount
@@ -1481,7 +1567,7 @@ class DeploySettingsIn(BaseModel):
 
 
 @app.put("/api/deployments/settings")
-def deployment_settings(body: DeploySettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def deployment_settings(body: DeploySettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     if not 1 <= body.queue_days <= 60 or not 1 <= body.parallel <= 32:
         raise HTTPException(400, "keep waiting 1-60 days, and send to 1-32 PCs at once")
     set_setting(db, "fix:queue_days", str(body.queue_days))
@@ -1553,7 +1639,7 @@ def _catalog_bg(download: bool) -> None:
 
 
 @app.post("/api/catalog/refresh")
-def catalog_refresh(user=Depends(ui_auth)):
+def catalog_refresh(user=Depends(admin_auth)):
     _catalog_bg(True)
     return {"ok": True, "output": "Downloading the app catalog. Statuses update in a minute."}
 
@@ -1571,7 +1657,7 @@ class RuleIn(BaseModel):
 
 
 @app.post("/api/catalog/rules")
-def add_rule(body: RuleIn, user=Depends(ui_auth), db=Depends(db_session)):
+def add_rule(body: RuleIn, user=Depends(admin_auth), db=Depends(db_session)):
     import re as _re
     if body.action not in ("ignore", "package", "target"):
         raise HTTPException(400, "action must be ignore, package or target")
@@ -1595,7 +1681,7 @@ def add_rule(body: RuleIn, user=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.delete("/api/catalog/rules/{rid}")
-def delete_rule(rid: int, user=Depends(ui_auth), db=Depends(db_session)):
+def delete_rule(rid: int, user=Depends(admin_auth), db=Depends(db_session)):
     r = db.get(SoftwareRule, rid)
     if r:
         db.add(AuditLog(actor=user, action="catalog.rule.delete", target=f"software:{r.match[:100]}", result=r.action))
@@ -1629,7 +1715,7 @@ def tls_download():
 
 
 @app.post("/api/tls/csr")
-def tls_csr(user=Depends(ui_auth), db=Depends(db_session)):
+def tls_csr(user=Depends(admin_auth), db=Depends(db_session)):
     from . import tlscert
     csr = tlscert.make_csr(str(_tls_folder()))
     db.add(AuditLog(actor=user, action="tls.request", target="https", result="certificate request created"))
@@ -1689,7 +1775,7 @@ def tls_store():
 
 
 @app.post("/api/tls/check")
-def tls_check(body: TlsIn, user=Depends(ui_auth)):
+def tls_check(body: TlsIn, user=Depends(admin_auth)):
     """What the upload holds and whether it would install, without changing anything."""
     return _tls_parse(body)[2]["summary"]
 
@@ -1704,7 +1790,7 @@ def _restart_soon() -> None:
 
 
 @app.post("/api/tls/import")
-def tls_import(body: TlsIn, user=Depends(ui_auth), db=Depends(db_session)):
+def tls_import(body: TlsIn, user=Depends(admin_auth), db=Depends(db_session)):
     import os
     from . import tlscert
     if not settings.tls_cert:
@@ -1741,7 +1827,7 @@ def list_exclusions(db=Depends(db_session)):
 
 
 @app.post("/api/exclusions")
-def add_exclusion(body: ExclusionIn, user=Depends(ui_auth), db=Depends(db_session)):
+def add_exclusion(body: ExclusionIn, user=Depends(admin_auth), db=Depends(db_session)):
     try:
         value = exclusions.validate(body.kind, body.value)
     except ValueError as exc:
@@ -1756,7 +1842,7 @@ def add_exclusion(body: ExclusionIn, user=Depends(ui_auth), db=Depends(db_sessio
 
 
 @app.delete("/api/exclusions/{eid}")
-def delete_exclusion(eid: int, user=Depends(ui_auth), db=Depends(db_session)):
+def delete_exclusion(eid: int, user=Depends(admin_auth), db=Depends(db_session)):
     r = db.get(ScanExclusion, eid)
     if r:
         db.add(AuditLog(actor=user, action="exclusion.delete", target=f"{r.kind}:{r.value[:200]}", result="ok"))
@@ -1960,7 +2046,7 @@ def wlc_settings(db=Depends(db_session)):
 
 
 @app.put("/api/wireless/settings")
-def put_wlc_settings(body: WlcSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def put_wlc_settings(body: WlcSettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     try:
         wireless.save(db, body.model_dump())
     except ValueError as exc:
@@ -1974,7 +2060,7 @@ def put_wlc_settings(body: WlcSettingsIn, actor=Depends(ui_auth), db=Depends(db_
 
 
 @app.post("/api/wireless/test")
-def wlc_test(actor=Depends(ui_auth), db=Depends(db_session)):
+def wlc_test(actor=Depends(admin_auth), db=Depends(db_session)):
     try:
         return {"ok": True, "output": wireless.test(db)}
     except Exception as exc:
@@ -1995,7 +2081,7 @@ def jira_settings(db=Depends(db_session)):
 
 
 @app.put("/api/jira/settings")
-def put_jira_settings(body: JiraSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def put_jira_settings(body: JiraSettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     try:
         jira.save(db, body.model_dump())
     except ValueError as exc:
@@ -2009,7 +2095,7 @@ def put_jira_settings(body: JiraSettingsIn, actor=Depends(ui_auth), db=Depends(d
 
 
 @app.post("/api/jira/test")
-def jira_test(actor=Depends(ui_auth), db=Depends(db_session)):
+def jira_test(actor=Depends(admin_auth), db=Depends(db_session)):
     try:
         return {"ok": True, "output": jira.test(db)}
     except jira.JiraError as exc:
@@ -2176,7 +2262,7 @@ def list_creds(db=Depends(db_session)):
 
 
 @app.post("/api/credentials")
-def save_cred(body: CredIn, cid: int | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+def save_cred(body: CredIn, cid: int | None = None, actor=Depends(admin_auth), db=Depends(db_session)):
     from .secrets import encrypt
     if body.kind not in ("windows", "snmp2", "snmp3"):
         raise HTTPException(400, "kind must be windows, snmp2 or snmp3")
@@ -2201,7 +2287,7 @@ def save_cred(body: CredIn, cid: int | None = None, actor=Depends(ui_auth), db=D
 
 
 @app.delete("/api/credentials/{cid}")
-def delete_cred(cid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+def delete_cred(cid: int, actor=Depends(admin_auth), db=Depends(db_session)):
     c = db.get(Credential, cid)
     if c:
         db.add(AuditLog(actor=actor, action="credential.delete", target=f"credential:{c.name}"))
@@ -2214,7 +2300,7 @@ class CredTest(BaseModel):
     host: str
 
 
-@app.post("/api/credentials/{cid}/test", dependencies=UI)
+@app.post("/api/credentials/{cid}/test", dependencies=ADMIN)
 def test_cred(cid: int, body: CredTest, db=Depends(db_session)):
     """Try a credential against one host: LDAP bind + WinRM for Windows, sysName get for SNMP."""
     import asyncio
@@ -2283,7 +2369,7 @@ def list_targets(db=Depends(db_session)):
 
 
 @app.post("/api/targets")
-def save_target(body: TargetIn, tid: int | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+def save_target(body: TargetIn, tid: int | None = None, actor=Depends(admin_auth), db=Depends(db_session)):
     if body.kind not in ("ad_domain", "ad_computer_path", "ad_user_path", "ip_range"):
         raise HTTPException(400, "bad kind")
     if body.kind == "ip_range":
@@ -2329,7 +2415,7 @@ def save_target(body: TargetIn, tid: int | None = None, actor=Depends(ui_auth), 
 
 
 @app.delete("/api/targets/{tid}")
-def delete_target(tid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+def delete_target(tid: int, actor=Depends(admin_auth), db=Depends(db_session)):
     t = db.get(ScanTarget, tid)
     if t:
         db.add(AuditLog(actor=actor, action="target.delete", target=f"{t.kind}:{t.value}"))
@@ -2484,7 +2570,7 @@ def _check_job(body: JobIn, db) -> None:
 
 
 @app.post("/api/jobs")
-def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+def save_job(body: JobIn, jid: int | None = None, actor=Depends(admin_auth), db=Depends(db_session)):
     _check_job(body, db)
     j = db.get(ScanJob, jid) if jid else ScanJob()
     if j is None:
@@ -2510,7 +2596,7 @@ def save_job(body: JobIn, jid: int | None = None, actor=Depends(ui_auth), db=Dep
 
 
 @app.delete("/api/jobs/{jid}")
-def delete_job(jid: int, actor=Depends(ui_auth), db=Depends(db_session)):
+def delete_job(jid: int, actor=Depends(admin_auth), db=Depends(db_session)):
     j = db.get(ScanJob, jid)
     if j:
         db.add(AuditLog(actor=actor, action="job.delete", target=f"job:{j.name[:100]}", result="ok"))
@@ -2559,7 +2645,7 @@ class JobSettingsIn(BaseModel):
 
 
 @app.put("/api/jobs/settings")
-def job_settings(body: JobSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def job_settings(body: JobSettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     if not 1 <= body.max_concurrent <= 8:
         raise HTTPException(400, "1 to 8 jobs at once")
     set_setting(db, "jobs:max_concurrent", str(body.max_concurrent))
@@ -2582,7 +2668,7 @@ class RetentionIn(BaseModel):
 
 
 @app.put("/api/retention")
-def put_retention(body: RetentionIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def put_retention(body: RetentionIn, actor=Depends(admin_auth), db=Depends(db_session)):
     try:
         retention.save(db, body.days)
     except ValueError as exc:
@@ -2594,7 +2680,7 @@ def put_retention(body: RetentionIn, actor=Depends(ui_auth), db=Depends(db_sessi
 
 
 @app.post("/api/retention/run")
-def run_retention(actor=Depends(ui_auth), db=Depends(db_session)):
+def run_retention(actor=Depends(admin_auth), db=Depends(db_session)):
     removed = retention.run(db)
     db.add(AuditLog(actor=actor, action="retention.run", target="data retention", result=json.dumps(removed)[:500]))
     db.commit()
@@ -2627,7 +2713,7 @@ def agents_list(request: Request, db=Depends(db_session)):
 
 
 @app.post("/api/agents/token")
-def agents_token(actor=Depends(ui_auth), db=Depends(db_session)):
+def agents_token(actor=Depends(admin_auth), db=Depends(db_session)):
     tok = agentapi.new_token(db)
     db.add(AuditLog(actor=actor, action="agent.token", target="enrollment", result="new token"))
     db.commit()
@@ -2635,7 +2721,7 @@ def agents_token(actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.delete("/api/agents/token")
-def agents_token_off(actor=Depends(ui_auth), db=Depends(db_session)):
+def agents_token_off(actor=Depends(admin_auth), db=Depends(db_session)):
     for k in ("agent:token_hash", "agent:token_hint", "agent:token_created"):
         set_setting(db, k, "")
     db.add(AuditLog(actor=actor, action="agent.token", target="enrollment", result="turned off"))
@@ -2649,7 +2735,7 @@ class AgentSettingsIn(BaseModel):
 
 
 @app.put("/api/agents/settings")
-def agents_settings(body: AgentSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def agents_settings(body: AgentSettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     if body.approve not in agentapi.APPROVE or not 1 <= body.inventory_hours <= 336:
         raise HTTPException(400, "bad settings")
     set_setting(db, "agent:approve", body.approve)
@@ -2660,7 +2746,7 @@ def agents_settings(body: AgentSettingsIn, actor=Depends(ui_auth), db=Depends(db
 
 
 @app.post("/api/agents/{aid}/{what}")
-def agents_action(aid: int, what: str, actor=Depends(ui_auth), db=Depends(db_session)):
+def agents_action(aid: int, what: str, actor=Depends(admin_auth), db=Depends(db_session)):
     from .db import Agent
     a = db.get(Agent, aid)
     if not a or what not in ("approve", "revoke", "inventory", "delete"):
@@ -2792,7 +2878,7 @@ class UpdateIn(BaseModel):
 
 
 @app.post("/api/update/install")
-def update_install(body: UpdateIn | None = None, actor=Depends(ui_auth), db=Depends(db_session)):
+def update_install(body: UpdateIn | None = None, actor=Depends(admin_auth), db=Depends(db_session)):
     force = bool(body and body.force)
     try:
         msg = updater.install(db, force=force)
@@ -2904,7 +2990,7 @@ class RcSettingsIn(BaseModel):
 
 
 @app.put("/api/rc/settings")
-def rc_settings(body: RcSettingsIn, actor=Depends(ui_auth), db=Depends(db_session)):
+def rc_settings(body: RcSettingsIn, actor=Depends(admin_auth), db=Depends(db_session)):
     if (body.nouser not in rcontrol.NOUSER or body.approve not in rcontrol.APPROVE or not 10 <= body.ask_seconds <= 300
             or not 1 <= body.max_hours <= 24 or not 5 <= body.idle_minutes <= 480):
         raise HTTPException(400, "bad settings")
@@ -2940,7 +3026,7 @@ def rc_check(request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.post("/api/rc/token")
-def rc_token(actor=Depends(ui_auth), db=Depends(db_session)):
+def rc_token(actor=Depends(admin_auth), db=Depends(db_session)):
     tok = rcontrol.new_token(db)
     db.add(AuditLog(actor=actor, action="rc.token", target="remote control enrollment", result="new token"))
     db.commit()
@@ -2948,7 +3034,7 @@ def rc_token(actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.delete("/api/rc/token")
-def rc_token_off(actor=Depends(ui_auth), db=Depends(db_session)):
+def rc_token_off(actor=Depends(admin_auth), db=Depends(db_session)):
     for k in ("rc:token_hash", "rc:token_hint", "rc:token_created"):
         set_setting(db, k, "")
     db.add(AuditLog(actor=actor, action="rc.token", target="remote control enrollment", result="turned off"))
@@ -2957,7 +3043,7 @@ def rc_token_off(actor=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.post("/api/rc/agents/{aid}/{what}")
-async def rc_agent_action(aid: int, what: str, actor=Depends(ui_auth)):
+async def rc_agent_action(aid: int, what: str, actor=Depends(admin_auth)):
     from .db import RcAgent
     from starlette.concurrency import run_in_threadpool
 
@@ -3072,7 +3158,9 @@ def get_settings(user=Depends(ui_auth), db=Depends(db_session)):
 
 
 @app.put("/api/settings")
-def put_settings(body: dict, actor=Depends(ui_auth), db=Depends(db_session)):
+def put_settings(body: dict, request: Request, actor=Depends(ui_auth), db=Depends(db_session)):
+    if any(k in SETTING_KEYS and k not in USER_SETTING_KEYS for k in body) and not auth.is_admin(current_session(request)):
+        raise HTTPException(403, ADMIN_ONLY)
     before = get_settings(actor, db)
     for k, v in body.items():
         if k in SETTING_KEYS:
@@ -3148,34 +3236,63 @@ def export(fmt: str, spec: QuerySpec, db=Depends(db_session)):
                     headers={"Content-Disposition": f'attachment; filename="{spec.dataset.removeprefix("v_")}.{ext}"'})
 
 
-@app.get("/api/reports", dependencies=UI)
-def list_reports(db=Depends(db_session)):
+# Saved reports belong to whoever saved them: only they see them, unless they share them with everyone.
+# Reports saved before 0.44 have no owner and stay shared; only admins can change or delete a shared report
+# someone else saved.
+def _report_visible(r: SavedReport, user: str) -> bool:
+    return r.owner is None or bool(r.shared) or r.owner == user.lower()
+
+
+def _report_editable(r: SavedReport, user: str, admin: bool) -> bool:
+    return r.owner == user.lower() or (admin and (r.owner is None or bool(r.shared)))
+
+
+@app.get("/api/reports")
+def list_reports(request: Request, user=Depends(ui_auth), db=Depends(db_session)):
+    admin = auth.is_admin(current_session(request))
     built = [{"id": k, "name": v[0], "builtin": True,
               "spec": {"dataset": v[1], "fields": v[2], "filters": v[3], "sort": v[4]}}
              for k, v in reports.PREBUILT.items()]
-    saved = [{"id": f"saved:{r.id}", "name": r.name, "builtin": False, "spec": json.loads(r.spec)}
-             for r in db.scalars(select(SavedReport).order_by(SavedReport.name))]
+    saved = [{"id": f"saved:{r.id}", "name": r.name, "builtin": False, "spec": json.loads(r.spec),
+              "mine": r.owner == user.lower(), "shared": r.owner is None or bool(r.shared), "owner": r.owner,
+              "editable": _report_editable(r, user, admin)}
+             for r in db.scalars(select(SavedReport).order_by(SavedReport.name)) if _report_visible(r, user)]
     return built + saved
 
 
 class SaveReport(BaseModel):
     name: str
     spec: QuerySpec
+    shared: bool = False
 
 
-@app.post("/api/reports", dependencies=UI)
-def save_report(body: SaveReport, db=Depends(db_session)):
-    r = db.scalar(select(SavedReport).where(SavedReport.name == body.name)) or SavedReport(name=body.name)
+@app.post("/api/reports")
+def save_report(body: SaveReport, request: Request, user=Depends(ui_auth), db=Depends(db_session)):
+    name = body.name.strip()[:128]
+    if not name:
+        raise HTTPException(400, "give the report a name")
+    r = db.scalar(select(SavedReport).where(SavedReport.name == name))
+    if r and not _report_editable(r, user, auth.is_admin(current_session(request))):
+        raise HTTPException(409, f"There's already a report called {name} that isn't yours. Pick another name.")
+    if not r:
+        r = SavedReport(name=name, owner=user.lower())
     r.spec = body.spec.model_dump_json()
+    if r.owner == user.lower():
+        r.shared = body.shared
     db.add(r)
     db.commit()
     return {"id": f"saved:{r.id}"}
 
 
-@app.delete("/api/reports/{rid}", dependencies=UI)
-def delete_report(rid: str, db=Depends(db_session)):
-    r = db.get(SavedReport, int(rid.split(":")[-1]))
+@app.delete("/api/reports/{rid}")
+def delete_report(rid: str, request: Request, user=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        r = db.get(SavedReport, int(rid.split(":")[-1]))
+    except ValueError:
+        raise HTTPException(404)
     if r:
+        if not _report_editable(r, user, auth.is_admin(current_session(request))):
+            raise HTTPException(403, "Only the person who saved this report, or an admin for a shared one, can delete it.")
         db.delete(r)
         db.commit()
     return {"ok": True}

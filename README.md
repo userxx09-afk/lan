@@ -124,6 +124,22 @@ auto_install = false    # true installs new versions without waiting for a click
   Per-person settings are kept per user on the server: the Computers columns, and the DameWare sign-in mode
   (Settings > DameWare is now "your own setting"; the old shared value is the default for anyone who hasn't chosen).
   Scan schedules, credentials, groups and the rest of Settings stay shared.
+- **Admins (0.44):** only admins see the Settings page and can change server-wide settings (sign-in, credentials, scan
+  targets and schedule, exclusions, retention, agents, remote control, HTTPS, Jira, wireless, updates, app catalog rules,
+  deployment queue). Name them in **Settings > Sign-in > Admins**: admin usernames, an AD group (nested membership counts)
+  and/or a NetInventory user group. While none of these are set, everyone who can sign in is an admin, so upgrading changes
+  nothing. The local admin account is always an admin (the break-glass file above is the way back in if the list is ever
+  wrong), and Settings refuses to save an admin list that would leave out the person saving it. Admin rights are worked out
+  at sign-in; when the list changes, other people's sessions are checked again on their next click (live in AD with the
+  scan credential; if AD can't be asked they lose Settings until they sign in again). Only admins can edit or delete the
+  user groups used for sign-in or admins, so nobody can add themselves from the Groups tab. Non-admins still pick their own
+  DameWare mode by clicking their name at the top right.
+- **Per-user state (0.44):** saved reports in the report builder belong to whoever saved them and only they see them,
+  unless they tick *Share with everyone*. Reports saved before 0.44 stay shared; only an admin can change or delete a
+  shared report someone else saved, and nobody can overwrite another person's report by saving one with the same name.
+  The browser's own autofill history is turned off for every search and filter box, so one person's searches aren't
+  offered to the next. An open page that finds the browser is now signed in as someone else (or signed out) starts over,
+  and Back after signing out reloads instead of showing the last person's page.
 - **Stored credentials:** encrypted with a key that Windows DPAPI protects for this machine (`secret.key.dpapi`). Copying
   the file to another server doesn't decrypt anything, so after a rebuild the scan credentials have to be entered again.
 
