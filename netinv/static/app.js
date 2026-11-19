@@ -103,13 +103,15 @@ const macVendor = (mac) => {
 const macCell = (v) => (v ? `${esc(v)}${macVendor(v) ? ` <span class="small muted">${esc(macVendor(v))}</span>` : ""}` : "");
 // What is plugged into a port, best name first: the computer, else the name the device gave DHCP, else its IP, else its MAC.
 const devLabel = (d) => d.hostname || d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac;
+// Name first, then IP; the MAC only when neither is known (it stays in the hover text).
 const devCell = (d) => {
-  const vendor = macVendor(d.mac);
-  const tip = [d.mac, vendor, d.ip || d.dhcp_ip].filter(Boolean).join(" · ");
-  if (d.hostname) return `<span title="${esc(tip)}">${hostLink(d.hostname)}</span>`;
-  if (d.device_kind) return `<span title="${esc(tip)}">${kindPill(d.device_kind)} ${esc(d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac)}</span>`;
-  const name = d.dhcp_name || d.ip || d.dhcp_ip;
-  return `<span title="${esc(tip)}">${name ? esc(name) : `<code>${esc(d.mac)}</code>`}${vendor ? ` <span class="small muted">${esc(vendor)}</span>` : ""}</span>`;
+  const vendor = macVendor(d.mac), ip = d.ip || d.dhcp_ip;
+  const tip = [d.mac, vendor, ip].filter(Boolean).join(" · ");
+  const name = d.hostname ? hostLink(d.hostname) : esc(d.phone || d.dhcp_name || "");
+  const kind = d.device_kind && d.device_kind !== "computer" ? `${kindPill(d.device_kind)} ` : "";
+  const parts = [name, ip ? (name ? `<span class="small muted">${esc(ip)}</span>` : esc(ip)) : ""].filter(Boolean);
+  if (!parts.length) parts.push(`<code>${esc(d.mac)}</code>${vendor ? ` <span class="small muted">${esc(vendor)}</span>` : ""}`);
+  return `<span title="${esc(tip)}">${kind}${parts.join(" ")}</span>`;
 };
 // phones first (the PC is usually plugged in behind it), then computers, then the rest
 const DEV_ORDER = (d) => (d.device_kind && d.device_kind !== "computer" ? 0 : d.hostname ? 1 : 2);

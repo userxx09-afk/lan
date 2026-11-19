@@ -237,12 +237,14 @@ async def poll_device(ip: str, cfg: dict) -> dict:
             if status.get(idx, 3) == 3 and ifi is not None:
                 fdb.append((norm_mac(bytes(idx[:6]).hex()), ifi, None))
         method = "BRIDGE-MIB" if fdb else ""
-    if not fdb and vendor == "Cisco":
+    if vendor == "Cisco":
         # Cisco IOS / IOS-XE only expose BRIDGE-MIB per VLAN (community@vlan, or SNMPv3 context vlan-N). The plain
         # community answers for VLAN 1 alone, which is usually empty or just the switch itself, so always walk
-        # every active VLAN.
+        # every active VLAN. Some IOS-XE releases also answer Q-BRIDGE-MIB, but only for VLAN 1 (the uplinks and the
+        # odd VLAN 1 device), so a Q-BRIDGE answer must not stop the per-VLAN walk: merge both.
         vlans = [i[1] for i, v in await s.walk(CISCO_VTP_VLAN_STATE) if int(v) == 1 and i[1] not in range(1002, 1006)]
-        seen: set[tuple[str, int]] = set()
+        qbridge = len(fdb)
+        seen: set[tuple[str, int]] = {(m, i) for m, i, _ in fdb}
         for vlan in vlans or [None]:
             bp = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX, vlan)} if vlan else baseport
             st = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS, vlan)}
@@ -252,6 +254,8 @@ async def poll_device(ip: str, cfg: dict) -> dict:
                     seen.add((mac, ifi))
                     fdb.append((mac, ifi, vlan))
         method = f"Cisco per-VLAN BRIDGE-MIB ({len(vlans)} VLANs)" if vlans else "BRIDGE-MIB (no VLAN list from VTP-MIB)"
+        if qbridge:
+            method += f" + Q-BRIDGE-MIB ({qbridge})"
 
     port_vlan: dict[int, int] = {}
     for i, v in await s.walk(DOT1Q_PVID):
