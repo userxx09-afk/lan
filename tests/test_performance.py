@@ -48,7 +48,9 @@ with TestClient(m.app) as c:
         # an agent report with the same NICs doesn't rewrite them (so the map isn't recomputed after every report)
         dev = db.get(Device, dev.id)
         nics = [Nic(mac=n.mac, ip=n.ip, description=n.description) for n in dev.nics]
-        ids = sorted(n.id for n in dev.nics)
+        apply_endpoint(db, EndpointPayload(hostname=dev.hostname, nics=nics))      # first report normalises the MACs
+        db.commit()
+        ids = sorted(n.id for n in db.get(Device, dev.id).nics)
         apply_endpoint(db, EndpointPayload(hostname=dev.hostname, nics=nics))
         db.commit()
         # (not the stale flag itself: the server's background threads may write MAC/NIC data at any moment)
