@@ -102,7 +102,8 @@ VIEWS: dict[str, str] = {
         FROM switch_ports sp JOIN network_devices nd ON nd.id = sp.switch_id
     """,
     "v_network_devices": """
-        SELECT sysname, ip, vendor, location, sysdescr, uptime_s, last_polled, poll_error,
+        SELECT sysname, ip, vendor, location, sysdescr, uptime_s, last_polled, poll_error, poll_note,
+               (SELECT COUNT(*) FROM mac_sightings ms JOIN switch_ports p2 ON p2.id = ms.port_id WHERE p2.switch_id = nd.id) AS mac_count,
                (SELECT COUNT(*) FROM switch_ports p WHERE p.switch_id = nd.id) AS port_count
         FROM network_devices nd
     """,

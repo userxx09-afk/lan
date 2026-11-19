@@ -444,6 +444,15 @@ Click a switch under *Network devices* (or pick it in the drop-down) to list onl
 computers on each port; click a port to see every MAC learned on it, which computer owns it and, for uplinks, which
 access port that computer is really on. Ports keep their old type until the next switch scan.
 
+### MAC tables per switch (0.34)
+
+*Network devices* now shows how many MACs each switch gave on its last scan and how (Q-BRIDGE-MIB, BRIDGE-MIB or Cisco
+per-VLAN BRIDGE-MIB), or why it gave none: a red **0** with the reason, such as the SNMP view not including BRIDGE-MIB
+(1.3.6.1.2.1.17) or a walk that timed out. Cisco IOS / IOS-XE switches are now always read VLAN by VLAN
+(`community@vlan`, or the SNMPv3 context `vlan-N`, which needs `snmp-server group <g> v3 priv context vlan- match prefix`);
+before, a switch that answered anything for VLAN 1 was read for VLAN 1 only. Switches that don't serve
+dot1dBasePortIfIndex are read with bridge port = ifIndex.
+
 ### Port status and last active (0.33)
 
 *Switch ports* shows each port's link as a **green up**, **red down** (enabled, but nothing plugged in or the device is
@@ -706,7 +715,7 @@ Deploy:
 `agent/Send-Inventory.ps1` (the older one-shot script using the shared `ingest_token`) still works but has no pinning
 or per-PC secret; prefer the agent.
 
-## Remote control (NetInventory Remote, 0.34)
+## Remote control (NetInventory Remote, 0.36)
 
 A **second, separate agent** for remote control from the dashboard. The NetInventory Agent above stays report-only;
 NetInventory Remote does nothing but screen sharing with mouse and keyboard, and only when a session is asked for.

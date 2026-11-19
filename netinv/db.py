@@ -241,6 +241,7 @@ class NetworkDevice(Base):
     uptime_s: Mapped[int | None] = mapped_column(Integer)
     last_polled: Mapped[datetime | None] = mapped_column(DateTime)
     poll_error: Mapped[str | None] = mapped_column(Text)
+    poll_note: Mapped[str | None] = mapped_column(Text)            # MACs found and how, or why none (last poll)
     ports: Mapped[list[SwitchPort]] = relationship(back_populates="switch", cascade="all, delete-orphan")
 
 
