@@ -117,6 +117,7 @@ const pluggedIn = (v, r) => {
   const devs = r._devs || [];
   if (r.port_type === "uplink") return devs.length ? `<span class="small muted">${devs.length} MACs (uplink)</span>` : "";
   const shown = devs.slice(0, 4).map(devCell).join("<br>");
+  if (r._old) return `<span class="muted" title="Not learned at the last scan: this is the last thing seen on the port">${shown} <span class="small">last seen ${agoUtc(devs[0].last_seen)}</span></span>`;
   return devs.length > 4 ? `${shown}<br><span class="small muted">+${devs.length - 4} more</span>` : shown;
 };
 // Wi-Fi: how the PC is connected, and the access point it was last on (with that AP's switch port when we know it).
@@ -170,6 +171,8 @@ const logonHost = (v, r) => (!v ? `<span class="pill mute">unknown</span>` : `<s
   : `${esc(v)} <span class="small muted">not in inventory</span>`}</span>`);
 const dcCell = (v, r) => (v ? esc(v) : `<span class="small muted">${esc(r.source && r.source.startsWith("local:") ? "PC's own log" : r.source || "")}</span>`);
 const userLink = (v) => (v ? `<a class="link" data-user="${esc(v)}">${esc(v)}</a>` : "");
+// "Jane Doe (gr131211)", the name from AD, linked to the user page; just the user ID when AD has no name.
+const userNameLink = (v, name) => (!v ? "" : name ? `<a class="link" data-user="${esc(v)}">${esc(name)} <span class="muted">(${esc(v)})</span></a>` : userLink(v));
 const diskPill = (v) => (v === null || v === undefined ? "" : `<span class="pill ${v < 10 ? "bad" : v < 20 ? "warn" : "good"}">${v}%</span>`);
 
 // ------------------------------------------------------------ tabs
@@ -272,7 +275,7 @@ const COL_LABELS = {
   port_last_seen: "Port last seen", asset_location: "Asset location", purchase_date: "Purchased", warranty_end: "Warranty ends",
   logon_events: "Logon events", role: "Role", av_name: "Antivirus", av_enabled: "AV on", av_up_to_date: "AV up to date",
   scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
-  ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
+  last_user_name: "Last user name", ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
   agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks", ip_source: "IP from",
   connection: "Connection", wifi_ssid: "Wi-Fi network", wifi_ap: "Access point", wifi_seen: "Wi-Fi last seen", wifi_signal: "Wi-Fi signal %", wifi_bssid: "BSSID",
 };
@@ -312,7 +315,7 @@ function renderPresets() {
   if (grid.preset.length) $("#clearpreset").onclick = () => { grid.preset = []; grid.page = 0; loaders.computers(); };
 }
 const gridSpec = (extra = {}) => ({
-  dataset: "v_devices", fields: [...new Set([...GRID_COLS.map((c) => c[0]), "uptime", "last_boot", "online", "online_checked", "online_changed", "online_via", "agent_status", "agent_last_seen", "agent_version", "agent_note"])],
+  dataset: "v_devices", fields: [...new Set([...GRID_COLS.map((c) => c[0]), "uptime", "last_boot", "last_user_name", "online", "online_checked", "online_changed", "online_via", "agent_status", "agent_last_seen", "agent_version", "agent_note"])],
   filters: [...Object.entries(grid.filters).filter(([, v]) => v.trim()).map(([field, value]) => ({ field, op: "contains", value: value.trim() })),
     ...(grid.domain ? [{ field: "domain", op: "eq", value: grid.domain }] : []),
     ...grid.preset.map(({ field, op, value }) => ({ field, op, value }))],
@@ -346,7 +349,7 @@ loaders.computers = async () => {
 };
 function gridCell(c, v, row) {
   if (c === "hostname") return `${statusDot(row)} ${hostLink(v)}`;
-  if (c === "last_user") return userLink(v);
+  if (c === "last_user") return userNameLink(v, row.last_user_name);
   if (c === "uptime") return uptimeCell(row);
   if (c === "min_disk_pct_free") return diskPill(v);
   if (c === "pending_updates") return v ? `<span class="pill warn">${v}</span>` : v === 0 ? `<span class="pill good">0</span>` : "";
@@ -545,7 +548,7 @@ function renderAssetTab(d, tab) {
           <div class="track"><div class="fill ${k.pct_free < 10 ? "bad" : k.pct_free < 20 ? "warn" : ""}" style="width:${100 - (k.pct_free || 0)}%"></div></div></div>`).join("") || `<p class="muted">No disk data yet.</p>`}
       </div>
       <div class="panel"><h3>Users</h3>
-        ${kvRow("Signed in now", esc(v.current_user))}${kvRow("Last user", `${userLink(v.last_user)} <span class="muted">${fmtDate(v.last_user_logon)}</span>`)}
+        ${kvRow("Signed in now", esc(v.current_user))}${kvRow("Last user", `${userNameLink(v.last_user, v.last_user_name)} <span class="muted">${fmtDate(v.last_user_logon)}</span>`)}
         <h3>Directory</h3>
         ${kvRow("AD enabled", v.ad_enabled === null ? "" : v.ad_enabled ? "Yes" : "No")}${kvRow("AD last logon", fmtDate(v.ad_last_logon))}
         ${kvRow("OU", esc(v.ou))}
@@ -2146,36 +2149,42 @@ loaders.portmap = async () => {
       ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
 };
 loaders.network = async () => {
-  // pm: every MAC on an access port, grouped onto its port below, so each port shows what is plugged into it
-  const [dc, nd, sp, pm] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
-    post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 }),
-    post("/api/query", { dataset: "v_port_map", fields: ["switch_ip", "port", "mac", "hostname", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name"], limit: 200000 })]);
-  const byPort = {};
-  pm.rows.forEach((d) => (byPort[`${d.switch_ip}|${d.port}`] ||= []).push(d));
-  sp.rows.forEach((r) => {
-    r._devs = (byPort[`${r.switch_ip}|${r.port}`] || []).sort((a, b) => DEV_ORDER(a) - DEV_ORDER(b));
-    r.plugged_in = r._devs.map((d) => [devLabel(d), d.mac, macVendor(d.mac)].join(" ")).join(" ");   // for the filter box
-  });
+  const [dc, nd] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" })]);
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
-  // Clicking a switch (or picking it in the drop-down) shows only that switch's ports.
+  // Switch ports load for one switch at a time: picked in the drop-down or clicked under Network devices.
   const sel = $("#spswitch");
   const keep = sel.value;
-  sel.innerHTML = `<option value="">All switches</option>` + nd.rows.slice().sort((a, b) => String(a.sysname || a.ip).localeCompare(String(b.sysname || b.ip)))
+  sel.innerHTML = `<option value="">Pick a switch…</option>` + nd.rows.slice().sort((a, b) => String(a.sysname || a.ip).localeCompare(String(b.sysname || b.ip)))
     .map((x) => `<option value="${esc(x.ip)}">${esc(x.sysname || x.ip)}${x.sysname ? ` (${esc(x.ip)})` : ""}</option>`).join("");
   sel.value = nd.rows.some((x) => x.ip === keep) ? keep : "";
-  const showPorts = () => {
+  const showPorts = async () => {
     const ip = sel.value;
-    $("#spall").hidden = !ip;
-    table($("#sptable"), ip ? sp.rows.filter((r) => r.switch_ip === ip) : sp.rows,
-      ["switch_name", "port", "alias", "status", "last_active", "plugged_in", "speed_mbps", "vlan", "port_type", "neighbor"],
+    if (!ip) { $("#sptable").innerHTML = `<p class="muted">Pick a switch above, or click one under Network devices, to see its ports.</p>`; return; }
+    $("#sptable").innerHTML = `<p class="muted">Loading ports…</p>`;
+    let d;
+    try { d = await api(`/api/switch-ports?switch_ip=${encodeURIComponent(ip)}`); } catch (e) { $("#sptable").innerHTML = `<p class="muted">${esc(errText(e))}</p>`; return; }
+    if (sel.value !== ip) return;              // picked another switch while this one loaded
+    const nowMacs = d.macs.filter((m) => m.current).length;
+    const summary = `<p class="muted small" id="spsummary">${nowMacs} MAC addresses on access ports at the last scan${d.macs.length > nowMacs ? `, ${d.macs.length - nowMacs} seen there before` : ""}, ${d.uplink_macs} on uplinks${d.switch?.poll_note ? ` · ${esc(d.switch.poll_note)}` : ""}${d.port_map?.error ? ` · <span class="pill bad">port map error</span> ${esc(d.port_map.error)}` : ""}</p>`;
+    const byPort = {};
+    d.macs.forEach((m) => (byPort[m.port] ||= []).push(m));
+    d.ports.forEach((r) => {
+      const all = byPort[r.port] || [];
+      const now = all.filter((m) => m.current);
+      r._devs = (now.length ? now : all.slice(0, 1)).sort((a, b) => DEV_ORDER(a) - DEV_ORDER(b));
+      r._old = !now.length && all.length > 0;
+      r.plugged_in = all.map((m) => [devLabel(m), m.mac, macVendor(m.mac)].join(" ")).join(" ");   // for the filter box
+    });
+    table($("#sptable"), d.ports,
+      ["port", "alias", "status", "last_active", "plugged_in", "mac_count", "speed_mbps", "vlan", "port_type", "neighbor"],
       { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
-        labels: { last_active: "last active", plugged_in: "plugged in", port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+        labels: { last_active: "last active", plugged_in: "plugged in", mac_count: "MACs", port_type: "type", neighbor: "neighbor (LLDP/CDP)", speed_mbps: "Mb/s" },
         cell: { status: portStatus, last_active: lastActive,
           port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, plugged_in: pluggedIn } });
+    $("#sptable").insertAdjacentHTML("afterbegin", summary);
   };
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;
-  $("#spall").onclick = () => { sel.value = ""; showPorts(); };
   table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "mac_count", "uptime_s", "last_polled", "poll_note", "poll_error"],
     { rowTitle: "Show this switch's ports", rowClick: (r) => pickSwitch(r.ip),
       cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""),

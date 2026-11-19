@@ -75,4 +75,11 @@ with TestClient(m.app) as c:
     assert not pm["02:ee:00:00:00:03"]["dhcp_name"] and not pm["02:ee:00:00:00:03"]["ip"] and not pm["02:ee:00:00:00:03"]["hostname"]
     r = c.get("/api/switch-port", params={"switch_ip": "10.77.0.252", "port": "1/1/1"}).json()["macs"]
     assert r[0]["dhcp_name"] == "PRN-LOBBY" and r[0]["dhcp_ip"] == "10.77.9.9", r
+    # one switch's ports with what is plugged in, straight from its MAC table
+    d = c.get("/api/switch-ports", params={"switch_ip": "10.77.0.252"}).json()
+    assert {p["port"] for p in d["ports"]} == {"1/1/1", "1/1/2", "1/1/3", "1/1/4"} and d["switch"]["ip"] == "10.77.0.252"
+    on = {(m["port"], m["mac"]): m for m in d["macs"]}
+    assert on[("1/1/1", "02:ee:00:00:00:01")]["current"] == 1 and on[("1/1/1", "02:ee:00:00:00:01")]["dhcp_name"] == "PRN-LOBBY"
+    assert on[("1/1/3", "02:ee:00:00:00:03")]["current"] == 0          # seen 45 days ago, not at the last poll
+    assert d["uplink_macs"] == 0 and d["port_map"]["error"] is None
 print("switch port status: up/down/disabled, last active from link changes and MAC history OK")

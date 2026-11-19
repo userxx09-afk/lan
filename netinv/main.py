@@ -20,7 +20,7 @@ from sqlalchemy import bindparam, select, text
 from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, portmap, reports, retention, scanning, updater, wireless
 from .config import settings
 from .correlate import MAC_OWNER_HOST, MAC_OWNER_VIA, create_views
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .db import (AdUser, AuditLog, Credential, Deployment, Script, ScanExclusion, ScanJob, ScanTarget, SoftwareRule, get_setting, set_setting)
 from .db import (ChangeEvent, CollectorRun, Comment, CustomField, Device, DeviceGroup, GroupDef, SavedReport, SessionLocal, UserGroup,
@@ -363,6 +363,47 @@ def switch_port(switch_ip: str, port: str, db=Depends(db_session)):
         FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id JOIN network_devices nd ON nd.id = sp.switch_id
         WHERE nd.ip = :ip AND sp.name = :port ORDER BY ms.last_seen DESC LIMIT 2000"""), {"ip": switch_ip, "port": port}))
     return {"port": info[0], "macs": macs}
+
+
+@app.get("/api/switch-ports", dependencies=UI)
+def switch_ports(switch_ip: str, db=Depends(db_session)):
+    """One switch's ports, each with what is plugged into it: every MAC the switch learned on that port, straight from
+    its MAC table (not the network-wide port map), tied to a computer, else a DHCP name / IP, else the bare MAC.
+    current = learned at the switch's last poll; older ones are kept so a down port can show what was last on it."""
+    ports = reports.run_query(db, "v_switch_ports", filters=[{"field": "switch_ip", "op": "eq", "value": switch_ip}],
+                              sort="port", limit=5000)["rows"]
+    macs = _rows_of(db.execute(text(f"""
+        SELECT sp.name AS port, ms.mac, ms.last_seen,
+               nd.last_polled,
+               {MAC_OWNER_HOST} AS hostname,
+               CASE WHEN ms.mac = sp.neighbor_mac THEN sp.neighbor_kind END AS device_kind,
+               CASE WHEN ms.mac = sp.neighbor_mac AND sp.neighbor_kind = 'phone' THEN sp.neighbor END AS phone,
+               (SELECT a.ip FROM arp_entries a WHERE a.mac = ms.mac ORDER BY a.last_seen DESC LIMIT 1) AS ip,
+               (SELECT s.ip FROM ip_sightings s WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%'
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
+               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = ms.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name
+        FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id JOIN network_devices nd ON nd.id = sp.switch_id
+        WHERE nd.ip = :ip AND sp.is_uplink = :f
+        ORDER BY ms.last_seen DESC LIMIT 20000"""), {"ip": switch_ip, "f": False}))
+    for m in macs:      # learned at (about) the last poll; an hour of slack for polls that take a while
+        seen, polled = _dt(m.get("last_seen")), _dt(m.pop("last_polled", None))
+        m["current"] = 1 if seen is None or polled is None or seen >= polled - timedelta(hours=1) else 0
+    nd = reports.run_query(db, "v_network_devices", filters=[{"field": "ip", "op": "eq", "value": switch_ip}])["rows"]
+    uplink_macs = db.execute(text("SELECT COUNT(*) FROM mac_sightings ms JOIN switch_ports sp ON sp.id = ms.port_id "
+                                  "JOIN network_devices nd ON nd.id = sp.switch_id WHERE nd.ip = :ip AND sp.is_uplink = :t"),
+                             {"ip": switch_ip, "t": True}).scalar()
+    return {"switch": nd[0] if nd else None, "ports": ports, "macs": macs, "uplink_macs": uplink_macs,
+            "port_map": portmap.status()}
+
+
+def _dt(v):
+    if v is None or isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", ""))
+    except ValueError:
+        return None
 
 
 @app.get("/api/devices/{hostname}", dependencies=UI)
