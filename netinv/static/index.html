@@ -343,6 +343,26 @@
         </form>
         <div id="jirastate" class="muted"></div>
       </div>
+      <div class="panel" id="wlcpanel">
+        <h3>Wireless controller (optional)</h3>
+        <p class="muted">Shows which access point each Wi-Fi device is on, including phones, printers and PCs that can't be scanned, and names the APs.
+          PCs that are scanned or run the agent report their own Wi-Fi network and AP without this. Read only: NetInventory never changes anything on the controller.
+          The password or API key is encrypted on this server and never shown again.</p>
+        <form id="wlcform" class="lifeform">
+          <label>Controller <select name="kind"><option value="">None</option><option value="unifi">UniFi Network (local account)</option>
+            <option value="meraki">Cisco Meraki (Dashboard API key)</option><option value="cisco">Cisco WLC, AireOS or Catalyst 9800 (SNMP)</option></select></label>
+          <label data-wlc="unifi cisco">Address <input name="url" placeholder="https://unifi.corp.local, https://10.0.0.5:8443, or the WLC's IP"></label>
+          <label data-wlc="unifi">Account <input name="user" autocomplete="off" placeholder="a local, read-only UniFi account"></label>
+          <label data-wlc="unifi meraki"><span data-wlc="unifi">Password</span><span data-wlc="meraki">API key</span> <input name="secret" type="password" autocomplete="new-password" placeholder="blank = keep the saved one"></label>
+          <label data-wlc="unifi">Site <input name="site" placeholder="default"></label>
+          <label data-wlc="meraki">Organization ID <input name="org" placeholder="blank = the key's first organization"></label>
+          <label data-wlc="unifi" class="check"><input type="checkbox" name="verify_tls"> Check the controller's certificate (leave off for a self-signed one)</label>
+          <p data-wlc="cisco" class="muted small">Uses the SNMP credentials saved under Credentials. The WLC needs SNMP read access from this server.</p>
+          <label data-wlc="unifi meraki cisco">Poll every <span class="row"><input name="every_min" type="number" min="5" max="1440" style="width:6em"> minutes</span></label>
+          <div class="row"><button>Save</button><button type="button" class="ghost" id="wlctest">Test connection</button><button type="button" class="ghost" id="wlcpoll">Poll now</button><button type="button" class="ghost danger" id="wlcclear" hidden>Remove password / key</button></div>
+        </form>
+        <div id="wlcstate" class="muted"></div>
+      </div>
       <div class="panel" id="agentpanel">
         <h3>NetInventory Agent (optional)</h3>
         <p class="muted">For laptops and PCs that WinRM can't reach. A tiny scheduled task (as LOCAL SERVICE) sends a signed heartbeat every 5 minutes and the inventory once a day or when you click Rescan.

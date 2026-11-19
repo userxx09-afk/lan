@@ -69,10 +69,10 @@ LIBRARY: list[tuple[str, str, str, dict]] = [
 
     ("net_portmap", "Network", "Which port each computer is plugged into", {"spec": S("v_port_map", ["hostname", "ip", "mac", "switch_name", "port", "port_alias", "vlan", "last_seen"], sort="switch_name")}),
     ("net_per_switch", "Network", "Devices per switch", {"sql": "SELECT switch_name, COUNT(*) AS macs, COUNT(hostname) AS known_computers FROM v_port_map GROUP BY switch_name ORDER BY switch_name"}),
-    ("net_unknown", "Network", "Unknown MAC addresses on access ports", {"spec": S("v_port_map", ["mac", "ip", "switch_name", "port", "vlan", "last_seen"], [F("hostname", "empty")], "switch_name")}),
+    ("net_unknown", "Network", "Unknown MAC addresses on access ports", {"spec": S("v_port_map", ["mac", "dhcp_name", "ip", "dhcp_ip", "switch_name", "port", "vlan", "last_seen"], [F("hostname", "empty")], "switch_name")}),
     ("net_moves", "Network", "Computers that moved switch port", {"spec": S("v_changes", ["time", "hostname", "detail"], [F("kind", "eq", "moved")], "time", True)}),
     ("net_devices", "Network", "Network devices", {"spec": S("v_network_devices", ["sysname", "ip", "vendor", "location", "port_count", "last_polled", "poll_error"], sort="sysname")}),
-    ("net_ports_down", "Network", "Switch ports down", {"spec": S("v_switch_ports", ["switch_name", "port", "alias", "speed_mbps"], [F("oper_up", "eq", "0")], "switch_name")}),
+    ("net_ports_down", "Network", "Switch ports down", {"spec": S("v_switch_ports", ["switch_name", "port", "alias", "status", "last_active", "status_since", "neighbor"], [F("status", "ne", "up")], "last_active")}),
 
     ("lg_last_user", "Logons", "Last user per computer", {"spec": S("v_devices", ["hostname", "last_user", "last_user_logon", "current_user"], sort="hostname")}),
     ("lg_user_devices", "Logons", "Computers per user", {"spec": S("v_user_devices", ["username", "hostname", "last_logon", "logon_count"], sort="username")}),

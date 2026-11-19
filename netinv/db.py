@@ -64,6 +64,14 @@ class Device(Base):
     pending_reboot: Mapped[bool | None] = mapped_column(Boolean)
     last_patch_installed: Mapped[datetime | None] = mapped_column(DateTime)
     agent_last_report: Mapped[datetime | None] = mapped_column(DateTime)
+    # How the PC is connected (its default-route adapter): wired or wireless, and for Wi-Fi the network and access
+    # point it was last on, from the PC's own scan/agent or from the wireless controller.
+    connection: Mapped[str | None] = mapped_column(String(16))
+    wifi_ssid: Mapped[str | None] = mapped_column(String(64))
+    wifi_bssid: Mapped[str | None] = mapped_column(String(17))
+    wifi_signal: Mapped[int | None] = mapped_column(Integer)        # percent
+    wifi_ap: Mapped[str | None] = mapped_column(String(128))        # access point name, when we can tell
+    wifi_seen: Mapped[datetime | None] = mapped_column(DateTime)
     agent_version: Mapped[str | None] = mapped_column(String(16))
     gpu: Mapped[str | None] = mapped_column(String(255))
     # Lifecycle / asset management (edited in the UI)
@@ -245,6 +253,13 @@ class SwitchPort(Base):
     name: Mapped[str | None] = mapped_column(String(64))
     alias: Mapped[str | None] = mapped_column(String(255))
     oper_up: Mapped[bool | None] = mapped_column(Boolean)
+    admin_up: Mapped[bool | None] = mapped_column(Boolean)         # False = shut down / disabled on the switch
+    # When the link last changed state (ifLastChange): for a down port, when it went down. The switch's boot time
+    # when it has not changed since the switch started.
+    last_change: Mapped[datetime | None] = mapped_column(DateTime)
+    changed_since_boot: Mapped[bool | None] = mapped_column(Boolean)
+    # Last time we know the link was up: seen up at a poll, went down at last_change, or a MAC learned on it.
+    last_up: Mapped[datetime | None] = mapped_column(DateTime)
     speed_mbps: Mapped[int | None] = mapped_column(Integer)
     neighbor: Mapped[str | None] = mapped_column(String(255))  # LLDP/CDP neighbour, if any
     neighbor_port: Mapped[str | None] = mapped_column(String(255))
@@ -271,6 +286,41 @@ class MacSighting(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     port: Mapped[SwitchPort] = relationship()
+
+
+class WirelessAp(Base):
+    """An access point, from the wireless controller (UniFi, Meraki, Cisco WLC)."""
+    __tablename__ = "wireless_aps"
+    __table_args__ = (UniqueConstraint("source", "key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(32))                 # unifi | meraki | cisco
+    key: Mapped[str] = mapped_column(String(64))                    # MAC or serial: the controller's id for it
+    name: Mapped[str | None] = mapped_column(String(128))
+    mac: Mapped[str | None] = mapped_column(String(17))             # wired (Ethernet) MAC
+    radio_mac: Mapped[str | None] = mapped_column(String(17))       # base radio MAC (Cisco)
+    bssids: Mapped[str | None] = mapped_column(Text)                # comma-separated, when the controller lists them
+    ip: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(64))
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class WifiSighting(Base):
+    """A Wi-Fi client seen on an access point: one row per client MAC and AP, first..last time seen there.
+    From the PC itself (source pc) or the wireless controller (source unifi / meraki / cisco)."""
+    __tablename__ = "wifi_sightings"
+    __table_args__ = (UniqueConstraint("mac", "ap_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mac: Mapped[str] = mapped_column(String(17), index=True)        # the client's Wi-Fi MAC
+    hostname: Mapped[str | None] = mapped_column(String(64), index=True)   # when the PC reported it itself
+    client_name: Mapped[str | None] = mapped_column(String(128))    # what the controller calls the client
+    ip: Mapped[str | None] = mapped_column(String(64))
+    ssid: Mapped[str | None] = mapped_column(String(64))
+    bssid: Mapped[str | None] = mapped_column(String(17))
+    ap_key: Mapped[str] = mapped_column(String(128))                # AP name, else the BSSID
+    ap_name: Mapped[str | None] = mapped_column(String(128))
+    source: Mapped[str] = mapped_column(String(32))
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
 class ArpEntry(Base):

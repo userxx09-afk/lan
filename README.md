@@ -444,6 +444,40 @@ Click a switch under *Network devices* (or pick it in the drop-down) to list onl
 computers on each port; click a port to see every MAC learned on it, which computer owns it and, for uplinks, which
 access port that computer is really on. Ports keep their old type until the next switch scan.
 
+### Port status and last active (0.33)
+
+*Switch ports* shows each port's link as a **green up**, **red down** (enabled, but nothing plugged in or the device is
+off) or **grey disabled** (shut down on the switch) pill. For a port that isn't up, **last active** says when it last had
+a link, so you can tell a PC that was just switched off (*recent*, within 24 hours) from a desk that has been empty for
+weeks (*unused 30+ days*). It comes from the switch's ifLastChange (the moment the link went down), the last scan that
+saw the port up, and the newest MAC learned on it, so ports polled before 0.33 get a time from their MAC history on the
+next scan. A port that has been down since the switch restarted, with nothing seen on it before, shows *not since switch
+restart*. The *Switch ports down* report lists them oldest first.
+
+**Plugged in** lists what is on each access port, best name first: the computer (linked), else the name the device
+asked DHCP for, else its IP (switch/router ARP table or DHCP lease), else just its MAC. A phone is listed first with
+the PC behind it underneath. MACs show their maker where it is in a short built-in list (phones, printers, cameras,
+NAS, Raspberry Pi, VMs...) or *random MAC* for a privacy address; hover a device for its MAC and IP.
+
+### Wi-Fi: which access point (0.33)
+
+Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or
+**Wi-Fi**) and, on Wi-Fi, the network (SSID), signal and the BSSID of the access point. The computer page shows
+*Connection* and *Access point* with when it was last seen there and, when the AP is plugged into a polled switch,
+that switch port. The *Switch location* tab lists every AP the PC has been on, newest first, since laptops move.
+Computers list columns: Connection, Wi-Fi network, Access point, Wi-Fi last seen. On Windows 11 24H2 and later the
+SSID/BSSID need location services turned on; without it the PC still reports that it is on Wi-Fi.
+
+A BSSID is named from the wireless controller's AP list, or from a switch port whose LLDP/CDP neighbour is an access
+point with a nearby MAC (vendors number BSSIDs up from the AP's MAC), so it works without a controller when the APs
+send LLDP.
+
+**Settings > Wireless controller** (optional, read only) adds every Wi-Fi client, phones and printers included, and
+names the APs: **UniFi Network** (address, a local read-only account, site; UniFi OS consoles and the classic 8443
+controller), **Cisco Meraki** (Dashboard API key, optional organization ID) or a **Cisco WLC** (AireOS or Catalyst 9800,
+read over SNMP with the saved SNMP credentials). It is polled every 15 minutes by default; *Test connection* and *Poll
+now* are on the same panel. The password or key is stored encrypted and never shown again.
+
 ### Live status and uptime
 
 The dot next to each PC is live: **green** when it answered the last up check (or was just scanned), **red** when it

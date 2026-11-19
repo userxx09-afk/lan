@@ -60,6 +60,77 @@ const neighborCell = (v, r) => {
     : r.neighbor_switch_ip ? portLink(v, r.neighbor_switch_ip, r.neighbor_port, v) : esc(v);
   return `${kindPill(r.neighbor_kind)} ${name}${r.neighbor_port ? ` <span class="small muted">${esc(r.neighbor_port)}</span>` : ""}`;
 };
+// Port link state: green up, red down (enabled but nothing connected or switched off), grey disabled on the switch.
+const PORT_STATUS = { up: ["up", "good", "Link is up"], down: ["down", "bad", "Enabled, but the link is down: nothing plugged in or the device is off"],
+  disabled: ["disabled", "mute", "Shut down (administratively disabled) on the switch"] };
+const portStatus = (v, r) => {
+  const st = PORT_STATUS[v];
+  if (!st) return "";
+  const since = r.status_since && r.changed_since_boot !== false ? ` since ${fmtDate(r.status_since)}` : r.status_since ? " since the switch started" : "";
+  return `<span class="pill ${st[1]}" title="${esc(st[2] + since)}">${st[0]}</span>`;
+};
+// When a down port last had a link: tells "just switched off" from "nothing here for a month".
+const lastActive = (v, r) => {
+  if (r.status === "up") return `<span class="muted">now</span>`;
+  if (!r.status) return "";
+  if (!v) {
+    const boot = r.switch_uptime_s && r.last_polled ? agoUtc(new Date(utc(r.last_polled) - r.switch_uptime_s * 1000).toISOString()) : "";
+    return `<span class="muted" title="Not up while NetInventory has been watching it, and down since the switch last started">${boot ? `not since switch restart (${boot})` : "never seen up"}</span>`;
+  }
+  const days = (Date.now() - utc(v)) / 86400000;
+  const tag = days < 1 ? `<span class="pill warn" title="Had a link in the last 24 hours">recent</span> `
+    : days >= 30 ? `<span class="pill mute" title="No link for 30 days or more">unused 30+ days</span> ` : "";
+  return `${tag}${esc(fmtDate(v))} <span class="muted">${agoUtc(v)}</span>`;
+};
+// Maker of a network card, from the first half of its MAC: a short built-in list of the makers of things often found
+// on access ports with no computer record (phones, printers, cameras, NAS, IoT, VMs). Random MACs are flagged.
+const OUI = {};
+Object.entries({
+  VMware: "000c29 005056 000569", "Hyper-V VM": "00155d", VirtualBox: "080027", "QEMU/KVM VM": "525400",
+  "Raspberry Pi": "b827eb dca632 e45f01 d83add 28cdc1", Ubiquiti: "24a43c 44d9e7 788a20 b4fbe4 f09fc2 fcecda 802aa8 dc9fdb",
+  Polycom: "0004f2 64167f", Yealink: "001565 805ec0", Grandstream: "000b82", Snom: "000413", Mitel: "08000f",
+  Brother: "008077 30055c 3c2af4", Xerox: "0000aa", Lexmark: "000400 0021b7", Canon: "000085", Kyocera: "00c0ee", Zebra: "00074d",
+  Axis: "00408c accc8e b8a44f", Synology: "001132", QNAP: "245ebe 00089b", APC: "00c0b7", Sonos: "000e58",
+  Espressif: "240ac4", Nest: "18b430", Meraki: "00180a", Aruba: "000b86 24dec6", Realtek: "00e04c",
+  Dell: "001422 b8ac6f f8b156 1866da d4bed9 002170",
+}).forEach(([vendor, list]) => list.split(" ").forEach((o) => (OUI[o] = vendor)));
+const macVendor = (mac) => {
+  const h = String(mac || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (h.length < 6) return "";
+  return OUI[h.slice(0, 6)] || (parseInt(h[1], 16) & 2 ? "random MAC" : "");
+};
+const macCell = (v) => (v ? `${esc(v)}${macVendor(v) ? ` <span class="small muted">${esc(macVendor(v))}</span>` : ""}` : "");
+// What is plugged into a port, best name first: the computer, else the name the device gave DHCP, else its IP, else its MAC.
+const devLabel = (d) => d.hostname || d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac;
+const devCell = (d) => {
+  const vendor = macVendor(d.mac);
+  const tip = [d.mac, vendor, d.ip || d.dhcp_ip].filter(Boolean).join(" · ");
+  if (d.hostname) return `<span title="${esc(tip)}">${hostLink(d.hostname)}</span>`;
+  if (d.device_kind) return `<span title="${esc(tip)}">${kindPill(d.device_kind)} ${esc(d.phone || d.dhcp_name || d.ip || d.dhcp_ip || d.mac)}</span>`;
+  const name = d.dhcp_name || d.ip || d.dhcp_ip;
+  return `<span title="${esc(tip)}">${name ? esc(name) : `<code>${esc(d.mac)}</code>`}${vendor ? ` <span class="small muted">${esc(vendor)}</span>` : ""}</span>`;
+};
+// phones first (the PC is usually plugged in behind it), then computers, then the rest
+const DEV_ORDER = (d) => (d.device_kind && d.device_kind !== "computer" ? 0 : d.hostname ? 1 : 2);
+const pluggedIn = (v, r) => {
+  const devs = r._devs || [];
+  if (r.port_type === "uplink") return devs.length ? `<span class="small muted">${devs.length} MACs (uplink)</span>` : "";
+  const shown = devs.slice(0, 4).map(devCell).join("<br>");
+  return devs.length > 4 ? `${shown}<br><span class="small muted">+${devs.length - 4} more</span>` : shown;
+};
+// Wi-Fi: how the PC is connected, and the access point it was last on (with that AP's switch port when we know it).
+const WLC_KIND = { unifi: "UniFi", meraki: "Meraki", cisco: "Cisco WLC" };
+function wifiRow(v, hist) {
+  const last = (hist || [])[0];
+  if (v.connection !== "wireless" && !last) return v.connection === "wired" ? kvRow("Connection", "wired") : "";
+  const ap = last?.ap || v.wifi_ap || v.wifi_bssid;
+  const where = last?.port ? ` · plugged into ${esc(last.switch_name)} ${portLink(last.switch_name, last.switch_ip, last.port)}` : "";
+  const ssid = v.wifi_ssid || last?.ssid;
+  const when = last?.last_seen || v.wifi_seen;
+  return kvRow("Connection", `${v.connection === "wired" ? "wired now · " : ""}<span class="pill good">Wi-Fi</span>${ssid ? ` ${esc(ssid)}` : ""}${v.wifi_signal != null && v.connection === "wireless" ? ` <span class="muted">${esc(v.wifi_signal)}%</span>` : ""}`)
+    + kvRow("Access point", ap ? `<b>${esc(ap)}</b>${where} ${when ? `<span class="muted">last seen ${fmtDate(when)} (${agoUtc(when)})</span>` : ""}`
+      : `<span class="muted">not known (needs the BSSID from the PC or a wireless controller in Settings)</span>`);
+}
 const hostList = (v) => (v ? String(v).split(", ").map(hostLink).join(" ") : "");
 async function openPort(swip, port) {
   let d;
@@ -68,7 +139,8 @@ async function openPort(swip, port) {
   const p = d.port;
   drawer(`<h2>${esc(p.switch_name || p.switch_ip)} · ${esc(p.port)} ${portType(p.port_type)}</h2>
     <div class="summary"><div class="panel">
-      ${kvRow("Description", esc(p.alias))}${kvRow("Status", p.oper_up ? "up" : "down")}${kvRow("Speed", p.speed_mbps ? `${p.speed_mbps} Mb/s` : "")}
+      ${kvRow("Description", esc(p.alias))}${kvRow("Status", `${portStatus(p.status, p)}${p.status_since ? ` <span class="small muted">${p.changed_since_boot === false
+        ? "since the switch started" : `since ${esc(fmtDate(p.status_since))}`}</span>` : ""}`)}${p.status && p.status !== "up" ? kvRow("Last active", lastActive(p.last_active, p)) : ""}${kvRow("Speed", p.speed_mbps ? `${p.speed_mbps} Mb/s` : "")}
       ${kvRow("VLAN", esc(p.vlan))}${kvRow("MACs learned", esc(p.mac_count))}
       ${kvRow("Neighbor (LLDP/CDP)", neighborCell(p.neighbor, p) + (p.neighbor_ip ? ` <span class="small muted">${esc(p.neighbor_ip)}</span>` : ""))}
       ${kvRow("Computers", hostList(p.computers))}
@@ -79,8 +151,9 @@ async function openPort(swip, port) {
   $("#detail .panel").querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
   table($("#pmacs"), d.macs, ["mac", "hostname", "ip", "vlan", "device_kind", "now_on", "last_seen"], {
     labels: { device_kind: "is", now_on: "now on" },
-    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? "" : `<span class="pill mute">unknown</span>`),
-      device_kind: kindPill } });
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.dhcp_name ? `${esc(r.dhcp_name)} <span class="small muted">DHCP name</span>`
+        : r.device_kind ? "" : `<span class="pill mute">unknown</span>`),
+      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, device_kind: kindPill } });
 }
 document.addEventListener("click", (e) => {
   const a = e.target.closest("[data-swport]");
@@ -200,6 +273,7 @@ const COL_LABELS = {
   scan_error_kind: "Scan error", scan_error: "Scan error detail", scan_error_time: "Scan error time",
   ad_description: "AD description", ad_location: "AD location", online: "Online", agent_version: "Agent version",
   agent_last_seen: "Agent last report", disks_unhealthy: "Unhealthy disks", ip_source: "IP from",
+  connection: "Connection", wifi_ssid: "Wi-Fi network", wifi_ap: "Access point", wifi_seen: "Wi-Fi last seen", wifi_signal: "Wi-Fi signal %", wifi_bssid: "BSSID",
 };
 const HIDDEN_COLS = new Set(["online_checked", "online_changed", "online_via", "agent_note"]);   // shown via the status dot / tooltips
 const BOOL_COLS = new Set(["ad_enabled", "pending_reboot", "av_enabled", "av_up_to_date", "online"]);
@@ -464,6 +538,7 @@ function renderAssetTab(d, tab) {
           return `<b>${esc(v.switch_name)}</b> ${portLink(v.switch_name, at.switch_ip, v.switch_port)} · VLAN ${esc(v.vlan ?? "?")}
             ${at.phone ? ` · behind phone ${esc(at.phone)}` : ""} <span class="muted">seen ${fmtDate(v.port_last_seen)}</span> ${viaPill(at.matched_by)}`;
         })() : `<span class="muted">not found on any switch${d.nics.length || v.mac ? "" : " (no MAC address known for this PC yet: it needs the agent, a WinRM scan or a DHCP lease)"}</span>`)}
+        ${wifiRow(v, d.wifi)}
         <h3>Disks</h3>
         ${d.disks.map((k) => `<div class="disk"><div class="dl"><b>${esc(k.drive)}</b> ${k.free_gb} GB free of ${k.size_gb} GB</div>
           <div class="track"><div class="fill ${k.pct_free < 10 ? "bad" : k.pct_free < 20 ? "warn" : ""}" style="width:${100 - (k.pct_free || 0)}%"></div></div></div>`).join("") || `<p class="muted">No disk data yet.</p>`}
@@ -532,7 +607,13 @@ function renderAssetTab(d, tab) {
     table($("#up2"), d.updates.filter((u) => u.status === "installed"), ["kb", "title", "installed_on"], { sort: "installed_on" });
   } else if (tab === "location") {
     el.innerHTML = `<p class="muted">Every access port this PC's network adapters have been seen on, matched by MAC address
-      (uplinks to other switches excluded). Click a port to see everything else on it.</p><div id="loc"></div>`;
+      (uplinks to other switches excluded). Click a port to see everything else on it.</p><div id="loc"></div>
+      ${d.wifi.length ? `<h2>Wi-Fi access points</h2><p class="muted">Each access point this PC has been on, newest first, from the PC's own scan or the
+        wireless controller. The switch port is where that access point is plugged in.</p><div id="wloc"></div>` : ""}`;
+    if (d.wifi.length) table($("#wloc"), d.wifi, ["ap", "ssid", "port", "bssid", "mac", "source", "first_seen", "last_seen"], {
+      labels: { ap: "access point", ssid: "Wi-Fi network", port: "AP switch port", source: "from" },
+      cell: { port: (v, r) => (v ? `${esc(r.switch_name)} ${portLink(r.switch_name, r.switch_ip, v)}` : ""),
+        source: (v) => esc(v === "pc" ? "PC scan" : WLC_KIND[v] || v) } });
     table($("#loc"), d.location, ["switch_name", "port", "port_alias", "vlan", "phone", "mac", "matched_by", "first_seen", "last_seen"], {
       labels: { phone: "behind phone", matched_by: "MAC from" },
       cell: { port: (v, r) => portLink(r.switch_name, r.switch_ip, v), matched_by: (v) => esc(v) } });
@@ -2051,15 +2132,24 @@ function formModal(html, wide = false, init = null) {
 
 // ------------------------------------------------------------ port map / network
 loaders.portmap = async () => {
-  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
+  const r = await post("/api/query", { dataset: "v_port_map", fields: ["switch_name", "switch_ip", "port", "port_alias", "vlan", "hostname", "matched_by", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name", "mac", "last_seen"], sort: "switch_name", limit: 50000 });
   table($("#pmtable"), r.rows, ["switch_name", "port", "port_alias", "vlan", "hostname", "phone", "ip", "mac", "last_seen"], { filterEl: $("#pmfilter"),
     labels: { phone: "behind phone" },
-    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind) : hostLink(v)),
-      port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
+    cell: { hostname: (v, r) => (v ? `${hostLink(v)} ${viaPill(r.matched_by)}` : r.device_kind ? kindPill(r.device_kind)
+        : r.dhcp_name ? `${esc(r.dhcp_name)} <span class="small muted">DHCP name</span>` : hostLink(v)),
+      ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v) } });
 };
 loaders.network = async () => {
   const [dc, nd, sp] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" }),
     post("/api/query", { dataset: "v_switch_ports", sort: "switch_name", limit: 50000 })]);
+  // every MAC on an access port, grouped onto its port, so each port shows what is plugged into it
+  const pm = await post("/api/query", { dataset: "v_port_map", fields: ["switch_ip", "port", "mac", "hostname", "device_kind", "phone", "ip", "dhcp_ip", "dhcp_name"], limit: 200000 });
+  const byPort = {};
+  pm.rows.forEach((d) => (byPort[`${d.switch_ip}|${d.port}`] ||= []).push(d));
+  sp.rows.forEach((r) => {
+    r._devs = (byPort[`${r.switch_ip}|${r.port}`] || []).sort((a, b) => DEV_ORDER(a) - DEV_ORDER(b));
+    r.plugged_in = r._devs.map((d) => [devLabel(d), d.mac, macVendor(d.mac)].join(" ")).join(" ");   // for the filter box
+  });
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
   // Clicking a switch (or picking it in the drop-down) shows only that switch's ports.
   const sel = $("#spswitch");
@@ -2071,12 +2161,11 @@ loaders.network = async () => {
     const ip = sel.value;
     $("#spall").hidden = !ip;
     table($("#sptable"), ip ? sp.rows.filter((r) => r.switch_ip === ip) : sp.rows,
-      ["switch_name", "port", "alias", "oper_up", "speed_mbps", "vlan", "port_type", "neighbor", "computers", "unknown_devices"],
+      ["switch_name", "port", "alias", "status", "last_active", "plugged_in", "speed_mbps", "vlan", "port_type", "neighbor"],
       { filterEl: $("#spfilter"), rowTitle: "Show everything on this port", rowClick: (r) => openPort(r.switch_ip, r.port),
-        labels: { port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
-        cell: { oper_up: (v) => `<span class="pill ${v ? "good" : "mute"}">${v ? "up" : "down"}</span>`,
-          port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, computers: hostList,
-          unknown_devices: (v, r) => (v && r.port_type !== "uplink" ? v : "") } });
+        labels: { last_active: "last active", plugged_in: "plugged in", port_type: "type", neighbor: "neighbor (LLDP/CDP)", unknown_devices: "unknown MACs", speed_mbps: "Mb/s" },
+        cell: { status: portStatus, last_active: lastActive,
+          port: (v, r) => portLink(r.switch_name, r.switch_ip, v), port_type: portType, neighbor: neighborCell, plugged_in: pluggedIn } });
   };
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;
@@ -2233,7 +2322,7 @@ let creds = [], svcAccount = null;
 const svcCred = () => ({ id: 0, name: "This server's own account", kind: "service", username: svcAccount?.account || "" });
 const credName = (i) => i === 0 ? "This server's own account" : creds.find((c) => c.id === i)?.name || `#${i}`;
 loaders.settings = async () => {
-  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira();
+  loadUpdate(); loadAuth(); loadExclusions(); loadTls(); loadAgents(); loadJira(); loadWlc();
   const [c, t, s, sa] = await Promise.all([api("/api/credentials"), api("/api/targets"), api("/api/settings"), api("/api/service-account").catch(() => null)]);
   creds = c; appSettings = s; svcAccount = sa; loadCatalog();
   $("#dhcpform")["dhcp:servers"].value = s["dhcp:servers"] || "";
@@ -2978,6 +3067,41 @@ $("#jirapick").onclick = async () => {
 };
 $("#jiraform").project.onchange = (e) => { e.target.value = e.target.value.trim().toUpperCase(); };
 
+
+// ------------------------------------------------------------ Settings: wireless controller
+const wlcFields = () => {
+  const k = $("#wlcform").kind.value;
+  $("#wlcpanel").querySelectorAll("[data-wlc]").forEach((el) => (el.hidden = !k || !el.dataset.wlc.split(" ").includes(k)));
+};
+async function loadWlc() {
+  const c = await api("/api/wireless/settings"), f = $("#wlcform");
+  f.kind.value = c.kind || ""; f.url.value = c.url || ""; f.user.value = c.user || ""; f.secret.value = ""; f.site.value = c.site || "";
+  f.org.value = c.org || ""; f.verify_tls.checked = c.verify_tls; f.every_min.value = c.every_min || 15;
+  $("#wlcclear").hidden = !c.secret_set;
+  wlcFields();
+  $("#wlcstate").innerHTML = kvRow("Status", c.kind ? `<span class="pill ${c.last_result && c.last_result.includes("failed") ? "bad" : "good"}">${esc(WLC_KIND[c.kind])}</span> ${c.aps} access points known`
+      : `<span class="pill mute">off</span>`)
+    + (c.last_poll ? kvRow("Last poll", `${fmtDate(c.last_poll)} <span class="muted">${agoUtc(c.last_poll)}</span><br>${esc(c.last_result || "")}`) : "");
+}
+const wlcBody = (f) => ({ kind: f.kind.value || null, url: f.url.value, user: f.user.value, secret: f.secret.value || null, site: f.site.value,
+  org: f.org.value, verify_tls: f.verify_tls.checked, every_min: +f.every_min.value || 15 });
+$("#wlcform").kind.onchange = wlcFields;
+$("#wlcform").onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api("/api/wireless/settings", { method: "PUT", body: JSON.stringify(wlcBody(e.target)) }); toast("Wireless controller saved. Use Test connection to check it."); loadWlc(); }
+  catch (er) { toast(errText(er), true); }
+};
+$("#wlctest").onclick = async () => {
+  try { const r = await post("/api/wireless/test", {}); toast(r.output, !r.ok); } catch (er) { toast(errText(er), true); }
+};
+$("#wlcpoll").onclick = async () => {
+  try { const r = await post("/api/wireless/poll", {}); toast(r.output, !r.ok); loadWlc(); } catch (er) { toast(errText(er), true); }
+};
+$("#wlcclear").onclick = async () => {
+  if (!(await confirmBox("Remove the saved controller password / API key? Polling stops until a new one is saved."))) return;
+  try { await api("/api/wireless/settings", { method: "PUT", body: JSON.stringify({ ...wlcBody($("#wlcform")), secret: null, clear_secret: true }) }); loadWlc(); }
+  catch (er) { toast(errText(er), true); }
+};
 
 // ------------------------------------------------------------ Logs: audit log, server log, collector runs, log files on the server
 const LOG_PAGE = 200;

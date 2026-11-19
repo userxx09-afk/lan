@@ -4,6 +4,7 @@ from __future__ import annotations
 import random
 from datetime import timedelta
 
+from sqlalchemy import select
 from .db import (AdGroup, AdUser, ArpEntry, IpSighting, ChangeEvent, CollectorRun, Comment, DeviceGroup, DomainController, MacSighting, NetworkDevice, SwitchPort, utcnow)
 from .ingest import AvIn, PhysDiskIn, DiskIn, EndpointPayload, HotfixIn, LogonIn, Nic, PendingIn, SoftwareIn, add_logons, apply_endpoint
 
@@ -203,6 +204,13 @@ def seed(db) -> str:
         db.flush()
         db.add(MacSighting(mac=vendor_mac, port_id=port.id, vlan=20, last_seen=now))
         db.add(ArpEntry(ip=ip, mac=vendor_mac, source="core-sw01", last_seen=now))
+        if j == 0:          # the printer asked DHCP for a name
+            db.add(IpSighting(ip=ip, hostname="BRN3C2AF4112233", mac=vendor_mac, source="dhcp:DC01", first_seen=now, last_seen=now))
+    # something with no IP or name at all: only its MAC is known
+    odd = SwitchPort(switch=access[2], ifindex=210, name="1/1/44", alias="Lab bench", oper_up=True, speed_mbps=100, mac_count=1)
+    db.add(odd)
+    db.flush()
+    db.add(MacSighting(mac="b8:27:eb:12:34:56", port_id=odd.id, vlan=30, last_seen=now))
     # A ceiling access point: its wireless clients are learned on its port, which is an uplink
     ap = SwitchPort(switch=access[1], ifindex=300, name="1/1/45", alias="AP lobby", oper_up=True, speed_mbps=2500, mac_count=9,
                     neighbor="ap-lobby-01", neighbor_port="eth0", neighbor_kind="ap", neighbor_ip="10.0.5.21",
@@ -211,6 +219,40 @@ def seed(db) -> str:
     db.flush()
     for k in range(9):
         db.add(MacSighting(mac=f"de:ad:be:ef:00:{k:02x}", port_id=ap.id, vlan=40, last_seen=now))
+    db.flush()
+    for p in db.scalars(select(SwitchPort).where(SwitchPort.oper_up.is_(True))):
+        p.last_up = now                       # a scan just saw these up
+    # Wi-Fi: the lobby AP (a switch port's LLDP neighbour) and a second AP the controller knows; three laptops on Wi-Fi
+    from .db import Device, WifiSighting, WirelessAp
+    ap.neighbor_mac = "20:4c:03:aa:00:10"
+    db.add(WirelessAp(source="unifi", key="20:4c:03:aa:00:10", name="ap-lobby-01", mac="20:4c:03:aa:00:10", ip="10.0.5.21",
+                      bssids="20:4c:03:aa:00:11,20:4c:03:aa:00:12", model="AP-535", last_seen=now))
+    db.add(WirelessAp(source="unifi", key="20:4c:03:aa:00:20", name="ap-floor2-east", mac="20:4c:03:aa:00:20", ip="10.0.5.22",
+                      bssids="20:4c:03:aa:00:21,20:4c:03:aa:00:22", model="AP-535", last_seen=now))
+    for k, host in enumerate(("WS-007", "WS-014", "WS-021")):
+        dev = db.scalar(select(Device).where(Device.hostname == host))
+        if not dev:
+            continue
+        wmac = f"a4:c3:f0:00:00:{k + 1:02x}"
+        dev.connection, dev.wifi_ssid, dev.wifi_signal, dev.wifi_seen = "wireless", "CORP", 70 + k * 8, now - timedelta(minutes=10 * k)
+        dev.wifi_bssid = "20:4c:03:aa:00:12" if k != 1 else "20:4c:03:aa:00:21"
+        dev.wifi_ap = "ap-lobby-01" if k != 1 else "ap-floor2-east"
+        db.add(WifiSighting(mac=wmac, hostname=host, ssid="CORP", bssid=dev.wifi_bssid, ap_key=dev.wifi_ap, ap_name=dev.wifi_ap,
+                            source="pc", first_seen=now - timedelta(days=2), last_seen=dev.wifi_seen))
+        db.add(WifiSighting(mac=wmac, hostname=host, ssid="CORP", bssid="20:4c:03:aa:00:22", ap_key="ap-floor2-east" if k != 1 else "ap-lobby-01",
+                            ap_name="ap-floor2-east" if k != 1 else "ap-lobby-01", source="unifi",
+                            first_seen=now - timedelta(days=9), last_seen=now - timedelta(days=3)))
+    # Empty desks: ports that went down an hour ago, last week, two months ago, never since boot, and one shut down
+    for j, sw in enumerate(access):
+        boot = now - timedelta(seconds=sw.uptime_s)
+        for k, (ago, admin) in enumerate(((timedelta(hours=1), True), (timedelta(days=6), True), (timedelta(days=62), True),
+                                          (None, True), (timedelta(days=20), False))):
+            ifi = 400 + k
+            went = max(now - ago, boot + timedelta(minutes=5)) if ago else None
+            db.add(SwitchPort(switch=sw, ifindex=ifi, name=(f"Gi1/0/{46 + k}" if sw.vendor == "Cisco" else f"1/1/{46 + k}"),
+                              alias=["Desk spare", "Meeting room", "Old printer", "", "Disabled - reception"][k], oper_up=False,
+                              admin_up=admin, speed_mbps=None, mac_count=0, vlan=20 if sw.location.startswith("HQ") else 30,
+                              last_change=went or boot, changed_since_boot=went is not None, last_up=went))
     for sw in [core] + access:
         db.flush()
     # DC kerberos events (IP only) to show IP -> PC resolution

@@ -29,7 +29,12 @@ VIEWS: dict[str, str] = {
         SELECT mac, switch_name, switch_ip, port, port_alias, vlan, last_seen, first_seen, ip,
                hostname, matched_by,
                CASE WHEN hostname IS NOT NULL THEN 'computer' WHEN mac = neighbor_mac THEN neighbor_kind END AS device_kind,
-               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone
+               CASE WHEN neighbor_kind = 'phone' THEN neighbor END AS phone,
+               -- for MACs that are not one of our computers: the DHCP lease's IP and the name the device asked for
+               (SELECT s.ip FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%'
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_ip,
+               (SELECT s.hostname FROM ip_sightings s WHERE s.mac = x.mac AND s.source LIKE 'dhcp:%' AND s.hostname IS NOT NULL
+                 ORDER BY s.last_seen DESC LIMIT 1) AS dhcp_name
         FROM (
           SELECT ms.mac, nd.sysname AS switch_name, nd.ip AS switch_ip, sp.name AS port,
                  sp.alias AS port_alias, COALESCE(ms.vlan, sp.vlan) AS vlan, ms.last_seen, ms.first_seen,
@@ -74,7 +79,11 @@ VIEWS: dict[str, str] = {
     # neighbour to the Computers list or a polled switch. computers = PCs whose MAC was last learned on this port.
     "v_switch_ports": """
         SELECT nd.sysname AS switch_name, nd.ip AS switch_ip, nd.vendor, sp.name AS port, sp.alias,
-               sp.oper_up, sp.speed_mbps, sp.vlan, sp.is_uplink,
+               sp.oper_up, sp.admin_up, sp.speed_mbps, sp.vlan, sp.is_uplink,
+               CASE WHEN sp.admin_up = FALSE THEN 'disabled' WHEN sp.oper_up = TRUE THEN 'up'
+                    WHEN sp.oper_up = FALSE THEN 'down' END AS status,
+               sp.last_change AS status_since, sp.changed_since_boot, sp.last_up AS last_active,
+               nd.uptime_s AS switch_uptime_s, nd.last_polled,
                CASE WHEN sp.is_uplink = TRUE THEN 'uplink' WHEN sp.neighbor_kind = 'phone' THEN 'phone' ELSE 'access' END AS port_type,
                sp.mac_count, sp.neighbor, sp.neighbor_port, sp.neighbor_kind, sp.neighbor_ip, sp.neighbor_mac,
                (SELECT d.hostname FROM devices d WHERE sp.neighbor IS NOT NULL
@@ -107,7 +116,7 @@ VIEWS: dict[str, str] = {
                d.os_build,
                d.manufacturer, d.model, d.serial, d.cpu, d.ram_gb,
                d.ad_enabled, d.ad_last_logon, d.ad_created, d.ad_dn,
-               d.current_user,
+               d.current_user, d.connection, d.wifi_ssid, d.wifi_ap, d.wifi_seen, d.wifi_signal, d.wifi_bssid,
                (SELECT ud.username FROM v_user_devices ud WHERE ud.hostname = d.hostname
                  ORDER BY ud.last_logon DESC LIMIT 1) AS last_user,
                (SELECT MAX(ud.last_logon) FROM v_user_devices ud WHERE ud.hostname = d.hostname) AS last_user_logon,

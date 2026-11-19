@@ -311,9 +311,32 @@ def scheduler_loop(stop: threading.Event) -> None:
                        if not JOB_STATE.get(j.id) and is_due(j, now, _local(j.last_run))]
             for jid in due:
                 threading.Thread(target=run_scan_job, args=(jid,), daemon=True).start()
+            _wlc_tick()
         except Exception:
             log.exception("scheduler")
         stop.wait(30)
+
+
+_wlc_busy = threading.Lock()
+
+
+def _wlc_tick() -> None:
+    """Polls the wireless controller (Settings > Wireless controller) when it is set up and its interval has passed."""
+    from . import wireless
+
+    def run():
+        try:
+            with SessionLocal() as db:
+                wireless.poll(db)
+        except Exception as exc:
+            log.warning("wireless controller poll: %s", exc)
+        finally:
+            _wlc_busy.release()
+    with SessionLocal() as db:
+        if not wireless.due(db):
+            return
+    if _wlc_busy.acquire(blocking=False):
+        threading.Thread(target=run, daemon=True, name="wlc-poll").start()
 
 
 def migrate_schedule(db) -> None:

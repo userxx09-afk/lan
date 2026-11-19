@@ -13,13 +13,14 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+from datetime import timedelta
 
 from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchInstance, NoSuchObject
 from pysnmp.hlapi.v3arch.asyncio import (
     CommunityData, ContextData, ObjectIdentity, ObjectType, SnmpEngine, UdpTransportTarget,
     UsmUserData, bulk_walk_cmd, get_cmd, usmAesCfb128Protocol, usmHMACSHAAuthProtocol,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import ArpEntry, Device, MacSighting, NetworkDevice, SwitchPort, norm_host, norm_mac, utcnow
@@ -32,6 +33,8 @@ IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
 IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 IF_HIGHSPEED = "1.3.6.1.2.1.31.1.1.1.15"
 IF_OPER = "1.3.6.1.2.1.2.2.1.8"
+IF_ADMIN = "1.3.6.1.2.1.2.2.1.7"
+IF_LAST_CHANGE = "1.3.6.1.2.1.2.2.1.9"      # sysUpTime (TimeTicks) when the port last went up or down
 BASEPORT_IFINDEX = "1.3.6.1.2.1.17.1.4.1.2"
 DOT1D_FDB_PORT = "1.3.6.1.2.1.17.4.3.1.2"
 DOT1D_FDB_STATUS = "1.3.6.1.2.1.17.4.3.1.3"
@@ -198,6 +201,8 @@ async def poll_device(ip: str, cfg: dict) -> dict:
     aliases = {i[0]: _str(v) for i, v in await s.walk(IF_ALIAS)}
     speeds = {i[0]: int(v) for i, v in await s.walk(IF_HIGHSPEED)}
     oper = {i[0]: int(v) == 1 for i, v in await s.walk(IF_OPER)}
+    admin = {i[0]: int(v) == 1 for i, v in await s.walk(IF_ADMIN)}
+    last_change = {i[0]: int(v) for i, v in await s.walk(IF_LAST_CHANGE)}
     baseport = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX)}
 
     fdb: list[tuple[str, int, int | None]] = []  # (mac, ifindex, vlan)
@@ -297,7 +302,7 @@ async def poll_device(ip: str, cfg: dict) -> dict:
         if mac and mac != "ff:ff:ff:ff:ff:ff":
             arp.append((ipaddr, mac))
 
-    return dict(sys=sysinfo, names=names, aliases=aliases, speeds=speeds, oper=oper,
+    return dict(sys=sysinfo, names=names, aliases=aliases, speeds=speeds, oper=oper, admin=admin, last_change=last_change,
                 fdb=fdb, neighbors=neighbors, arp=arp, port_vlan=port_vlan)
 
 
@@ -330,6 +335,23 @@ def is_uplink(neighbor_kind: str | None, mac_count: int, threshold: int) -> bool
     return neighbor_kind in INFRA_KINDS or mac_count > threshold
 
 
+def port_activity(now, uptime_ticks: int | None, change_ticks: int | None, oper_up: bool | None,
+                  prev_last_up, mac_seen) -> tuple:
+    """(last_change, changed_since_boot, last_up) for one port. ifLastChange is the switch's sysUpTime when the link
+    last went up or down (0 = not since the switch started), so a down port went down at boot + ifLastChange and was
+    in use until then. last_up keeps the latest of: up at this poll, that moment, and the newest MAC learned on it."""
+    when, since_boot = None, None
+    if uptime_ticks is not None and change_ticks is not None and 0 <= change_ticks <= uptime_ticks:
+        when = now - timedelta(seconds=(uptime_ticks - change_ticks) / 100)
+        since_boot = change_ticks > 0
+    candidates = [t for t in (prev_last_up, mac_seen) if t]
+    if oper_up:
+        candidates.append(now)
+    elif when and since_boot:
+        candidates.append(when)
+    return when, since_boot, max(candidates) if candidates else None
+
+
 def store(db: Session, ip: str, data: dict, threshold: int) -> str:
     now = utcnow()
     nd = db.scalar(select(NetworkDevice).where(NetworkDevice.ip == ip)) or NetworkDevice(ip=ip)
@@ -337,7 +359,8 @@ def store(db: Session, ip: str, data: dict, threshold: int) -> str:
     sysd = data["sys"]
     nd.sysname, nd.sysdescr, nd.location = sysd["name"], sysd["descr"], sysd["location"]
     nd.vendor = _vendor(sysd["descr"])
-    nd.uptime_s = int(sysd["uptime"]) // 100 if sysd["uptime"].isdigit() else None
+    uptime_ticks = int(sysd["uptime"]) if sysd["uptime"].isdigit() else None
+    nd.uptime_s = uptime_ticks // 100 if uptime_ticks is not None else None
     nd.last_polled, nd.poll_error = now, None
     db.flush()
 
@@ -345,6 +368,10 @@ def store(db: Session, ip: str, data: dict, threshold: int) -> str:
     pcs = set(db.scalars(select(Device.hostname))) if any(
         not isinstance(n, dict) or n.get("kind") in (None, "unknown") for n in data["neighbors"].values()) else set()
     mac_count: dict[int, int] = {}
+    # newest MAC sighting per port, so ports polled before this version start with a last-active time
+    mac_seen = dict(db.execute(select(MacSighting.port_id, func.max(MacSighting.last_seen))
+                               .join(SwitchPort, SwitchPort.id == MacSighting.port_id)
+                               .where(SwitchPort.switch_id == nd.id).group_by(MacSighting.port_id)).all())
     for _, ifi, _ in data["fdb"]:
         mac_count[ifi] = mac_count.get(ifi, 0) + 1
     for ifi in set(data["names"]) | set(mac_count):
@@ -357,6 +384,10 @@ def store(db: Session, ip: str, data: dict, threshold: int) -> str:
         p.alias = data["aliases"].get(ifi)
         p.speed_mbps = data["speeds"].get(ifi)
         p.oper_up = data["oper"].get(ifi)
+        p.admin_up = data.get("admin", {}).get(ifi)
+        p.last_change, p.changed_since_boot, p.last_up = port_activity(
+            now, uptime_ticks, data.get("last_change", {}).get(ifi), p.oper_up, p.last_up,
+            now if mac_count.get(ifi) and p.oper_up is not False else mac_seen.get(p.id))
         nb = data["neighbors"].get(ifi)
         if isinstance(nb, (tuple, list)):     # (name, port) from older callers
             nb = dict(name=nb[0], port=nb[1], kind="unknown")
