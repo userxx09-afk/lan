@@ -2170,10 +2170,12 @@ loaders.network = async () => {
   const pickSwitch = (ip) => { sel.value = ip; $("#spfilter").value = ""; showPorts(); $("#spheading").scrollIntoView({ behavior: "smooth", block: "start" }); };
   sel.onchange = showPorts;
   $("#spall").onclick = () => { sel.value = ""; showPorts(); };
-  table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "uptime_s", "last_polled", "poll_error"],
+  table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "mac_count", "uptime_s", "last_polled", "poll_note", "poll_error"],
     { rowTitle: "Show this switch's ports", rowClick: (r) => pickSwitch(r.ip),
-      cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""), sysname: (v, r) => `<a class="link">${esc(v || r.ip)}</a>` },
-      labels: { uptime_s: "uptime", port_count: "ports" } });
+      cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""),
+        mac_count: (v, r) => (v ? esc(v) : r.last_polled ? `<span class="pill bad" title="No MAC addresses learned from this switch: see the MAC table note">0</span>` : ""),
+        poll_note: (v) => `<span class="small">${esc(v)}</span>`, sysname: (v, r) => `<a class="link">${esc(v || r.ip)}</a>` },
+      labels: { uptime_s: "uptime", port_count: "ports", mac_count: "MACs", poll_note: "MAC table (last scan)" } });
   showPorts();
 };
 
