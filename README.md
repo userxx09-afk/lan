@@ -468,6 +468,14 @@ asked DHCP for, else its IP (switch/router ARP table or DHCP lease), else just i
 the PC behind it underneath. MACs show their maker where it is in a short built-in list (phones, printers, cameras,
 NAS, Raspberry Pi, VMs...) or *random MAC* for a privacy address; hover a device for its MAC and IP.
 
+Since 0.38 *Switch ports* loads nothing until you pick a switch in the drop-down or click one under *Network devices*,
+so big networks open fast. *Plugged in* and the new **MACs** column are read straight from that switch's own MAC table
+(the MACs it learned on each access port), so a device shows on every switch that sees it at the edge. A device not
+seen at the last scan is shown greyed with when it was last seen. A summary line above the table says how many MACs
+were found on access ports at the last scan, how many before, and how many on uplinks; if it reads 0 on access ports
+the switch is only learning MACs on uplinks (check the VLAN/community settings), and any error from the stored port
+map is shown there too.
+
 ### Wi-Fi: which access point (0.33)
 
 Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or
