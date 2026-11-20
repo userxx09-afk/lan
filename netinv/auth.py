@@ -10,6 +10,11 @@
 - Break-glass: after the first successful AD sign-in NetInventory writes ``local-login.disabled`` next to
   config.toml, which turns the local admin off. Delete that file to turn the local admin back on (for
   example when AD or the group is unavailable). It is written again on the next AD sign-in.
+- Admins (0.44): Settings > Sign-in names who may open Settings and change server-wide settings: admin usernames,
+  an AD group and/or a NetInventory user group. Until one of those is set, everyone who can sign in is an admin (so
+  an upgrade changes nothing). The local admin account is always an admin, so the break-glass file above is also
+  the way back in if the admin list is wrong. Admin rights are worked out at sign-in; when the admin settings change,
+  other sessions are checked again (live in AD with the scan credential) on their next request.
 - Lockout: 5 failed attempts for a username, or 20 from one address, within 15 minutes block further
   attempts for 15 minutes.
 - Sessions: random token in an HttpOnly, SameSite=Strict browser-session cookie (Secure over HTTPS; gone when the
@@ -50,6 +55,8 @@ class Session:
     source: str            # "local" or "ad"
     created: float
     seen: float
+    admin: bool = True     # may open Settings (see is_admin)
+    admin_stamp: str = ""  # the admin settings this was worked out for
 
 
 # ------------------------------------------------------------------ password hashing (local admin)
@@ -144,6 +151,12 @@ def _split_user(username: str, domain: str) -> tuple[str, str]:
 
 def ad_login(db, username: str, password: str) -> str | None:
     """Bind as the user and check group membership. Returns the sAMAccountName, or None."""
+    r = ad_login_admin(db, username, password)
+    return r[0] if r else None
+
+
+def ad_login_admin(db, username: str, password: str) -> tuple[str, bool] | None:
+    """Like ad_login, and also whether the user is a NetInventory admin: (sAMAccountName, admin) or None."""
     from .collectors import ad as adc
     from .scanning import dc_candidates
     from .collectors.ad import domain_to_dn
@@ -160,10 +173,9 @@ def ad_login(db, username: str, password: str) -> str | None:
         return None
     try:
         base = domain_to_dn(cfg["domain"])
-        if cfg["group"] and _in_ad_group(conn, base, sam, cfg["group"]):
-            return sam.lower()
-        if cfg.get("access_group") and _in_user_group(db, conn, base, sam, cfg["access_group"]):
-            return sam.lower()
+        if (cfg["group"] and _in_ad_group(conn, base, sam, cfg["group"])) or \
+                (cfg.get("access_group") and _in_user_group(db, conn, base, sam, cfg["access_group"])):
+            return sam.lower(), _admin_check(db, conn, base, sam)
         log.info("AD sign-in refused for %s: not in %s", sam,
                  " or ".join(x for x in (cfg["group"], cfg.get("access_group") and f"user group {cfg['access_group']}") if x))
         return None
@@ -208,6 +220,87 @@ def _in_user_group(db, conn, base: str, sam: str, name: str) -> bool:
     return groups.user_in_group(db, name, ent)
 
 
+# ------------------------------------------------------------------ admins (who may open Settings)
+def admin_config(db) -> dict:
+    from .db import get_setting
+    users = [u.strip().lower().split("\\")[-1].split("@")[0] for u in (get_setting(db, "auth:admin_users") or "").replace(";", ",").split(",")]
+    return {"users": sorted({u for u in users if u}), "ad_group": get_setting(db, "auth:admin_group") or "",
+            "user_group": get_setting(db, "auth:admin_user_group") or ""}
+
+
+def admin_configured(cfg: dict) -> bool:
+    return bool(cfg["users"] or cfg["ad_group"] or cfg["user_group"])
+
+
+def admin_stamp(cfg: dict) -> str:
+    return hashlib.sha256(repr((cfg["users"], cfg["ad_group"], cfg["user_group"])).encode()).hexdigest()[:16]
+
+
+def _admin_check(db, conn, base: str, sam: str, cfg: dict | None = None) -> bool:
+    """Is this AD user an admin under cfg (default: the saved admin settings)? conn is any bound AD connection."""
+    cfg = cfg or admin_config(db)
+    if not admin_configured(cfg) or sam.lower() in cfg["users"]:
+        return True
+    try:
+        if cfg["ad_group"] and _in_ad_group(conn, base, sam, cfg["ad_group"]):
+            return True
+        if cfg["user_group"] and _in_user_group(db, conn, base, sam, cfg["user_group"]):
+            return True
+    except Exception as exc:
+        log.warning("checking whether %s is an admin failed: %s", sam, exc)
+    return False
+
+
+def admin_live(db, sam: str, cfg: dict | None = None) -> bool:
+    """Admin check outside sign-in: the username list, else live in AD with the scan credential for the sign-in
+    domain. Raises when AD has to be asked and can't be."""
+    cfg = cfg or admin_config(db)
+    if not admin_configured(cfg) or sam.lower() in cfg["users"]:
+        return True
+    if not (cfg["ad_group"] or cfg["user_group"]):
+        return False
+    from .collectors import ad as adc
+    from .collectors.ad import domain_to_dn
+    from .db import get_setting
+    from .scanning import ad_action_cfg
+    domain = (get_setting(db, "auth:ad_domain") or "").lower()
+    if not domain:
+        raise RuntimeError("no AD sign-in domain set")
+    base = domain_to_dn(domain)
+    conn = adc.connect(ad_action_cfg(db, base))
+    try:
+        if cfg["ad_group"] and _in_ad_group(conn, base, sam, cfg["ad_group"]):
+            return True
+        return bool(cfg["user_group"] and _in_user_group(db, conn, base, sam, cfg["user_group"]))
+    finally:
+        conn.unbind()
+
+
+def is_admin(s: Session | None) -> bool:
+    """May this session open Settings? The local admin always may; with no admins set up, everyone may."""
+    from .db import SessionLocal
+    if s is None:
+        return not auth_required()
+    if s.source == "local":
+        return True
+    with SessionLocal() as db:
+        cfg = admin_config(db)
+        stamp = admin_stamp(cfg)
+        if s.admin_stamp == stamp:
+            return s.admin
+        if not admin_configured(cfg):
+            ok = True
+        else:
+            try:
+                ok = admin_live(db, s.user, cfg)
+            except Exception as exc:
+                log.warning("admin settings changed; couldn't check %s in AD (%s): not an admin until they sign in again",
+                            s.user, str(exc)[:200])
+                ok = False
+    s.admin, s.admin_stamp = ok, stamp
+    return ok
+
+
 # ------------------------------------------------------------------ login / sessions
 class LoginError(Exception):
     pass
@@ -219,7 +312,7 @@ def login(db, username: str, password: str, ip: str) -> Session:
         raise LoginError("Enter a username and password.")
     if locked_out(username, ip):
         raise LoginError("Too many failed sign-ins. Try again in 15 minutes.")
-    user, source = None, None
+    user, source, admin = None, None, True
     if settings.ui_user and hmac.compare_digest(username.lower(), settings.ui_user.lower()):
         if local_enabled() and check_password(password, settings.ui_password):
             user, source = settings.ui_user, "local"
@@ -228,9 +321,9 @@ def login(db, username: str, password: str, ip: str) -> Session:
             raise LoginError("The local admin account is turned off because AD sign-in is set up. Sign in with your "
                              f"AD account, or delete {local_disabled_file()} on the server to turn it back on.")
     elif ad_config(db):
-        sam = ad_login(db, username, password)
-        if sam:
-            user, source = sam, "ad"
+        r = ad_login_admin(db, username, password)
+        if r:
+            (user, admin), source = r, "ad"
             f = local_disabled_file()
             if settings.ui_user and not f.exists():
                 f.write_text("The local admin sign-in is turned off because AD sign-in works.\n"
@@ -240,7 +333,8 @@ def login(db, username: str, password: str, ip: str) -> Session:
         _fail(username, ip)
         raise LoginError("Wrong username or password, or the account isn't allowed to use NetInventory.")
     _clear(username)
-    s = Session(user=user, source=source, created=time.time(), seen=time.time())
+    s = Session(user=user, source=source, created=time.time(), seen=time.time(), admin=admin,
+                admin_stamp=admin_stamp(admin_config(db)))
     token = secrets.token_urlsafe(32)
     with _lock:
         _sessions[token] = s

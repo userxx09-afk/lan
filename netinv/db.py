@@ -714,11 +714,14 @@ def set_setting(db, key: str, value: str | None) -> None:
 
 
 class SavedReport(Base):
-    """A report built in the report builder: dataset + fields + filters, saved by name."""
+    """A report built in the report builder: dataset + fields + filters, saved by name.
+    owner = who saved it; only they see it unless shared. Reports from before 0.44 have no owner and are shared."""
     __tablename__ = "saved_reports"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True)
     spec: Mapped[str] = mapped_column(Text)  # JSON {dataset, fields, filters, sort, desc}
+    owner: Mapped[str | None] = mapped_column(String(128), index=True)
+    shared: Mapped[bool | None] = mapped_column(Boolean)
     created: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
