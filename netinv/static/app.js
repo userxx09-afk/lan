@@ -205,7 +205,7 @@ loaders.overview = async () => {
     noinv: () => showComputers([{ field: "inventory_last_collected", op: "empty" }], "Not inventoried yet"),
     port: () => showComputers([{ field: "switch_name", op: "not_empty" }], "Mapped to a switch port"),
     users: () => { $("#ustate").value = ""; showTab("users"); },
-    dcs: () => showTab("network"), net: () => showTab("network"),
+    dcs: () => showTab("dcs"), net: () => showTab("network"),
   })[el.dataset.go]());
   alertCache = al;
   renderAlerts();
@@ -2158,9 +2158,12 @@ async function findOnPorts(q) {
       ip: (v, r) => esc(v || r.dhcp_ip), mac: macCell, port: (v, r) => portLink(r.switch_name, r.switch_ip, v),
       switch_name: (v, r) => `<a class="link" data-pick="${esc(r.switch_ip)}">${esc(v || r.switch_ip)}</a>` } });
 }
-loaders.network = async () => {
-  const [dc, nd] = await Promise.all([post("/api/query", { dataset: "v_domain_controllers" }), post("/api/query", { dataset: "v_network_devices" })]);
+loaders.dcs = async () => {
+  const dc = await post("/api/query", { dataset: "v_domain_controllers" });
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
+};
+loaders.network = async () => {
+  const nd = await post("/api/query", { dataset: "v_network_devices" });
   // Switch ports load for one switch at a time: picked in the drop-down or clicked under Network devices.
   const sel = $("#spswitch");
   const keep = sel.value;

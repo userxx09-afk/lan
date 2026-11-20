@@ -456,7 +456,7 @@ The **neighbor** is what LLDP/CDP says is on the other end, and it is classified
 a router or an access point makes the port an **uplink** (its MACs are not plugged in there, so they are left out),
 as does a port with more MACs than `uplink_mac_threshold` (default 6). An **IP phone** neighbour does not: the PC behind
 the phone is mapped to that port and shown as *behind phone*. A PC that sends LLDP itself links to that computer.
-Click a switch under *Network devices* (or pick it in the drop-down) to list only its ports. Network & DCs → *Switch ports* has the port type, VLAN, neighbour (linked to the computer or polled switch) and the
+Click a switch under *Network devices* (or pick it in the drop-down) to list only its ports. Network → *Switch ports* has the port type, VLAN, neighbour (linked to the computer or polled switch) and the
 computers on each port; click a port to see every MAC learned on it, which computer owns it and, for uplinks, which
 access port that computer is really on. Ports keep their old type until the next switch scan.
 
