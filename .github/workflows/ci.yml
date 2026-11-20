@@ -65,6 +65,7 @@ jobs:
           python tests/test_last_user_name.py
           python tests/test_dameware_kit.py
           python tests/test_admins.py
+          python tests/test_device_scan.py
       - name: JavaScript syntax
         run: node --check netinv/static/app.js && node --check netinv/static/rc.js
       - uses: actions/setup-go@v5

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, select, text
 
-from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, oneshot, portmap, reports, retention, scanning, updater, wireless
+from . import __version__, actions, alerts, auth, catalog, exclusions, exports, fixes, groups, jira, jobs, library, logs, devscan, oneshot, portmap, reports, retention, scanning, updater, wireless
 from .config import settings
 from .correlate import MAC_OWNER_HOST, MAC_OWNER_VIA, create_views
 from datetime import datetime, timedelta
@@ -2487,6 +2487,30 @@ def scan_once_cancel(n: int, actor=Depends(ui_auth), db=Depends(db_session)):
     db.add(AuditLog(actor=actor, action="scan.once.cancel", target=(name or key)[:120], result="stopping"))
     db.commit()
     return {"ok": True, "output": "Stopping: PCs already being scanned finish, the rest are skipped."}
+
+
+# ----------------------------------------------------------------- Scan now for network devices (see devscan.py)
+class DevScanIn(BaseModel):
+    ips: list[str] | None = None         # the devices' IPs; None = every network device (Scan all)
+
+
+@app.post("/api/network-devices/scan")
+def network_devices_scan(body: DevScanIn, actor=Depends(ui_auth), db=Depends(db_session)):
+    try:
+        return devscan.start(db, actor, body.ips)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/network-devices/scan", dependencies=UI)
+def network_devices_scanning():
+    """Which devices are being scanned now (IP -> run key), so the Network tab can show it after a reload."""
+    return {"busy": devscan.busy()}
+
+
+@app.get("/api/network-devices/scan/{n}", dependencies=UI)
+def network_devices_scan_status(n: int):
+    return devscan.status(f"once:{n}")
 
 
 # ----------------------------------------------------------------- scan schedule (see jobs.py)
