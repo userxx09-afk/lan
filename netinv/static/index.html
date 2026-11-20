@@ -13,10 +13,11 @@
   <nav id="tabs">
     <button data-tab="overview" class="active">Dashboard</button>
     <button data-tab="computers">Computers</button>
+    <button data-tab="network">Network</button>
     <button data-tab="groups">Groups</button>
     <button data-tab="users">Users</button>
     <button data-tab="apps">Software</button>
-    <button data-tab="network">Network &amp; DCs</button>
+    <button data-tab="dcs">Domain controllers</button>
     <button data-tab="reports">Reports</button>
     <button data-tab="scanning">Scanning</button>
     <button data-tab="settings">Settings</button>
@@ -247,8 +248,11 @@
     </div>
   </section>
 
-  <section id="network" class="tab">
+  <section id="dcs" class="tab">
     <h2>Domain controllers</h2><div id="dctable"></div>
+  </section>
+
+  <section id="network" class="tab">
     <h2>Network devices</h2><div id="ndtable"></div>
     <h2 id="spheading">Switch ports</h2>
     <p class="muted">The neighbor is what the port's LLDP/CDP says is on the other end: another switch, a router, an access point
