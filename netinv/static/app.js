@@ -35,7 +35,7 @@ function table(el, rows, cols, opts = {}) {
     el.querySelectorAll("[data-host]").forEach((a) => a.onclick = () => openDevice(a.dataset.host));
     el.querySelectorAll("[data-user]").forEach((a) => a.onclick = () => openUser(a.dataset.user));
     if (opts.rowClick) el.querySelectorAll("tr[data-ri]").forEach((tr) => tr.onclick = (e) => {
-      if (!e.target.closest("[data-host],[data-user],[data-swport]")) opts.rowClick(data[+tr.dataset.ri]);
+      if (!e.target.closest("[data-host],[data-user],[data-swport],[data-ndscan]")) opts.rowClick(data[+tr.dataset.ri]);
     });
   };
   // debounced: re-rendering a few thousand rows on every keystroke makes typing lag
@@ -2162,8 +2162,54 @@ loaders.dcs = async () => {
   const dc = await post("/api/query", { dataset: "v_domain_controllers" });
   table($("#dctable"), dc.rows, ["hostname", "os", "site", "is_gc", "fsmo_roles", "last_seen"]);
 };
+// Scan now on the Network tab: one device (button on its row) or all of them (Scan all). The scan runs on the server
+// (devscan.py, also on the Scanning tab); here we poll its result, then reload the tab so the row shows the new data.
+const ndScan = { busy: {}, last: {}, polling: new Set() };
+async function ndScanStart(ips) {
+  let r;
+  try { r = await post("/api/network-devices/scan", { ips }); } catch (e) { toast(errText(e), true); return; }
+  toast(r.output);
+  r.ips.forEach((ip) => { ndScan.busy[ip] = r.key; delete ndScan.last[ip]; });
+  ndScanRender();
+  ndScanPoll(r.key);
+}
+async function ndScanPoll(key) {
+  if (ndScan.polling.has(key)) return;
+  ndScan.polling.add(key);
+  const n = key.split(":")[1];
+  try {
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let st;
+      try { st = await api(`/api/network-devices/scan/${n}`); } catch (e) { continue; }
+      if (st.running) { ndScanRender(st, key); continue; }
+      Object.entries(ndScan.busy).forEach(([ip, k]) => { if (k === key) delete ndScan.busy[ip]; });
+      Object.entries(st.results || {}).forEach(([ip, x]) => { ndScan.last[ip] = x; });
+      if (!st.unknown) toast(st.message || "Scan finished", !st.ok);
+      if ($("#network").classList.contains("active")) await loaders.network(); else ndScanRender();
+      break;
+    }
+  } finally { ndScan.polling.delete(key); }
+}
+// Redraw just the scan cells and the Scan all line (no reload of the table).
+function ndScanRender(st, key) {
+  document.querySelectorAll("#ndtable [data-ndcell]").forEach((td) => { td.innerHTML = ndScanCell(td.dataset.ndcell); });
+  const keys = new Set(Object.values(ndScan.busy));
+  const note = $("#ndscannote");
+  if (note) note.innerHTML = keys.size ? `<span class="pill warn">scanning ${Object.keys(ndScan.busy).length} device${Object.keys(ndScan.busy).length === 1 ? "" : "s"}…</span>${st && st.total > 1 ? ` <span class="small muted">${st.done} of ${st.total} done</span>` : ""} <span class="small muted">Also on the Scanning tab, where it can be cancelled.</span>` : "";
+}
+function ndScanCell(ip) {
+  if (ndScan.busy[ip]) return `<span class="pill warn">scanning…</span>`;
+  const last = ndScan.last[ip];
+  const res = last ? ` <span class="pill ${last.ok ? "good" : "bad"}" title="${esc(last.message || "")}">${last.ok ? "done" : "failed"}</span>` : "";
+  return `<button class="ghost small" data-ndscan="${esc(ip)}" title="Poll this device over SNMP now">Scan now</button>${res}`;
+}
 loaders.network = async () => {
-  const nd = await post("/api/query", { dataset: "v_network_devices" });
+  const [nd, sc] = await Promise.all([post("/api/query", { dataset: "v_network_devices" }), api("/api/network-devices/scan").catch(() => ({ busy: {} }))]);
+  ndScan.busy = { ...sc.busy };
+  new Set(Object.values(ndScan.busy)).forEach(ndScanPoll);     // scans started earlier or by someone else
+  $("#ndscanall").onclick = () => ndScanStart(null);
+  $("#ndtable").onclick = (e) => { const b = e.target.closest("[data-ndscan]"); if (b) { e.stopPropagation(); ndScanStart([b.dataset.ndscan]); } };
   // Switch ports load for one switch at a time: picked in the drop-down or clicked under Network devices.
   const sel = $("#spswitch");
   const keep = sel.value;
@@ -2208,12 +2254,13 @@ loaders.network = async () => {
   sel.onchange = showPorts;
   $("#pmfind").onsubmit = (e) => { e.preventDefault(); findOnPorts($("#pmq").value); };
   $("#pmtable").onclick = (e) => { const a = e.target.closest("[data-pick]"); if (a) { e.stopPropagation(); pickSwitch(a.dataset.pick); } };
-  table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "mac_count", "uptime_s", "last_polled", "poll_note", "poll_error"],
+  table($("#ndtable"), nd.rows, ["sysname", "ip", "vendor", "location", "port_count", "mac_count", "uptime_s", "last_polled", "scan", "poll_note", "poll_error"],
     { rowTitle: "Show this switch's ports", rowClick: (r) => pickSwitch(r.ip),
-      cell: { uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""),
+      cell: { scan: (v, r) => `<span data-ndcell="${esc(r.ip)}" class="nowrap">${ndScanCell(r.ip)}</span>`, uptime_s: (v) => (v ? `${Math.floor(v / 86400)} days` : ""),
         mac_count: (v, r) => (v ? esc(v) : r.last_polled ? `<span class="pill bad" title="No MAC addresses learned from this switch: see the MAC table note">0</span>` : ""),
         poll_note: (v) => `<span class="small">${esc(v)}</span>`, sysname: (v, r) => `<a class="link">${esc(v || r.ip)}</a>` },
-      labels: { uptime_s: "uptime", port_count: "ports", mac_count: "MACs", poll_note: "MAC table (last scan)" } });
+      labels: { uptime_s: "uptime", port_count: "ports", mac_count: "MACs", scan: "", poll_note: "MAC table (last scan)" } });
+  ndScanRender();
   showPorts();
 };
 
