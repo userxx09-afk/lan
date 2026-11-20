@@ -509,6 +509,13 @@ sources, for example `412 MACs via Cisco per-VLAN BRIDGE-MIB (6 VLANs) + Q-BRIDG
 Each device in *Plugged in* now reads name first (the computer, else its DHCP name), then its IP beside it, and shows
 the MAC only when neither a name nor an IP is known.
 
+Since 0.45 MACs the switch holds as static (port-security sticky MACs, `switchport port-security mac-address`) are kept;
+they come back as *mgmt* or *other* rather than *learned*, and were dropped before, which left access ports with
+port-security empty while the trunks still showed MACs. On Cisco the VLANs read are VTP-MIB's list plus every access
+and voice VLAN configured on a port (so VTP transparent mode or a view without VTP-MIB still works), bridge ports map to
+interfaces through any VLAN's table, and the *MAC table (last scan)* note names any VLAN that returned no MACs, which
+usually means the community doesn't answer as `community@VLAN` or the SNMPv3 group lacks `context vlan- match prefix`.
+
 ### Wi-Fi: which access point (0.33)
 
 Scanned PCs and the agent now report how they are connected (the adapter the default route uses: **wired** or

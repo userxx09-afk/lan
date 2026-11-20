@@ -43,6 +43,10 @@ IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
 DOT1Q_VLAN_FDBID = "1.3.6.1.2.1.17.7.1.4.2.1.3"     # (timemark, vlan) -> FDB id, to turn Q-BRIDGE FDB ids into VLANs
 DOT1Q_PVID = "1.3.6.1.2.1.17.7.1.4.5.1.1"           # bridge port -> untagged VLAN
 CISCO_VM_VLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"      # ifIndex -> access VLAN (Cisco)
+CISCO_VOICE_VLAN = "1.3.6.1.4.1.9.9.68.1.5.1.1.1"   # ifIndex -> voice VLAN (Cisco), where the phones are
+# dot1dTpFdbStatus / dot1qTpFdbStatus: 1 other, 2 invalid, 3 learned, 4 self, 5 mgmt. Port-security ("sticky") and
+# static MACs on access ports come back as mgmt or other, not learned, so only invalid and self are left out.
+FDB_SKIP = (2, 4)
 LLDP_LOC_PORTID = "1.0.8802.1.1.2.1.3.7.1.3"
 LLDP_LOC_PORTDESC = "1.0.8802.1.1.2.1.3.7.1.4"
 LLDP_REM_CHASSIS_SUBTYPE = "1.0.8802.1.1.2.1.4.1.1.4"
@@ -234,35 +238,62 @@ async def poll_device(ip: str, cfg: dict) -> dict:
         status = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS)}
         for idx, port in await s.walk(DOT1D_FDB_PORT):
             ifi = to_ifindex(int(port), baseport)
-            if status.get(idx, 3) == 3 and ifi is not None:
+            if status.get(idx, 3) not in FDB_SKIP and ifi is not None:
                 fdb.append((norm_mac(bytes(idx[:6]).hex()), ifi, None))
         method = "BRIDGE-MIB" if fdb else ""
-    if vendor == "Cisco":
-        # Cisco IOS / IOS-XE only expose BRIDGE-MIB per VLAN (community@vlan, or SNMPv3 context vlan-N). The plain
-        # community answers for VLAN 1 alone, which is usually empty or just the switch itself, so always walk
-        # every active VLAN. Some IOS-XE releases also answer Q-BRIDGE-MIB, but only for VLAN 1 (the uplinks and the
-        # odd VLAN 1 device), so a Q-BRIDGE answer must not stop the per-VLAN walk: merge both.
-        vlans = [i[1] for i, v in await s.walk(CISCO_VTP_VLAN_STATE) if int(v) == 1 and i[1] not in range(1002, 1006)]
-        qbridge = len(fdb)
-        seen: set[tuple[str, int]] = {(m, i) for m, i, _ in fdb}
-        for vlan in vlans or [None]:
-            bp = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX, vlan)} if vlan else baseport
-            st = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS, vlan)}
-            for idx, port in await s.walk(DOT1D_FDB_PORT, vlan):
-                mac, ifi = norm_mac(bytes(idx[:6]).hex()), to_ifindex(int(port), bp)
-                if mac and ifi is not None and st.get(idx, 3) == 3 and (mac, ifi) not in seen:
-                    seen.add((mac, ifi))
-                    fdb.append((mac, ifi, vlan))
-        method = f"Cisco per-VLAN BRIDGE-MIB ({len(vlans)} VLANs)" if vlans else "BRIDGE-MIB (no VLAN list from VTP-MIB)"
-        if qbridge:
-            method += f" + Q-BRIDGE-MIB ({qbridge})"
 
     port_vlan: dict[int, int] = {}
     for i, v in await s.walk(DOT1Q_PVID):
         if i[0] in baseport and int(v):
             port_vlan[baseport[i[0]]] = int(v)
-    for i, v in await s.walk(CISCO_VM_VLAN):
-        port_vlan.setdefault(i[0], int(v))
+    access_vlan = {i[0]: int(v) for i, v in await s.walk(CISCO_VM_VLAN)} if vendor == "Cisco" else {}
+    for ifi, v in access_vlan.items():
+        port_vlan.setdefault(ifi, v)
+
+    vlan_note = ""
+    if vendor == "Cisco":
+        # Cisco IOS / IOS-XE only expose BRIDGE-MIB per VLAN (community@vlan, or SNMPv3 context vlan-N). The plain
+        # community answers for VLAN 1 alone (mostly the trunks), so walk every VLAN. Some IOS-XE releases also
+        # answer Q-BRIDGE-MIB, but only for VLAN 1, so merge both. The VLAN list comes from VTP-MIB plus the access
+        # and voice VLANs configured on the ports, so a VLAN missing from VTP (transparent mode, or a view that
+        # hides VTP-MIB) is still read.
+        vtp = [i[1] for i, v in await s.walk(CISCO_VTP_VLAN_STATE) if int(v) == 1]
+        voice = [int(v) for _, v in await s.walk(CISCO_VOICE_VLAN)]
+        vlans = sorted({v for v in [*vtp, *access_vlan.values(), *voice, *port_vlan.values()]
+                        if 1 <= v <= 4094 and v not in range(1002, 1006)})
+        qbridge = len(fdb)
+        seen: set[tuple[str, int]] = {(m, i) for m, i, _ in fdb}
+        per_vlan: dict[int, dict[int, tuple[str, int]]] = {}
+        bridge_ports: dict[int, int] = dict(baseport)   # bridge port numbers are switch-wide on Cisco
+        for vlan in vlans or [None]:
+            bp = {i[0]: int(v) for i, v in await s.walk(BASEPORT_IFINDEX, vlan)} if vlan else baseport
+            bridge_ports.update(bp)
+            st = {i: int(v) for i, v in await s.walk(DOT1D_FDB_STATUS, vlan)}
+            per_vlan[vlan] = {idx: (norm_mac(bytes(idx[:6]).hex()), int(port))
+                              for idx, port in await s.walk(DOT1D_FDB_PORT, vlan) if st.get(idx, 3) not in FDB_SKIP}
+        unmapped, empty = 0, []
+        for vlan, rows in per_vlan.items():
+            if not rows and vlan not in (None, 1):          # VLAN 1 is often just the trunks
+                empty.append(vlan)
+            for mac, port in rows.values():
+                # a VLAN whose base-port table didn't come back still maps through the other VLANs' tables;
+                # never guess that a Cisco bridge port number is an ifIndex (ifIndex 1 is usually Vlan1)
+                ifi = bridge_ports.get(port)
+                if not mac or ifi is None:
+                    unmapped += 1
+                    continue
+                if (mac, ifi) not in seen:
+                    seen.add((mac, ifi))
+                    fdb.append((mac, ifi, vlan))
+        method = (f"Cisco per-VLAN BRIDGE-MIB ({len(vlans)} VLANs)" if vlans
+                  else "BRIDGE-MIB (no VLAN list from VTP-MIB or the ports)")
+        if qbridge:
+            method += f" + Q-BRIDGE-MIB ({qbridge})"
+        if empty:
+            vlan_note = (f"no MACs returned for VLAN {', '.join(map(str, empty[:12]))}{' ...' if len(empty) > 12 else ''}"
+                         f" (check the community answers as community@VLAN, or the SNMPv3 group has context vlan-)")
+        if unmapped:
+            vlan_note += ("; " if vlan_note else "") + f"{unmapped} MACs on bridge ports with no interface"
 
     # LLDP numbers ports by lldpLocPortNum, which is the ifIndex on some switches and the bridge port on others.
     # The local port ID/description usually is the interface name, so match on that first.
@@ -331,7 +362,8 @@ async def poll_device(ip: str, cfg: dict) -> dict:
             arp.append((ipaddr, mac))
 
     return dict(sys=sysinfo, names=names, aliases=aliases, speeds=speeds, oper=oper, admin=admin, last_change=last_change,
-                fdb=fdb, neighbors=neighbors, arp=arp, port_vlan=port_vlan, fdb_method=method, errors=s.errors[:20])
+                fdb=fdb, neighbors=neighbors, arp=arp, port_vlan=port_vlan, fdb_method=method, errors=s.errors[:20],
+                vlan_note=vlan_note)
 
 
 def expand_targets(targets: list[str]) -> list[str]:
@@ -390,6 +422,8 @@ def mac_table_note(data: dict) -> str:
     else:
         note = ("no MAC table returned: the switch answered IF-MIB but not Q-BRIDGE-MIB or BRIDGE-MIB. Check the SNMP view "
                 "includes 1.3.6.1.2.1.17; on Cisco with SNMPv3 the group needs 'context vlan- match prefix'")
+    if data.get("vlan_note"):
+        note += f". {data['vlan_note']}"
     if errs:
         note += f". Stopped early: {errs[0]}" + (f" (+{len(errs) - 1} more)" if len(errs) > 1 else "")
     return note[:1000]
