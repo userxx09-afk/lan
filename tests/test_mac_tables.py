@@ -54,6 +54,28 @@ d = asyncio.run(snmp.poll_device("10.88.0.4", {}))
 assert sorted(d["fdb"]) == sorted([(UP, 10101, 1), (A, 10101, 1), (B, 10102, 20), (C, 10103, 30)]), d["fdb"]
 assert d["fdb_method"] == "Cisco per-VLAN BRIDGE-MIB (3 VLANs) + Q-BRIDGE-MIB (2)", d["fdb_method"]
 
+# port-security (sticky) MACs come back as mgmt(5), not learned(3), and must be kept; VLAN 70 isn't in VTP (transparent
+# mode) but is the access VLAN of a port, and VLAN 80 is only a voice VLAN; VLAN 70's base-port table is empty, so its
+# bridge ports map through VLAN 20's (bridge port numbers are switch-wide); VLAN 90 is configured but returns nothing.
+PC, PHONE = "02:c1:00:00:00:70", "02:c1:00:00:00:80"
+WALK.update({
+    (snmp.CISCO_VM_VLAN, None): [((10101,), Integer(20)), ((10102,), Integer(70)), ((10103,), Integer(90))],
+    (snmp.CISCO_VOICE_VLAN, None): [((10102,), Integer(80))],
+    (snmp.DOT1D_FDB_PORT, 70): [(mac_idx(PC), Integer(2))],
+    (snmp.DOT1D_FDB_STATUS, 70): [(mac_idx(PC), Integer(5))],
+    (snmp.BASEPORT_IFINDEX, 80): [((2,), Integer(10102))],
+    (snmp.DOT1D_FDB_PORT, 80): [(mac_idx(PHONE), Integer(2))],
+    (snmp.DOT1D_FDB_STATUS, 80): [(mac_idx(PHONE), Integer(1))],
+})
+d = asyncio.run(snmp.poll_device("10.88.0.5", {}))
+got = {(m, i, v) for m, i, v in d["fdb"]}
+assert (PC, 10102, 70) in got and (PHONE, 10102, 80) in got, d["fdb"]
+assert d["fdb_method"].startswith("Cisco per-VLAN BRIDGE-MIB (6 VLANs)"), d["fdb_method"]
+note = snmp.mac_table_note(d)
+assert "no MACs returned for VLAN 90" in note and "VLAN 1," not in note, note
+for k in [k for k in WALK if k[1] in (70, 80) or k[0] in (snmp.CISCO_VM_VLAN, snmp.CISCO_VOICE_VLAN)]:
+    del WALK[k]
+
 # a switch with BRIDGE-MIB but no dot1dBasePortIfIndex: bridge port numbers are the ifIndexes
 WALK.clear()
 KIND[0] = "other"
